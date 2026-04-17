@@ -20,14 +20,30 @@ use crate::frame::{
 use crate::quant::{CHROMA_QMAT_4444, CHROMA_QMAT_STANDARD, LUMA_QMAT_4444, LUMA_QMAT_STANDARD};
 use crate::slice::{blocks_per_mb, encode_slice, MAX_MBS_PER_SLICE};
 
-/// Default `quant_index`. Multiplied with the per-block matrix entry.
-/// A value of `4` gives roughly Standard-profile quality on the
-/// built-in matrix; drop to `2` for HQ-ish, raise to `8` for Proxy.
+/// Default `quant_index` used for 422 Standard. Lower = higher quality.
 pub const DEFAULT_QUANT_INDEX: u8 = 4;
 
 const MB_WIDTH_PX: usize = 16;
 const MB_HEIGHT_PX: usize = 16;
 const SLICE_MB_WIDTH_LOG2: u8 = 3; // 2^3 = 8 MBs per slice
+
+/// Pick a profile from `bit_rate` when the caller expresses a target
+/// rate, else fall back to Standard / 4444 depending on chroma.
+///
+/// The mapping is a rough proportional match to Apple's published
+/// 1080p29.97 targets (Proxy 45, LT 102, Std 147, HQ 220, 4444 330,
+/// 4444 XQ 500 Mbps) scaled to a picked breakpoint.
+fn pick_profile(chroma: ChromaFormat, bit_rate: Option<u64>) -> Profile {
+    match (chroma, bit_rate) {
+        (ChromaFormat::Y422, Some(br)) if br <= 70_000_000 => Profile::Proxy,
+        (ChromaFormat::Y422, Some(br)) if br <= 125_000_000 => Profile::Lt,
+        (ChromaFormat::Y422, Some(br)) if br <= 180_000_000 => Profile::Standard,
+        (ChromaFormat::Y422, Some(_)) => Profile::Hq,
+        (ChromaFormat::Y422, None) => Profile::Standard,
+        (ChromaFormat::Y444, Some(br)) if br >= 400_000_000 => Profile::Prores4444Xq,
+        (ChromaFormat::Y444, _) => Profile::Prores4444,
+    }
+}
 
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let width = params
@@ -38,15 +54,16 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         .ok_or_else(|| Error::invalid("prores encoder: missing height"))?;
     let pix = params.pixel_format.unwrap_or(PixelFormat::Yuv422P);
 
-    let (chroma, profile) = match pix {
-        PixelFormat::Yuv422P => (ChromaFormat::Y422, Profile::Standard),
-        PixelFormat::Yuv444P => (ChromaFormat::Y444, Profile::Prores4444),
+    let chroma = match pix {
+        PixelFormat::Yuv422P => ChromaFormat::Y422,
+        PixelFormat::Yuv444P => ChromaFormat::Y444,
         other => {
             return Err(Error::unsupported(format!(
                 "prores encoder: pixel format {other:?} not supported (only Yuv422P / Yuv444P)"
             )));
         }
     };
+    let profile = pick_profile(chroma, params.bit_rate);
 
     let mut output_params = params.clone();
     output_params.media_type = MediaType::Video;
@@ -55,9 +72,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     output_params.height = Some(height);
     output_params.pixel_format = Some(pix);
 
-    // Derive a quant index. If the caller set `bit_rate` we just take
-    // the default — per-profile bitrate targets aren't modelled yet.
-    let quant_index = DEFAULT_QUANT_INDEX;
+    let quant_index = profile.default_quant_index();
 
     Ok(Box::new(ProResEncoder {
         output_params,
@@ -177,10 +192,23 @@ pub fn encode_frame(
         ChromaFormat::Y444 => width,
     };
 
-    let (luma_qmat, chroma_qmat) = match chroma {
-        ChromaFormat::Y422 => (&LUMA_QMAT_STANDARD, &CHROMA_QMAT_STANDARD),
-        ChromaFormat::Y444 => (&LUMA_QMAT_4444, &CHROMA_QMAT_4444),
+    // Profile selects the Q matrix: Standard/Proxy/LT share the RDD 36
+    // table; HQ and both 4444 tiers use the flatter all-4 matrix and
+    // rely on `quant_index` for rate control.
+    let (luma_qmat, chroma_qmat) = match profile {
+        Profile::Hq | Profile::Prores4444 | Profile::Prores4444Xq => {
+            (&LUMA_QMAT_4444, &CHROMA_QMAT_4444)
+        }
+        Profile::Proxy | Profile::Lt | Profile::Standard => {
+            (&LUMA_QMAT_STANDARD, &CHROMA_QMAT_STANDARD)
+        }
     };
+    // Enforce the chroma/profile invariant.
+    if profile.chroma_format() != chroma {
+        return Err(Error::invalid(
+            "prores encoder: profile chroma_format does not match requested chroma",
+        ));
+    }
 
     let mbs_x = width.div_ceil(MB_WIDTH_PX);
     let mbs_y = height.div_ceil(MB_HEIGHT_PX);

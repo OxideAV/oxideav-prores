@@ -86,13 +86,27 @@ impl ChromaFormat {
 }
 
 /// Profile discriminator stored in the frame header.
+///
+/// Numeric codes follow SMPTE RDD 36 Annex C (profile-id field in the
+/// decode-order header). They are preserved on the wire so a
+/// round-trip reports the exact profile that was encoded.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Profile {
+    /// ProRes 422 Proxy (`apco`).
     Proxy = 0,
+    /// ProRes 422 LT (`apcs`).
     Lt = 1,
+    /// ProRes 422 Standard (`apcn`).
     Standard = 2,
-    /// ProRes 4444 (4:4:4 chroma, no alpha in this implementation).
-    Prores4444 = 3,
+    /// ProRes 422 HQ (`apch`).
+    Hq = 3,
+    /// ProRes 4444 (4:4:4 chroma, `ap4h`). No alpha plane in this
+    /// implementation — the core pixel-format enum does not yet carry
+    /// `Yuva444P`, so the A' plane of RDD 36 Annex B is not emitted.
+    Prores4444 = 4,
+    /// ProRes 4444 XQ (`ap4x`). Same bitstream shape as 4444 but
+    /// targets the highest quality tier (quant index 1).
+    Prores4444Xq = 5,
 }
 
 impl Profile {
@@ -101,9 +115,11 @@ impl Profile {
             0 => Ok(Self::Proxy),
             1 => Ok(Self::Lt),
             2 => Ok(Self::Standard),
-            3 => Ok(Self::Prores4444),
+            3 => Ok(Self::Hq),
+            4 => Ok(Self::Prores4444),
+            5 => Ok(Self::Prores4444Xq),
             other => Err(Error::unsupported(format!(
-                "prores: profile code {other} not supported (only 422 Proxy/LT/Standard + 4444)"
+                "prores: profile code {other} not supported"
             ))),
         }
     }
@@ -111,25 +127,36 @@ impl Profile {
     /// Macroblock-FourCC for this profile as would appear in a `.mov`
     /// `VisualSampleEntry`. Informational — the header stores a
     /// numeric code.
-    ///
-    /// `Prores4444` returns `apch` (4444 without alpha). The `ap4h`
-    /// FourCC (4444 XQ, higher bitrate but same bitstream structure)
-    /// is not a separate profile here; picking `apch` for correctness
-    /// since this implementation targets standard 4444 quality.
     pub fn fourcc(self) -> &'static [u8; 4] {
         match self {
             Profile::Proxy => b"apco",
             Profile::Lt => b"apcs",
             Profile::Standard => b"apcn",
-            Profile::Prores4444 => b"apch",
+            Profile::Hq => b"apch",
+            Profile::Prores4444 => b"ap4h",
+            Profile::Prores4444Xq => b"ap4x",
         }
     }
 
     /// Native chroma format for this profile.
     pub fn chroma_format(self) -> ChromaFormat {
         match self {
-            Profile::Proxy | Profile::Lt | Profile::Standard => ChromaFormat::Y422,
-            Profile::Prores4444 => ChromaFormat::Y444,
+            Profile::Proxy | Profile::Lt | Profile::Standard | Profile::Hq => ChromaFormat::Y422,
+            Profile::Prores4444 | Profile::Prores4444Xq => ChromaFormat::Y444,
+        }
+    }
+
+    /// Default quant index for this profile. Lower index → higher
+    /// quality + larger packets. Used when the caller does not
+    /// override via `bit_rate`.
+    pub fn default_quant_index(self) -> u8 {
+        match self {
+            Profile::Proxy => 8,
+            Profile::Lt => 6,
+            Profile::Standard => 4,
+            Profile::Hq => 2,
+            Profile::Prores4444 => 2,
+            Profile::Prores4444Xq => 1,
         }
     }
 }
@@ -300,8 +327,32 @@ mod tests {
         let (hdr, _rest) = parse_frame_header(&out).unwrap();
         assert_eq!(hdr.chroma_format, ChromaFormat::Y444);
         assert_eq!(hdr.profile, Profile::Prores4444);
-        assert_eq!(hdr.profile.fourcc(), b"apch");
+        assert_eq!(hdr.profile.fourcc(), b"ap4h");
         assert_eq!(hdr.profile.chroma_format(), ChromaFormat::Y444);
+    }
+
+    #[test]
+    fn profile_fourccs() {
+        assert_eq!(Profile::Proxy.fourcc(), b"apco");
+        assert_eq!(Profile::Lt.fourcc(), b"apcs");
+        assert_eq!(Profile::Standard.fourcc(), b"apcn");
+        assert_eq!(Profile::Hq.fourcc(), b"apch");
+        assert_eq!(Profile::Prores4444.fourcc(), b"ap4h");
+        assert_eq!(Profile::Prores4444Xq.fourcc(), b"ap4x");
+    }
+
+    #[test]
+    fn profile_code_roundtrip() {
+        for p in [
+            Profile::Proxy,
+            Profile::Lt,
+            Profile::Standard,
+            Profile::Hq,
+            Profile::Prores4444,
+            Profile::Prores4444Xq,
+        ] {
+            assert_eq!(Profile::from_code(p as u8).unwrap(), p);
+        }
     }
 
     #[test]

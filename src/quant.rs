@@ -1,17 +1,20 @@
-//! Quantisation matrices for ProRes 422 profiles.
+//! Quantisation matrices for ProRes 422 and 4444 profiles.
 //!
 //! SMPTE RDD 36 table 7 defines per-profile luma / chroma quantisation
 //! matrices. The HQ profile's matrices are all-4 (essentially
 //! untouched), Standard uses the tables below, and Proxy/LT use the
 //! same Standard matrices scaled up by a profile-wide quant index.
 //!
-//! For this minimal implementation we hard-code the **Standard**
-//! profile's two matrices and expose a single `quant_index` that
-//! scales them multiplicatively. That maps cleanly onto:
+//! This module hard-codes the **Standard** 422 matrices and a flat
+//! all-4 HQ/4444 matrix, and exposes a per-profile `quant_index` that
+//! scales them multiplicatively. Rough mapping:
 //!
-//! * Proxy   — quant index around 8 (very coarse)
-//! * LT      — quant index around 4-6
-//! * Standard — quant index 2-4 (default = 4)
+//! * Proxy          — quant index ~8 (very coarse, ~45 Mbps)
+//! * LT             — quant index ~6 (~102 Mbps)
+//! * Standard       — quant index ~4 (~147 Mbps)
+//! * HQ             — quant index ~2 (~220 Mbps)
+//! * 4444           — quant index ~2 (~330 Mbps, higher due to full chroma)
+//! * 4444 XQ        — quant index ~1 (~500 Mbps, highest quality)
 //!
 //! Values are from RDD 36 Annex A, 8x8 natural (row-major) order.
 
