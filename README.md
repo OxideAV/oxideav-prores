@@ -10,9 +10,9 @@ wrappers, no `*-sys` crates.
 
 ```toml
 [dependencies]
-oxideav-prores = "0.0.1"
+oxideav-prores = "0.0"
 ```
 
 ## License
 
-MIT — see [LICENSE](https://github.com/OxideAV/oxideav-workspace/blob/master/LICENSE).
+MIT — see [LICENSE](LICENSE).

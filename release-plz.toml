@@ -1,0 +1,8 @@
+# release-plz config — https://release-plz.dev/docs/config
+
+[workspace]
+changelog_path = "./CHANGELOG.md"
+allow_dirty = false
+
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
