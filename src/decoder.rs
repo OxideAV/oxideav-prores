@@ -1,8 +1,9 @@
-//! ProRes 422 decoder (Proxy / LT / Standard).
+//! ProRes decoder (422 Proxy / LT / Standard + 4444).
 //!
 //! Wire format: see `frame.rs` for the frame/picture header layout
 //! and `slice.rs` for the per-slice entropy format. This module glues
-//! them together into a `VideoFrame` of `PixelFormat::Yuv422P`.
+//! them together into a `VideoFrame` of `PixelFormat::Yuv422P` or
+//! `PixelFormat::Yuv444P` depending on the frame header's chroma_format.
 
 use oxideav_codec::Decoder;
 use oxideav_core::frame::VideoPlane;
@@ -11,11 +12,11 @@ use oxideav_core::{
 };
 
 use crate::dct::idct8x8;
-use crate::frame::{parse_frame_header, parse_picture_header};
-use crate::slice::{decode_slice, BLOCKS_PER_MB};
+use crate::frame::{parse_frame_header, parse_picture_header, ChromaFormat};
+use crate::slice::{blocks_per_mb, decode_slice};
 
-const MB_WIDTH_PX: usize = 16; // 4:2:2 luma MB spans 16 px wide (2 blocks)
-const MB_HEIGHT_PX: usize = 16; // and 16 px tall (2 blocks)
+const MB_WIDTH_PX: usize = 16;
+const MB_HEIGHT_PX: usize = 16;
 
 pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     Ok(Box::new(ProResDecoder {
@@ -99,13 +100,27 @@ pub fn decode_packet(data: &[u8], pts: Option<i64>, time_base: TimeBase) -> Resu
     }
     let mut cursor = &after_pic[sizes_bytes..];
 
-    // Allocate planes (aligned to MB grid — we'll crop on output).
+    // Per-chroma-format plane geometry.
+    let chroma = fh.chroma_format;
+    let per_mb = blocks_per_mb(chroma);
     let padded_w = mbs_x * MB_WIDTH_PX;
     let padded_h = mbs_y * MB_HEIGHT_PX;
-    let padded_c_w = padded_w / 2;
+    let padded_c_w = match chroma {
+        ChromaFormat::Y422 => padded_w / 2,
+        ChromaFormat::Y444 => padded_w,
+    };
     let mut y_plane = vec![0u8; padded_w * padded_h];
     let mut cb_plane = vec![0u8; padded_c_w * padded_h];
     let mut cr_plane = vec![0u8; padded_c_w * padded_h];
+
+    // Luma block offsets inside an MB (in 8-px units).
+    const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    // Chroma block offsets: stacked 2 for 4:2:2, same 2x2 as luma for 4:4:4.
+    let chroma_offsets: &[(usize, usize)] = match chroma {
+        ChromaFormat::Y422 => &[(0, 0), (0, 1)],
+        ChromaFormat::Y444 => &LUMA_OFFSETS,
+    };
+    let chroma_blocks_per_mb = chroma_offsets.len();
 
     let mut slice_idx = 0usize;
     for my in 0..mbs_y {
@@ -119,7 +134,7 @@ pub fn decode_packet(data: &[u8], pts: Option<i64>, time_base: TimeBase) -> Resu
             cursor = &cursor[slice_bytes..];
             slice_idx += 1;
 
-            let decoded = decode_slice(slice_data)?;
+            let decoded = decode_slice(slice_data, chroma)?;
             let expected_mbs_this_slice = slice_mb_width.min(mbs_x - mx);
             if decoded.mb_count as usize != expected_mbs_this_slice {
                 return Err(Error::invalid(format!(
@@ -131,9 +146,9 @@ pub fn decode_packet(data: &[u8], pts: Option<i64>, time_base: TimeBase) -> Resu
             // Dequant + IDCT + paste.
             for mb_within in 0..decoded.mb_count as usize {
                 let mb_x = mx + mb_within;
-                let base = mb_within * BLOCKS_PER_MB;
-                // 4 luma blocks — positions within MB: (0,0), (1,0), (0,1), (1,1)
-                for (i, (bx, by)) in [(0, 0), (1, 0), (0, 1), (1, 1)].iter().enumerate() {
+                let base = mb_within * per_mb;
+                // 4 luma blocks.
+                for (i, (bx, by)) in LUMA_OFFSETS.iter().enumerate() {
                     let mut blk_f = dequant_to_f32(
                         &decoded.blocks[base + i],
                         &fh.luma_qmat,
@@ -148,37 +163,37 @@ pub fn decode_packet(data: &[u8], pts: Option<i64>, time_base: TimeBase) -> Resu
                         &blk_f,
                     );
                 }
-                // 2 Cb blocks — stacked vertically: (0,0), (0,1); chroma MB is 8x16
-                for (i, by) in [0usize, 1].iter().enumerate() {
+                // Cb blocks.
+                for (i, (bx, by)) in chroma_offsets.iter().enumerate() {
                     let mut blk_f = dequant_to_f32(
                         &decoded.blocks[base + 4 + i],
                         &fh.chroma_qmat,
                         decoded.quant_index,
                     );
                     idct8x8(&mut blk_f);
-                    paste_block(
-                        &mut cb_plane,
-                        padded_c_w,
-                        mb_x * 8,
-                        my * MB_HEIGHT_PX + by * 8,
-                        &blk_f,
-                    );
+                    let (x0, y0) = match chroma {
+                        ChromaFormat::Y422 => (mb_x * 8, my * MB_HEIGHT_PX + by * 8),
+                        ChromaFormat::Y444 => {
+                            (mb_x * MB_WIDTH_PX + bx * 8, my * MB_HEIGHT_PX + by * 8)
+                        }
+                    };
+                    paste_block(&mut cb_plane, padded_c_w, x0, y0, &blk_f);
                 }
-                // 2 Cr blocks — same layout as Cb.
-                for (i, by) in [0usize, 1].iter().enumerate() {
+                // Cr blocks.
+                for (i, (bx, by)) in chroma_offsets.iter().enumerate() {
                     let mut blk_f = dequant_to_f32(
-                        &decoded.blocks[base + 6 + i],
+                        &decoded.blocks[base + 4 + chroma_blocks_per_mb + i],
                         &fh.chroma_qmat,
                         decoded.quant_index,
                     );
                     idct8x8(&mut blk_f);
-                    paste_block(
-                        &mut cr_plane,
-                        padded_c_w,
-                        mb_x * 8,
-                        my * MB_HEIGHT_PX + by * 8,
-                        &blk_f,
-                    );
+                    let (x0, y0) = match chroma {
+                        ChromaFormat::Y422 => (mb_x * 8, my * MB_HEIGHT_PX + by * 8),
+                        ChromaFormat::Y444 => {
+                            (mb_x * MB_WIDTH_PX + bx * 8, my * MB_HEIGHT_PX + by * 8)
+                        }
+                    };
+                    paste_block(&mut cr_plane, padded_c_w, x0, y0, &blk_f);
                 }
             }
 
@@ -187,13 +202,16 @@ pub fn decode_packet(data: &[u8], pts: Option<i64>, time_base: TimeBase) -> Resu
     }
 
     // Crop padded buffers back to the declared picture size.
-    let c_w = width.div_ceil(2);
+    let (c_w, out_pix) = match chroma {
+        ChromaFormat::Y422 => (width.div_ceil(2), PixelFormat::Yuv422P),
+        ChromaFormat::Y444 => (width, PixelFormat::Yuv444P),
+    };
     let y_cropped = crop_plane(&y_plane, padded_w, width, height);
     let cb_cropped = crop_plane(&cb_plane, padded_c_w, c_w, height);
     let cr_cropped = crop_plane(&cr_plane, padded_c_w, c_w, height);
 
     Ok(VideoFrame {
-        format: PixelFormat::Yuv422P,
+        format: out_pix,
         width: width as u32,
         height: height as u32,
         pts,

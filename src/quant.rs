@@ -39,6 +39,41 @@ pub const CHROMA_QMAT_STANDARD: [u8; 64] = [
     7, 7, 9, 10, 11, 14, 17, 21,
 ];
 
+/// Luma quantisation matrix for 4444 Standard quality (SMPTE RDD 36 Annex B).
+///
+/// The 4444 profile targets higher quality than 422 Standard, so the
+/// matrix is closer to flat (all small values). In the absence of the
+/// verbatim RDD 36 bytes we use the conservative "HQ-like" all-4 matrix
+/// which is valid (any matrix encoded into the frame header is honoured
+/// by the decoder round-trip). If bit-exact RDD 36 compatibility with
+/// third-party ProRes files becomes a goal, these values will need to
+/// be updated.
+pub const LUMA_QMAT_4444: [u8; 64] = [
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4,
+];
+
+/// Chroma quantisation matrix for 4444 Standard quality.
+///
+/// Same caveat as [`LUMA_QMAT_4444`] — flat matrix chosen so that
+/// encode/decode round-trip matches without a spec-verbatim table.
+pub const CHROMA_QMAT_4444: [u8; 64] = [
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4,
+];
+
 /// ProRes 8x8 zig-zag scan order (from top-left, diagonal sweep).
 /// Natural-order index at zig-zag position `k` is `ZIGZAG[k]`.
 pub const ZIGZAG: [u8; 64] = [
@@ -70,5 +105,7 @@ mod tests {
     fn matrices_are_8x8() {
         assert_eq!(LUMA_QMAT_STANDARD.len(), 64);
         assert_eq!(CHROMA_QMAT_STANDARD.len(), 64);
+        assert_eq!(LUMA_QMAT_4444.len(), 64);
+        assert_eq!(CHROMA_QMAT_4444.len(), 64);
     }
 }

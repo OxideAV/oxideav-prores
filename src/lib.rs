@@ -1,12 +1,12 @@
 // Parallel-array index loops are idiomatic in codec/DCT code; skip the lint.
 #![allow(clippy::needless_range_loop)]
 
-//! Apple ProRes 422 codec — minimal pure-Rust decoder + encoder.
+//! Apple ProRes codec — minimal pure-Rust decoder + encoder.
 //!
 //! Scope: **ProRes 422 Proxy / LT / Standard** for 4:2:2 Y'CbCr 8-bit
-//! input (`PixelFormat::Yuv422P`). HQ, 4444, and 4444 XQ are out of
-//! scope for this baseline and will be rejected at encoder construction
-//! time.
+//! input (`PixelFormat::Yuv422P`), plus **ProRes 4444** (without alpha)
+//! for 4:4:4 Y'CbCr 8-bit input (`PixelFormat::Yuv444P`). HQ and 4444
+//! XQ are not separate profiles here; alpha is not currently carried.
 //!
 //! The wire format follows SMPTE RDD 36 structurally (frame header
 //! with `icpf` magic, picture header, per-slice table, slices holding
@@ -41,12 +41,13 @@ use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
 /// Public codec id.
 pub const CODEC_ID_STR: &str = "prores";
 
-/// Register the ProRes 422 decoder + encoder.
+/// Register the ProRes decoder + encoder (422 Proxy/LT/Standard + 4444).
 pub fn register(reg: &mut CodecRegistry) {
-    let caps = CodecCapabilities::video("prores_422_sw")
+    let caps = CodecCapabilities::video("prores_sw")
         .with_lossy(true)
         .with_intra_only(true)
-        .with_pixel_format(PixelFormat::Yuv422P);
+        .with_pixel_format(PixelFormat::Yuv422P)
+        .with_pixel_format(PixelFormat::Yuv444P);
     reg.register_decoder_impl(
         CodecId::new(CODEC_ID_STR),
         caps.clone(),
@@ -172,5 +173,89 @@ mod tests {
         register(&mut reg);
         assert!(reg.has_decoder(&CodecId::new(CODEC_ID_STR)));
         assert!(reg.has_encoder(&CodecId::new(CODEC_ID_STR)));
+    }
+
+    /// Build a 64x48 gradient in Yuv444P (chroma at full luma resolution).
+    fn synthetic_gradient_444(width: u32, height: u32) -> VideoFrame {
+        let w = width as usize;
+        let h = height as usize;
+        let mut y = vec![0u8; w * h];
+        let mut cb = vec![0u8; w * h];
+        let mut cr = vec![0u8; w * h];
+        for j in 0..h {
+            for i in 0..w {
+                y[j * w + i] = ((i + j) * 255 / (w + h)).min(255) as u8;
+                cb[j * w + i] = (128 + ((i as i32 - w as i32 / 2) * 2).clamp(-64, 64)) as u8;
+                cr[j * w + i] = (128 + ((j as i32 - h as i32 / 2) * 2).clamp(-64, 64)) as u8;
+            }
+        }
+        VideoFrame {
+            format: PixelFormat::Yuv444P,
+            width,
+            height,
+            pts: Some(0),
+            time_base: TimeBase::new(1, 30),
+            planes: vec![
+                VideoPlane { stride: w, data: y },
+                VideoPlane {
+                    stride: w,
+                    data: cb,
+                },
+                VideoPlane {
+                    stride: w,
+                    data: cr,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn encoder_decoder_roundtrip_psnr_4444() {
+        let width = 64u32;
+        let height = 48u32;
+        let original = synthetic_gradient_444(width, height);
+
+        let mut enc_params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        enc_params.media_type = MediaType::Video;
+        enc_params.width = Some(width);
+        enc_params.height = Some(height);
+        enc_params.pixel_format = Some(PixelFormat::Yuv444P);
+
+        let mut reg = oxideav_codec::CodecRegistry::new();
+        register(&mut reg);
+        let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
+        encoder
+            .send_frame(&Frame::Video(original.clone()))
+            .expect("send_frame");
+        let pkt = encoder.receive_packet().expect("receive_packet");
+
+        let dec_params = enc_params.clone();
+        let mut decoder = reg.make_decoder(&dec_params).expect("make_decoder");
+        decoder.send_packet(&pkt).expect("send_packet");
+        let frame = decoder.receive_frame().expect("receive_frame");
+        let decoded = match frame {
+            Frame::Video(v) => v,
+            _ => panic!("expected video frame"),
+        };
+
+        assert_eq!(decoded.format, PixelFormat::Yuv444P);
+        assert_eq!(decoded.width, width);
+        assert_eq!(decoded.height, height);
+        assert_eq!(decoded.planes.len(), 3);
+
+        for (i, (o, d)) in original
+            .planes
+            .iter()
+            .zip(decoded.planes.iter())
+            .enumerate()
+        {
+            assert_eq!(o.data.len(), d.data.len(), "plane {i} size mismatch");
+            let p = psnr(&o.data, &d.data);
+            assert!(
+                p > 30.0,
+                "4444 plane {i} PSNR too low: {p:.2} dB (want > 30)"
+            );
+            eprintln!("4444 plane {i} PSNR = {p:.2} dB");
+        }
     }
 }

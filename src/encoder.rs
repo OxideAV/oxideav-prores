@@ -1,8 +1,8 @@
-//! ProRes 422 encoder (Proxy / LT / Standard).
+//! ProRes encoder (422 Proxy / LT / Standard + 4444).
 //!
-//! Reads a `Yuv422P` `VideoFrame`, walks 16x16 macroblocks, forward
-//! DCTs each 8x8 block, quantises by `qmat * quant_index`, and emits
-//! the frame/picture/slice container defined in `frame.rs`.
+//! Reads a `Yuv422P` or `Yuv444P` `VideoFrame`, walks 16x16 macroblocks,
+//! forward DCTs each 8x8 block, quantises by `qmat * quant_index`, and
+//! emits the frame/picture/slice container defined in `frame.rs`.
 
 use std::collections::VecDeque;
 
@@ -14,10 +14,11 @@ use oxideav_core::{
 
 use crate::dct::fdct8x8;
 use crate::frame::{
-    write_frame_header, write_picture_header, Profile, FRAME_HDR_SIZE, PICTURE_HDR_SIZE,
+    write_frame_header, write_picture_header, ChromaFormat, Profile, FRAME_HDR_SIZE,
+    PICTURE_HDR_SIZE,
 };
-use crate::quant::{CHROMA_QMAT_STANDARD, LUMA_QMAT_STANDARD};
-use crate::slice::{encode_slice, BLOCKS_PER_MB, MAX_MBS_PER_SLICE};
+use crate::quant::{CHROMA_QMAT_4444, CHROMA_QMAT_STANDARD, LUMA_QMAT_4444, LUMA_QMAT_STANDARD};
+use crate::slice::{blocks_per_mb, encode_slice, MAX_MBS_PER_SLICE};
 
 /// Default `quant_index`. Multiplied with the per-block matrix entry.
 /// A value of `4` gives roughly Standard-profile quality on the
@@ -36,11 +37,16 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         .height
         .ok_or_else(|| Error::invalid("prores encoder: missing height"))?;
     let pix = params.pixel_format.unwrap_or(PixelFormat::Yuv422P);
-    if pix != PixelFormat::Yuv422P {
-        return Err(Error::unsupported(format!(
-            "prores encoder: pixel format {pix:?} not supported (only Yuv422P)"
-        )));
-    }
+
+    let (chroma, profile) = match pix {
+        PixelFormat::Yuv422P => (ChromaFormat::Y422, Profile::Standard),
+        PixelFormat::Yuv444P => (ChromaFormat::Y444, Profile::Prores4444),
+        other => {
+            return Err(Error::unsupported(format!(
+                "prores encoder: pixel format {other:?} not supported (only Yuv422P / Yuv444P)"
+            )));
+        }
+    };
 
     let mut output_params = params.clone();
     output_params.media_type = MediaType::Video;
@@ -48,12 +54,6 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     output_params.width = Some(width);
     output_params.height = Some(height);
     output_params.pixel_format = Some(pix);
-
-    // Map codec `bit_rate`/hints to a profile. Without any hint we
-    // default to Standard. (4444 / HQ are explicitly out-of-scope for
-    // this baseline implementation — reject below so users get a
-    // clear error instead of silent data loss.)
-    let profile = Profile::Standard;
 
     // Derive a quant index. If the caller set `bit_rate` we just take
     // the default — per-profile bitrate targets aren't modelled yet.
@@ -63,6 +63,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         output_params,
         width,
         height,
+        chroma,
         profile,
         quant_index,
         time_base: params
@@ -77,6 +78,7 @@ struct ProResEncoder {
     output_params: CodecParameters,
     width: u32,
     height: u32,
+    chroma: ChromaFormat,
     profile: Profile,
     quant_index: u8,
     time_base: TimeBase,
@@ -101,13 +103,17 @@ impl Encoder for ProResEncoder {
                         "prores encoder: frame dimensions do not match encoder config",
                     ));
                 }
-                if v.format != PixelFormat::Yuv422P {
+                let expected_pix = match self.chroma {
+                    ChromaFormat::Y422 => PixelFormat::Yuv422P,
+                    ChromaFormat::Y444 => PixelFormat::Yuv444P,
+                };
+                if v.format != expected_pix {
                     return Err(Error::invalid(format!(
-                        "prores encoder: frame format {:?} is not Yuv422P",
-                        v.format
+                        "prores encoder: frame format {:?} does not match configured {:?}",
+                        v.format, expected_pix
                     )));
                 }
-                let data = encode_frame_422(v, self.profile, self.quant_index)?;
+                let data = encode_frame(v, self.chroma, self.profile, self.quant_index)?;
                 let mut pkt = Packet::new(0, self.time_base, data);
                 pkt.pts = v.pts;
                 pkt.dts = v.pts;
@@ -129,23 +135,70 @@ impl Encoder for ProResEncoder {
     }
 }
 
-/// Encode a single 4:2:2 picture to a complete ProRes packet.
+/// Back-compat wrapper that encodes a 4:2:2 frame with the same API
+/// shape as the pre-4444 implementation.
 pub fn encode_frame_422(frame: &VideoFrame, profile: Profile, quant_index: u8) -> Result<Vec<u8>> {
     if frame.format != PixelFormat::Yuv422P {
         return Err(Error::unsupported("prores encoder: Yuv422P only"));
+    }
+    encode_frame(frame, ChromaFormat::Y422, profile, quant_index)
+}
+
+/// Encode a single picture (4:2:2 or 4:4:4) to a complete ProRes packet.
+pub fn encode_frame(
+    frame: &VideoFrame,
+    chroma: ChromaFormat,
+    profile: Profile,
+    quant_index: u8,
+) -> Result<Vec<u8>> {
+    match chroma {
+        ChromaFormat::Y422 => {
+            if frame.format != PixelFormat::Yuv422P {
+                return Err(Error::unsupported(
+                    "prores encoder: Y422 chroma format requires Yuv422P",
+                ));
+            }
+        }
+        ChromaFormat::Y444 => {
+            if frame.format != PixelFormat::Yuv444P {
+                return Err(Error::unsupported(
+                    "prores encoder: Y444 chroma format requires Yuv444P",
+                ));
+            }
+        }
     }
     if frame.planes.len() != 3 {
         return Err(Error::invalid("prores encoder: expected 3 planes"));
     }
     let width = frame.width as usize;
     let height = frame.height as usize;
-    let c_w = width.div_ceil(2);
+    let c_w = match chroma {
+        ChromaFormat::Y422 => width.div_ceil(2),
+        ChromaFormat::Y444 => width,
+    };
+
+    let (luma_qmat, chroma_qmat) = match chroma {
+        ChromaFormat::Y422 => (&LUMA_QMAT_STANDARD, &CHROMA_QMAT_STANDARD),
+        ChromaFormat::Y444 => (&LUMA_QMAT_4444, &CHROMA_QMAT_4444),
+    };
 
     let mbs_x = width.div_ceil(MB_WIDTH_PX);
     let mbs_y = height.div_ceil(MB_HEIGHT_PX);
     let slice_mb_width = 1usize << SLICE_MB_WIDTH_LOG2;
     let slices_per_row = mbs_x.div_ceil(slice_mb_width);
     let slice_count = slices_per_row * mbs_y;
+    let per_mb = blocks_per_mb(chroma);
+
+    // 4 luma blocks per MB always live at these (bx,by) offsets (in 8-px units).
+    const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+
+    // Chroma block layout inside a 16x16 MB:
+    // * 4:2:2 — 2 blocks stacked vertically at x=0 (chroma is 8px wide per MB).
+    // * 4:4:4 — 4 blocks in the same 2x2 layout as luma (chroma is full-res).
+    let chroma_offsets: &[(usize, usize)] = match chroma {
+        ChromaFormat::Y422 => &[(0, 0), (0, 1)],
+        ChromaFormat::Y444 => &LUMA_OFFSETS,
+    };
 
     // Build each slice payload.
     let mut slice_payloads: Vec<Vec<u8>> = Vec::with_capacity(slice_count);
@@ -154,11 +207,11 @@ pub fn encode_frame_422(frame: &VideoFrame, profile: Profile, quant_index: u8) -
         while mx < mbs_x {
             let remaining = mbs_x - mx;
             let mbs_this_slice = remaining.min(MAX_MBS_PER_SLICE).min(slice_mb_width);
-            let mut blocks: Vec<[i32; 64]> = Vec::with_capacity(mbs_this_slice * BLOCKS_PER_MB);
+            let mut blocks: Vec<[i32; 64]> = Vec::with_capacity(mbs_this_slice * per_mb);
             for mb_within in 0..mbs_this_slice {
                 let mb_x = mx + mb_within;
                 // 4 luma blocks.
-                for (bx, by) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                for (bx, by) in LUMA_OFFSETS {
                     let x0 = mb_x * MB_WIDTH_PX + bx * 8;
                     let y0 = my * MB_HEIGHT_PX + by * 8;
                     blocks.push(encode_block(
@@ -168,15 +221,19 @@ pub fn encode_frame_422(frame: &VideoFrame, profile: Profile, quant_index: u8) -
                         height,
                         x0,
                         y0,
-                        &LUMA_QMAT_STANDARD,
+                        luma_qmat,
                         quant_index,
                     ));
                 }
-                // 2 Cb blocks, then 2 Cr blocks.
+                // Chroma blocks: Cb then Cr.
                 for plane_idx in [1usize, 2] {
-                    for by in [0usize, 1] {
-                        let x0 = mb_x * 8;
-                        let y0 = my * MB_HEIGHT_PX + by * 8;
+                    for (bx, by) in chroma_offsets.iter().copied() {
+                        let (x0, y0) = match chroma {
+                            ChromaFormat::Y422 => (mb_x * 8, my * MB_HEIGHT_PX + by * 8),
+                            ChromaFormat::Y444 => {
+                                (mb_x * MB_WIDTH_PX + bx * 8, my * MB_HEIGHT_PX + by * 8)
+                            }
+                        };
                         blocks.push(encode_block(
                             &frame.planes[plane_idx].data,
                             frame.planes[plane_idx].stride,
@@ -184,13 +241,13 @@ pub fn encode_frame_422(frame: &VideoFrame, profile: Profile, quant_index: u8) -
                             height,
                             x0,
                             y0,
-                            &CHROMA_QMAT_STANDARD,
+                            chroma_qmat,
                             quant_index,
                         ));
                     }
                 }
             }
-            let payload = encode_slice(mbs_this_slice as u8, quant_index, &blocks)?;
+            let payload = encode_slice(mbs_this_slice as u8, quant_index, chroma, &blocks)?;
             slice_payloads.push(payload);
             mx += mbs_this_slice;
         }
@@ -215,9 +272,10 @@ pub fn encode_frame_422(frame: &VideoFrame, profile: Profile, quant_index: u8) -
         &mut out,
         frame.width as u16,
         frame.height as u16,
+        chroma,
         profile,
-        &LUMA_QMAT_STANDARD,
-        &CHROMA_QMAT_STANDARD,
+        luma_qmat,
+        chroma_qmat,
         total_frame_size,
     );
     write_picture_header(

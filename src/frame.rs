@@ -19,11 +19,12 @@
 //! | 12     | 4    | creator id = b"oxav"            |
 //! | 16     | 2    | width (BE u16)                  |
 //! | 18     | 2    | height (BE u16)                 |
-//! | 20     | 1    | chroma_fmt = 2 (4:2:2)          |
+//! | 20     | 1    | chroma_fmt (2 = 4:2:2, 3 = 4:4:4) |
 //! | 21     | 1    | flags (bit0 = load_luma_qmat,   |
 //! |        |      |        bit1 = load_chroma_qmat) |
 //! | 22     | 1    | profile_code (0=Proxy, 1=LT,    |
-//! |        |      |               2=Standard)       |
+//! |        |      |               2=Standard,       |
+//! |        |      |               3=4444)           |
 //! | 23     | 1    | reserved = 0                    |
 //! | 24     | 64   | luma_qmat (natural order)       |
 //! | 88     | 64   | chroma_qmat (natural order)     |
@@ -49,9 +50,40 @@ pub const FRAME_HDR_SIZE: usize = 152;
 pub const PICTURE_HDR_SIZE: usize = 8;
 
 pub const CHROMA_FMT_422: u8 = 2;
+pub const CHROMA_FMT_444: u8 = 3;
 
 pub const FLAG_LOAD_LUMA_QMAT: u8 = 1 << 0;
 pub const FLAG_LOAD_CHROMA_QMAT: u8 = 1 << 1;
+
+/// Chroma sampling format for a ProRes picture.
+///
+/// * [`ChromaFormat::Y422`] — 4:2:2 (chroma at half luma width, full luma height).
+/// * [`ChromaFormat::Y444`] — 4:4:4 (chroma planes at full luma resolution,
+///   the 4444 profile family).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ChromaFormat {
+    Y422,
+    Y444,
+}
+
+impl ChromaFormat {
+    pub fn from_code(c: u8) -> Result<Self> {
+        match c {
+            CHROMA_FMT_422 => Ok(Self::Y422),
+            CHROMA_FMT_444 => Ok(Self::Y444),
+            other => Err(Error::unsupported(format!(
+                "prores: chroma_format {other} not supported"
+            ))),
+        }
+    }
+
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Y422 => CHROMA_FMT_422,
+            Self::Y444 => CHROMA_FMT_444,
+        }
+    }
+}
 
 /// Profile discriminator stored in the frame header.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -59,6 +91,8 @@ pub enum Profile {
     Proxy = 0,
     Lt = 1,
     Standard = 2,
+    /// ProRes 4444 (4:4:4 chroma, no alpha in this implementation).
+    Prores4444 = 3,
 }
 
 impl Profile {
@@ -67,8 +101,9 @@ impl Profile {
             0 => Ok(Self::Proxy),
             1 => Ok(Self::Lt),
             2 => Ok(Self::Standard),
+            3 => Ok(Self::Prores4444),
             other => Err(Error::unsupported(format!(
-                "prores: profile code {other} not supported (only 422 Proxy/LT/Standard)"
+                "prores: profile code {other} not supported (only 422 Proxy/LT/Standard + 4444)"
             ))),
         }
     }
@@ -76,11 +111,25 @@ impl Profile {
     /// Macroblock-FourCC for this profile as would appear in a `.mov`
     /// `VisualSampleEntry`. Informational — the header stores a
     /// numeric code.
+    ///
+    /// `Prores4444` returns `apch` (4444 without alpha). The `ap4h`
+    /// FourCC (4444 XQ, higher bitrate but same bitstream structure)
+    /// is not a separate profile here; picking `apch` for correctness
+    /// since this implementation targets standard 4444 quality.
     pub fn fourcc(self) -> &'static [u8; 4] {
         match self {
             Profile::Proxy => b"apco",
             Profile::Lt => b"apcs",
             Profile::Standard => b"apcn",
+            Profile::Prores4444 => b"apch",
+        }
+    }
+
+    /// Native chroma format for this profile.
+    pub fn chroma_format(self) -> ChromaFormat {
+        match self {
+            Profile::Proxy | Profile::Lt | Profile::Standard => ChromaFormat::Y422,
+            Profile::Prores4444 => ChromaFormat::Y444,
         }
     }
 }
@@ -90,15 +139,18 @@ pub struct FrameHeader {
     pub frame_size: u32,
     pub width: u16,
     pub height: u16,
+    pub chroma_format: ChromaFormat,
     pub profile: Profile,
     pub luma_qmat: [u8; 64],
     pub chroma_qmat: [u8; 64],
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn write_frame_header(
     out: &mut Vec<u8>,
     width: u16,
     height: u16,
+    chroma_format: ChromaFormat,
     profile: Profile,
     luma_qmat: &[u8; 64],
     chroma_qmat: &[u8; 64],
@@ -111,7 +163,7 @@ pub fn write_frame_header(
     out.extend_from_slice(CREATOR);
     out.extend_from_slice(&width.to_be_bytes());
     out.extend_from_slice(&height.to_be_bytes());
-    out.push(CHROMA_FMT_422);
+    out.push(chroma_format.code());
     out.push(FLAG_LOAD_LUMA_QMAT | FLAG_LOAD_CHROMA_QMAT);
     out.push(profile as u8);
     out.push(0); // reserved
@@ -134,11 +186,7 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
     }
     let width = u16::from_be_bytes(data[16..18].try_into().unwrap());
     let height = u16::from_be_bytes(data[18..20].try_into().unwrap());
-    if data[20] != CHROMA_FMT_422 {
-        return Err(Error::unsupported(
-            "prores: only 4:2:2 chroma format is supported",
-        ));
-    }
+    let chroma_format = ChromaFormat::from_code(data[20])?;
     let flags = data[21];
     let profile = Profile::from_code(data[22])?;
     if flags & FLAG_LOAD_LUMA_QMAT == 0 || flags & FLAG_LOAD_CHROMA_QMAT == 0 {
@@ -155,6 +203,7 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
             frame_size,
             width,
             height,
+            chroma_format,
             profile,
             luma_qmat,
             chroma_qmat,
@@ -212,15 +261,47 @@ mod tests {
             *c = i as u8;
         }
         let mut out = Vec::new();
-        write_frame_header(&mut out, 1920, 1080, Profile::Standard, &luma, &chroma, 200);
+        write_frame_header(
+            &mut out,
+            1920,
+            1080,
+            ChromaFormat::Y422,
+            Profile::Standard,
+            &luma,
+            &chroma,
+            200,
+        );
         assert_eq!(out.len(), FRAME_HDR_SIZE);
         let (hdr, rest) = parse_frame_header(&out).unwrap();
         assert_eq!(hdr.width, 1920);
         assert_eq!(hdr.height, 1080);
+        assert_eq!(hdr.chroma_format, ChromaFormat::Y422);
         assert_eq!(hdr.profile, Profile::Standard);
         assert_eq!(hdr.luma_qmat, luma);
         assert_eq!(hdr.chroma_qmat, chroma);
         assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn frame_header_roundtrip_4444() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let mut out = Vec::new();
+        write_frame_header(
+            &mut out,
+            1920,
+            1080,
+            ChromaFormat::Y444,
+            Profile::Prores4444,
+            &luma,
+            &chroma,
+            200,
+        );
+        let (hdr, _rest) = parse_frame_header(&out).unwrap();
+        assert_eq!(hdr.chroma_format, ChromaFormat::Y444);
+        assert_eq!(hdr.profile, Profile::Prores4444);
+        assert_eq!(hdr.profile.fourcc(), b"apch");
+        assert_eq!(hdr.profile.chroma_format(), ChromaFormat::Y444);
     }
 
     #[test]
