@@ -3,19 +3,24 @@
 
 //! Apple ProRes codec — minimal pure-Rust decoder + encoder.
 //!
-//! Scope: **ProRes 422 Proxy / LT / Standard** for 4:2:2 Y'CbCr 8-bit
-//! input (`PixelFormat::Yuv422P`), plus **ProRes 4444** (without alpha)
-//! for 4:4:4 Y'CbCr 8-bit input (`PixelFormat::Yuv444P`). HQ and 4444
-//! XQ are not separate profiles here; alpha is not currently carried.
+//! Scope: all six ProRes video profiles, selected via
+//! `CodecParameters::bit_rate` and `pixel_format`:
+//!
+//! * 422 Proxy / LT / Standard / HQ for 4:2:2 Y'CbCr 8-bit
+//!   (`PixelFormat::Yuv422P`, fourccs `apco`/`apcs`/`apcn`/`apch`).
+//! * 4444 + 4444 XQ for 4:4:4 Y'CbCr 8-bit (`PixelFormat::Yuv444P`,
+//!   fourccs `ap4h`/`ap4x`). The alpha plane of RDD 36 Annex B is
+//!   not carried — the core pixel-format enum does not yet include
+//!   `Yuva444P`, so the A' coding layer is skipped.
 //!
 //! The wire format follows SMPTE RDD 36 structurally (frame header
 //! with `icpf` magic, picture header, per-slice table, slices holding
-//! 8x8 DCT coefficients for 4 luma + 2 Cb + 2 Cr blocks per
-//! macroblock) but uses a simplified entropy layer (unsigned /
-//! signed exp-Golomb on zig-zag-scanned coefficients) that is
-//! internally round-trip-exact but **not** bit-compatible with Apple
-//! ProRes in the wild. See the module docs of [`bitstream`] and
-//! [`slice`] for the deviation.
+//! 8x8 DCT coefficients for 4 luma + 2 Cb + 2 Cr blocks per MB in
+//! 4:2:2, or 4 Y + 4 Cb + 4 Cr blocks per MB in 4:4:4) but uses a
+//! simplified entropy layer (unsigned / signed exp-Golomb on
+//! zig-zag-scanned coefficients) that is internally round-trip-exact
+//! but **not** bit-compatible with Apple ProRes in the wild. See the
+//! module docs of [`bitstream`] and [`slice`] for the deviation.
 //!
 //! ### Module layout
 //!
@@ -41,7 +46,8 @@ use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
 /// Public codec id.
 pub const CODEC_ID_STR: &str = "prores";
 
-/// Register the ProRes decoder + encoder (422 Proxy/LT/Standard + 4444).
+/// Register the ProRes decoder + encoder for all six profiles
+/// (422 Proxy/LT/Standard/HQ and 4444 / 4444 XQ).
 pub fn register(reg: &mut CodecRegistry) {
     let caps = CodecCapabilities::video("prores_sw")
         .with_lossy(true)

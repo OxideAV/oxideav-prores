@@ -1,35 +1,81 @@
 # oxideav-prores
 
-Pure-Rust Apple ProRes codec — decoder + encoder for **ProRes 422
-Proxy / LT / Standard** and **ProRes 4444** (without alpha).
+Pure-Rust **Apple ProRes** codec — decoder + encoder for all six
+ProRes video profiles (422 Proxy / LT / Standard / HQ and 4444 /
+4444 XQ). 8-bit Y'CbCr only; alpha not currently carried.
 
-Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework — a
-100% pure Rust media transcoding and streaming stack. No C libraries, no FFI
-wrappers, no `*-sys` crates.
+Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace)
+framework but usable standalone. No C libraries, no FFI wrappers, no
+`*-sys` crates.
 
 ## Status
 
-| Profile           | FourCC | Input pixel format | State   |
-|-------------------|--------|--------------------|---------|
-| 422 Proxy         | `apco` | `Yuv422P` 8-bit    | decode + encode |
-| 422 LT            | `apcs` | `Yuv422P` 8-bit    | decode + encode |
-| 422 Standard      | `apcn` | `Yuv422P` 8-bit    | decode + encode |
-| 4444              | `apch` | `Yuv444P` 8-bit    | decode + encode (no alpha) |
-| 4444 XQ (`ap4h`)  | —      | —                  | not yet |
+| Profile        | FourCC | Input pixel format | State           |
+|----------------|--------|--------------------|-----------------|
+| 422 Proxy      | `apco` | `Yuv422P` 8-bit    | decode + encode |
+| 422 LT         | `apcs` | `Yuv422P` 8-bit    | decode + encode |
+| 422 Standard   | `apcn` | `Yuv422P` 8-bit    | decode + encode |
+| 422 HQ         | `apch` | `Yuv422P` 8-bit    | decode + encode |
+| 4444           | `ap4h` | `Yuv444P` 8-bit    | decode + encode (no alpha) |
+| 4444 XQ        | `ap4x` | `Yuv444P` 8-bit    | decode + encode (no alpha) |
 
-Alpha-plane carriage (`Yuva444P` → 4:4:4:4) is not implemented; the
-4444 support is YUV-only. The wire format is RDD 36-structural (frame
-header with `icpf` magic, picture header, slice table) but uses a
-simplified exp-Golomb entropy layer, so streams are round-trip-exact
-with this crate but not bit-compatible with third-party ProRes
-decoders.
+The 4444 and 4444 XQ profiles share the same bitstream structure as
+4444 — XQ is selected when the caller requests the highest quality
+tier and produces a larger packet at lower quantisation. Alpha-plane
+carriage (RDD 36 A' coding, a `Yuva444P` pixel format) is not
+implemented; the core `PixelFormat` enum does not yet carry a 4:4:4:4
+variant.
+
+The wire format is RDD 36-structural (frame header with `icpf` magic,
+picture header, slice table, per-MB 8x8 DCT blocks) but the entropy
+layer is a simplified exp-Golomb coding on zig-zag-scanned
+coefficients. Streams are round-trip-exact with this crate but **not**
+bit-compatible with Apple ProRes decoders.
 
 ## Usage
 
 ```toml
 [dependencies]
+oxideav-core = "0.0"
+oxideav-codec = "0.0"
 oxideav-prores = "0.0"
 ```
+
+### Profile selection
+
+The encoder picks a profile from the combination of `pixel_format` and
+`bit_rate`:
+
+| `pixel_format` | `bit_rate` hint (bps)  | Picked profile |
+|----------------|------------------------|----------------|
+| `Yuv422P`      | `<= 70_000_000`        | Proxy          |
+| `Yuv422P`      | `<= 125_000_000`       | LT             |
+| `Yuv422P`      | `<= 180_000_000` or `None` | Standard   |
+| `Yuv422P`      | `> 180_000_000`        | HQ             |
+| `Yuv444P`      | `>= 400_000_000`       | 4444 XQ        |
+| `Yuv444P`      | anything else          | 4444           |
+
+```rust
+use oxideav_codec::CodecRegistry;
+use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat};
+
+let mut reg = CodecRegistry::new();
+oxideav_prores::register(&mut reg);
+
+let mut params = CodecParameters::video(CodecId::new("prores"));
+params.width = Some(1920);
+params.height = Some(1080);
+params.pixel_format = Some(PixelFormat::Yuv422P);
+params.bit_rate = Some(220_000_000); // -> 422 HQ
+
+let mut enc = reg.make_encoder(&params)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### Codec id
+
+- Codec: `"prores"`; accepted pixel formats `Yuv422P`, `Yuv444P`.
+- Keyframe-only (all ProRes frames are intra).
 
 ## License
 

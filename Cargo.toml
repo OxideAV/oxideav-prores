@@ -6,7 +6,7 @@ rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/OxideAV/oxideav-prores"
 authors = ["Mark Karpeles"]
-description = "Pure-Rust Apple ProRes codec — scaffold (decoder + encoder not yet implemented)"
+description = "Pure-Rust Apple ProRes codec — decoder + encoder for 422 Proxy/LT/Standard/HQ and 4444 / 4444 XQ"
 
 readme = "README.md"
 homepage = "https://github.com/OxideAV/oxideav-prores"
