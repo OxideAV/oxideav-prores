@@ -40,7 +40,7 @@ pub mod frame;
 pub mod quant;
 pub mod slice;
 
-use oxideav_codec::CodecRegistry;
+use oxideav_codec::{CodecInfo, CodecRegistry};
 use oxideav_core::{CodecCapabilities, CodecId, CodecTag, PixelFormat};
 
 /// Public codec id.
@@ -54,18 +54,25 @@ pub fn register(reg: &mut CodecRegistry) {
         .with_intra_only(true)
         .with_pixel_format(PixelFormat::Yuv422P)
         .with_pixel_format(PixelFormat::Yuv444P);
-    let cid = CodecId::new(CODEC_ID_STR);
-    reg.register_decoder_impl(cid.clone(), caps.clone(), decoder::make_decoder);
-    reg.register_encoder_impl(cid.clone(), caps, encoder::make_encoder);
-
     // FourCC claims — ProRes profile FourCCs. Each profile gets its own
     // FourCC at the container level but they all decode through the
-    // same path here. Unambiguous, priority 10.
+    // same path here. Unambiguous.
     //   APCO = 422 Proxy, APCS = 422 LT, APCN = 422 (Standard),
     //   APCH = 422 HQ, AP4H = 4444, AP4X = 4444 XQ.
-    for fcc in &[b"APCO", b"APCS", b"APCN", b"APCH", b"AP4H", b"AP4X"] {
-        reg.claim_tag(cid.clone(), CodecTag::fourcc(fcc), 10, None);
-    }
+    reg.register(
+        CodecInfo::new(CodecId::new(CODEC_ID_STR))
+            .capabilities(caps)
+            .decoder(decoder::make_decoder)
+            .encoder(encoder::make_encoder)
+            .tags([
+                CodecTag::fourcc(b"APCO"),
+                CodecTag::fourcc(b"APCS"),
+                CodecTag::fourcc(b"APCN"),
+                CodecTag::fourcc(b"APCH"),
+                CodecTag::fourcc(b"AP4H"),
+                CodecTag::fourcc(b"AP4X"),
+            ]),
+    );
 }
 
 #[cfg(test)]
