@@ -1,1 +1,5 @@
 /target
+
+# Rust build lockfile — this crate is a library, so we do
+# not commit Cargo.lock. See https://doc.rust-lang.org/cargo/faq.html#why-do-binaries-have-cargolock-in-version-control-but-not-libraries
+Cargo.lock
