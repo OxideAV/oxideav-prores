@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the static and dynamic dispatch paths. Test skips gracefully when
   `ffmpeg` is not on PATH.
 
+### Known limitations
+
+- `SPEC_BLOCKED.md` records that Round 2's planned RDD 36 entropy
+  coder (DC differential + AC run/level with Rice/Golomb-Rice codes)
+  is blocked: the only ProRes PDFs in `docs/video/prores/`
+  (`Apple_ProRes_2022.pdf`, `Apple_ProRes_RAW_2023.pdf`) are marketing
+  whitepapers with no bitstream specification, and workspace policy
+  forbids consulting third-party source. Slice entropy remains the
+  simplified signed exp-Golomb placeholder; real ffmpeg ProRes
+  samples still will not decode at the bitstream layer.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-prores/compare/v0.0.3...v0.0.4) - 2026-04-19
 
 ### Other
