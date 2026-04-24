@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `PRORES_FOURCCS` public constant listing the six canonical MP4/MOV
+  sample-entry FourCCs (`apco`, `apcs`, `apcn`, `apch`, `ap4h`, `ap4x`).
+- `codec_id_for_fourcc()` helper for static fourcc → `CodecId` mapping,
+  used by demuxers that cannot consult a `CodecRegistry`.
+- `profile_for_fourcc()` helper returning the matching `frame::Profile`
+  for a given FourCC.
+- Black-box integration test (`tests/mp4_fourcc_dispatch.rs`) that
+  generates real ProRes `.mov` files with the `ffmpeg` binary (every
+  profile 0..=5) and asserts the FourCC → "prores" mapping via both
+  the static and dynamic dispatch paths. Test skips gracefully when
+  `ffmpeg` is not on PATH.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-prores/compare/v0.0.3...v0.0.4) - 2026-04-19
 
 ### Other

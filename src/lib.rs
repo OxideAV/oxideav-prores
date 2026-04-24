@@ -29,8 +29,22 @@
 //! * [`quant`]     — Hard-coded luma/chroma quant matrices + zig-zag table.
 //! * [`slice`]     — Per-slice pack/unpack of coefficient blocks.
 //! * [`frame`]     — Frame + picture header layouts.
-//! * [`decoder`]   — `Packet -> VideoFrame` (Yuv422P).
-//! * [`encoder`]   — `VideoFrame` (Yuv422P) -> `Packet`.
+//! * [`decoder`]   — `Packet -> VideoFrame` (Yuv422P / Yuv444P).
+//! * [`encoder`]   — `VideoFrame` (Yuv422P / Yuv444P) -> `Packet`.
+//!
+//! ### Container dispatch
+//!
+//! MP4 / MOV demuxers can recognise a ProRes stream in two ways:
+//!
+//! 1. **Dynamic** — call [`register`] on a `CodecRegistry`; the crate
+//!    claims the six profile FourCCs as case-insensitive tags so
+//!    `CodecRegistry::resolve_tag` returns `CodecId::new("prores")`
+//!    for any of them. This is what `oxideav-mp4`'s demuxer does when
+//!    a resolver is plumbed in.
+//! 2. **Static** — call [`codec_id_for_fourcc`] for the same mapping
+//!    without touching a registry. Useful for demuxers that cannot
+//!    consult a resolver (early probing, unit tests). [`PRORES_FOURCCS`]
+//!    enumerates the six canonical lower-case tags.
 
 pub mod bitstream;
 pub mod dct;
@@ -45,6 +59,64 @@ use oxideav_core::{CodecCapabilities, CodecId, CodecTag, PixelFormat};
 
 /// Public codec id.
 pub const CODEC_ID_STR: &str = "prores";
+
+/// All six MP4 / MOV `VisualSampleEntry` FourCCs that identify a
+/// ProRes bitstream. Canonical lower-case spelling as defined by
+/// Apple's ProRes white paper (April 2022):
+///
+/// | fourcc | profile                                     |
+/// |--------|---------------------------------------------|
+/// | apco   | Apple ProRes 422 Proxy                      |
+/// | apcs   | Apple ProRes 422 LT                         |
+/// | apcn   | Apple ProRes 422 (Standard)                 |
+/// | apch   | Apple ProRes 422 HQ                         |
+/// | ap4h   | Apple ProRes 4444                           |
+/// | ap4x   | Apple ProRes 4444 XQ                        |
+///
+/// Container dispatch is case-insensitive in practice (demuxers
+/// upper-case for comparison, some `.mov`s stored them as `APCN`
+/// etc. since QuickTime originally normalised FourCCs), so callers
+/// should compare case-insensitively. This constant gives the
+/// canonical lower-case spelling only.
+pub const PRORES_FOURCCS: [&[u8; 4]; 6] = [b"apco", b"apcs", b"apcn", b"apch", b"ap4h", b"ap4x"];
+
+/// Returns `Some(CodecId::new("prores"))` if `fourcc` (case-insensitive)
+/// is one of the six ProRes MP4/MOV `VisualSampleEntry` FourCCs,
+/// otherwise `None`. Intended as a static fallback for demuxers that
+/// cannot consult a `CodecRegistry` — callers that _do_ have a
+/// registry should just register this crate via [`register`] and
+/// consult `CodecRegistry::resolve_tag`, which already claims the
+/// same six FourCCs as case-insensitive tags.
+pub fn codec_id_for_fourcc(fourcc: &[u8; 4]) -> Option<CodecId> {
+    let mut upper = [0u8; 4];
+    for i in 0..4 {
+        upper[i] = fourcc[i].to_ascii_uppercase();
+    }
+    match &upper {
+        b"APCO" | b"APCS" | b"APCN" | b"APCH" | b"AP4H" | b"AP4X" => {
+            Some(CodecId::new(CODEC_ID_STR))
+        }
+        _ => None,
+    }
+}
+
+/// Returns the matching [`frame::Profile`] for a given MP4/MOV FourCC
+/// (case-insensitive), or `None` for non-ProRes tags.
+pub fn profile_for_fourcc(fourcc: &[u8; 4]) -> Option<frame::Profile> {
+    let mut upper = [0u8; 4];
+    for i in 0..4 {
+        upper[i] = fourcc[i].to_ascii_uppercase();
+    }
+    Some(match &upper {
+        b"APCO" => frame::Profile::Proxy,
+        b"APCS" => frame::Profile::Lt,
+        b"APCN" => frame::Profile::Standard,
+        b"APCH" => frame::Profile::Hq,
+        b"AP4H" => frame::Profile::Prores4444,
+        b"AP4X" => frame::Profile::Prores4444Xq,
+        _ => return None,
+    })
+}
 
 /// Register the ProRes decoder + encoder for all six profiles
 /// (422 Proxy/LT/Standard/HQ and 4444 / 4444 XQ).
@@ -192,6 +264,73 @@ mod tests {
         register(&mut reg);
         assert!(reg.has_decoder(&CodecId::new(CODEC_ID_STR)));
         assert!(reg.has_encoder(&CodecId::new(CODEC_ID_STR)));
+    }
+
+    #[test]
+    fn codec_id_for_fourcc_maps_all_six() {
+        for fc in PRORES_FOURCCS {
+            assert_eq!(codec_id_for_fourcc(fc), Some(CodecId::new(CODEC_ID_STR)));
+        }
+    }
+
+    #[test]
+    fn codec_id_for_fourcc_is_case_insensitive() {
+        assert_eq!(
+            codec_id_for_fourcc(b"APCH"),
+            Some(CodecId::new(CODEC_ID_STR))
+        );
+        assert_eq!(
+            codec_id_for_fourcc(b"apch"),
+            Some(CodecId::new(CODEC_ID_STR))
+        );
+        assert_eq!(
+            codec_id_for_fourcc(b"ApCh"),
+            Some(CodecId::new(CODEC_ID_STR))
+        );
+    }
+
+    #[test]
+    fn codec_id_for_fourcc_rejects_non_prores() {
+        assert_eq!(codec_id_for_fourcc(b"avc1"), None);
+        assert_eq!(codec_id_for_fourcc(b"hvc1"), None);
+        assert_eq!(codec_id_for_fourcc(b"mp4v"), None);
+        // Non-ProRes `a*` tags: close but not ours.
+        assert_eq!(codec_id_for_fourcc(b"alac"), None);
+        assert_eq!(codec_id_for_fourcc(b"av01"), None);
+    }
+
+    #[test]
+    fn profile_for_fourcc_roundtrips_via_profile_fourcc() {
+        for p in [
+            frame::Profile::Proxy,
+            frame::Profile::Lt,
+            frame::Profile::Standard,
+            frame::Profile::Hq,
+            frame::Profile::Prores4444,
+            frame::Profile::Prores4444Xq,
+        ] {
+            let fc = p.fourcc();
+            assert_eq!(profile_for_fourcc(fc), Some(p), "fourcc roundtrip");
+            // Upper-case variant must also map.
+            let mut up = *fc;
+            up.make_ascii_uppercase();
+            assert_eq!(profile_for_fourcc(&up), Some(p));
+        }
+        assert_eq!(profile_for_fourcc(b"mp4v"), None);
+    }
+
+    #[test]
+    fn registry_recognizes_prores_fourcc_tags() {
+        use oxideav_core::stream::{CodecResolver, ProbeContext};
+        use oxideav_core::CodecTag;
+        let mut reg = oxideav_codec::CodecRegistry::new();
+        register(&mut reg);
+        for fc in PRORES_FOURCCS {
+            let tag = CodecTag::fourcc(fc);
+            let ctx = ProbeContext::new(&tag);
+            let id = reg.resolve_tag(&ctx).expect("resolve_tag");
+            assert_eq!(id, CodecId::new(CODEC_ID_STR), "fourcc {fc:?}");
+        }
     }
 
     /// Build a 64x48 gradient in Yuv444P (chroma at full luma resolution).
