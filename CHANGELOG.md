@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-prores/compare/v0.0.4...v0.0.5) - 2026-04-25
+
+### Other
+
+- drop oxideav-codec/oxideav-container shims, import from oxideav-core
+- blocked memo for RDD 36 entropy layer (no spec in docs/)
+- static FourCC -> CodecId helpers + ffmpeg black-box test
+
 ### Added
 
 - `PRORES_FOURCCS` public constant listing the six canonical MP4/MOV
