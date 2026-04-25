@@ -6,3 +6,10 @@ allow_dirty = false
 
 git_tag_name = "v{{ version }}"
 git_release_name = "v{{ version }}"
+
+# Force patch-only bumps until we deliberately cut a 1.0. Without
+# these never-match overrides release-plz will minor-bump on `feat:`
+# commits or whenever cargo-semver-checks reports an API break — and
+# 0.x → 0.y churn cascades through every dependent's version pin.
+custom_major_increment_regex = "^___never_match___"
+custom_minor_increment_regex = "^___never_match___"
