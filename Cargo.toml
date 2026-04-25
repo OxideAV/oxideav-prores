@@ -15,4 +15,3 @@ categories = ["multimedia::encoding", "multimedia::video"]
 
 [dependencies]
 oxideav-core = "0.1"
-oxideav-codec = "0.1"

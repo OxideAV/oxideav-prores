@@ -16,8 +16,8 @@
 
 use std::process::Command;
 
-use oxideav_codec::CodecRegistry;
 use oxideav_core::stream::{CodecResolver, ProbeContext};
+use oxideav_core::CodecRegistry;
 use oxideav_core::{CodecId, CodecTag};
 use oxideav_prores::{codec_id_for_fourcc, profile_for_fourcc, PRORES_FOURCCS};
 
@@ -146,7 +146,8 @@ fn ffmpeg_generated_fourccs_map_to_prores() {
         let mut upper_ex = **expect_fc;
         upper_ex.make_ascii_uppercase();
         assert_eq!(
-            upper_fc, upper_ex,
+            upper_fc,
+            upper_ex,
             "ffmpeg profile {flag} produced fourcc {:?}, expected {:?}",
             std::str::from_utf8(&fc).unwrap_or("?"),
             std::str::from_utf8(*expect_fc).unwrap_or("?"),

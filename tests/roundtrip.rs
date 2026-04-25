@@ -5,8 +5,8 @@
 //! profile must decode to the same dimensions as the source and reach
 //! a reasonable luma PSNR on a smooth synthetic image.
 
-use oxideav_codec::CodecRegistry;
 use oxideav_core::frame::VideoPlane;
+use oxideav_core::CodecRegistry;
 use oxideav_core::{
     CodecId, CodecParameters, Frame, MediaType, PixelFormat, Rational, TimeBase, VideoFrame,
 };

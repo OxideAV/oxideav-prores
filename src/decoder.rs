@@ -5,8 +5,8 @@
 //! them together into a `VideoFrame` of `PixelFormat::Yuv422P` or
 //! `PixelFormat::Yuv444P` depending on the frame header's chroma_format.
 
-use oxideav_codec::Decoder;
 use oxideav_core::frame::VideoPlane;
+use oxideav_core::Decoder;
 use oxideav_core::{
     CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
 };

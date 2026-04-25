@@ -54,8 +54,8 @@ pub mod frame;
 pub mod quant;
 pub mod slice;
 
-use oxideav_codec::{CodecInfo, CodecRegistry};
 use oxideav_core::{CodecCapabilities, CodecId, CodecTag, PixelFormat};
+use oxideav_core::{CodecInfo, CodecRegistry};
 
 /// Public codec id.
 pub const CODEC_ID_STR: &str = "prores";
@@ -223,7 +223,7 @@ mod tests {
         enc_params.height = Some(height);
         enc_params.pixel_format = Some(PixelFormat::Yuv422P);
 
-        let mut reg = oxideav_codec::CodecRegistry::new();
+        let mut reg = oxideav_core::CodecRegistry::new();
         register(&mut reg);
         let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
         encoder
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn decoder_registered() {
-        let mut reg = oxideav_codec::CodecRegistry::new();
+        let mut reg = oxideav_core::CodecRegistry::new();
         register(&mut reg);
         assert!(reg.has_decoder(&CodecId::new(CODEC_ID_STR)));
         assert!(reg.has_encoder(&CodecId::new(CODEC_ID_STR)));
@@ -323,7 +323,7 @@ mod tests {
     fn registry_recognizes_prores_fourcc_tags() {
         use oxideav_core::stream::{CodecResolver, ProbeContext};
         use oxideav_core::CodecTag;
-        let mut reg = oxideav_codec::CodecRegistry::new();
+        let mut reg = oxideav_core::CodecRegistry::new();
         register(&mut reg);
         for fc in PRORES_FOURCCS {
             let tag = CodecTag::fourcc(fc);
@@ -379,7 +379,7 @@ mod tests {
         enc_params.height = Some(height);
         enc_params.pixel_format = Some(PixelFormat::Yuv444P);
 
-        let mut reg = oxideav_codec::CodecRegistry::new();
+        let mut reg = oxideav_core::CodecRegistry::new();
         register(&mut reg);
         let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
         encoder
