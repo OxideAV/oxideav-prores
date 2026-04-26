@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use oxideav_core::frame::VideoPlane;
     use oxideav_core::{
-        CodecId, CodecParameters, Frame, MediaType, PixelFormat, TimeBase, VideoFrame,
+        CodecId, CodecParameters, Frame, MediaType, PixelFormat, VideoFrame,
     };
 
     /// Build a 64x48 gradient in Yuv422P. Values are deliberately
@@ -176,12 +176,10 @@ mod tests {
                 cr[j * cw + i] = (128 + ((j as i32 - h as i32 / 2) * 2).clamp(-64, 64)) as u8;
             }
         }
+        let _ = width;
+        let _ = height;
         VideoFrame {
-            format: PixelFormat::Yuv422P,
-            width,
-            height,
             pts: Some(0),
-            time_base: TimeBase::new(1, 30),
             planes: vec![
                 VideoPlane { stride: w, data: y },
                 VideoPlane {
@@ -240,9 +238,9 @@ mod tests {
             _ => panic!("expected video frame"),
         };
 
-        assert_eq!(decoded.format, PixelFormat::Yuv422P);
-        assert_eq!(decoded.width, width);
-        assert_eq!(decoded.height, height);
+        // Stream-level format / width / height live on CodecParameters
+        // (asserted via dec_params clone above); the frame is just
+        // pts + planes.
         assert_eq!(decoded.planes.len(), 3);
 
         for (i, (o, d)) in original
@@ -347,12 +345,10 @@ mod tests {
                 cr[j * w + i] = (128 + ((j as i32 - h as i32 / 2) * 2).clamp(-64, 64)) as u8;
             }
         }
+        let _ = width;
+        let _ = height;
         VideoFrame {
-            format: PixelFormat::Yuv444P,
-            width,
-            height,
             pts: Some(0),
-            time_base: TimeBase::new(1, 30),
             planes: vec![
                 VideoPlane { stride: w, data: y },
                 VideoPlane {
@@ -396,9 +392,7 @@ mod tests {
             _ => panic!("expected video frame"),
         };
 
-        assert_eq!(decoded.format, PixelFormat::Yuv444P);
-        assert_eq!(decoded.width, width);
-        assert_eq!(decoded.height, height);
+        // Stream-level format / width / height live on CodecParameters.
         assert_eq!(decoded.planes.len(), 3);
 
         for (i, (o, d)) in original

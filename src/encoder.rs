@@ -113,22 +113,17 @@ impl Encoder for ProResEncoder {
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         match frame {
             Frame::Video(v) => {
-                if v.width != self.width || v.height != self.height {
-                    return Err(Error::invalid(
-                        "prores encoder: frame dimensions do not match encoder config",
-                    ));
-                }
-                let expected_pix = match self.chroma {
-                    ChromaFormat::Y422 => PixelFormat::Yuv422P,
-                    ChromaFormat::Y444 => PixelFormat::Yuv444P,
-                };
-                if v.format != expected_pix {
-                    return Err(Error::invalid(format!(
-                        "prores encoder: frame format {:?} does not match configured {:?}",
-                        v.format, expected_pix
-                    )));
-                }
-                let data = encode_frame(v, self.chroma, self.profile, self.quant_index)?;
+                // Stream-level format / dimensions come from the
+                // CodecParameters captured at make_encoder; the frame
+                // just carries pts + planes.
+                let data = encode_frame(
+                    v,
+                    self.width,
+                    self.height,
+                    self.chroma,
+                    self.profile,
+                    self.quant_index,
+                )?;
                 let mut pkt = Packet::new(0, self.time_base, data);
                 pkt.pts = v.pts;
                 pkt.dts = v.pts;
@@ -151,42 +146,42 @@ impl Encoder for ProResEncoder {
 }
 
 /// Back-compat wrapper that encodes a 4:2:2 frame with the same API
-/// shape as the pre-4444 implementation.
-pub fn encode_frame_422(frame: &VideoFrame, profile: Profile, quant_index: u8) -> Result<Vec<u8>> {
-    if frame.format != PixelFormat::Yuv422P {
-        return Err(Error::unsupported("prores encoder: Yuv422P only"));
-    }
-    encode_frame(frame, ChromaFormat::Y422, profile, quant_index)
+/// shape as the pre-4444 implementation. The caller supplies the
+/// dimensions because the slim [`VideoFrame`] no longer carries them.
+pub fn encode_frame_422(
+    frame: &VideoFrame,
+    width: u32,
+    height: u32,
+    profile: Profile,
+    quant_index: u8,
+) -> Result<Vec<u8>> {
+    encode_frame(
+        frame,
+        width,
+        height,
+        ChromaFormat::Y422,
+        profile,
+        quant_index,
+    )
 }
 
 /// Encode a single picture (4:2:2 or 4:4:4) to a complete ProRes packet.
+/// Width / height / chroma layout come from the caller's
+/// [`oxideav_core::CodecParameters`] — they're no longer carried per
+/// frame.
 pub fn encode_frame(
     frame: &VideoFrame,
+    img_w: u32,
+    img_h: u32,
     chroma: ChromaFormat,
     profile: Profile,
     quant_index: u8,
 ) -> Result<Vec<u8>> {
-    match chroma {
-        ChromaFormat::Y422 => {
-            if frame.format != PixelFormat::Yuv422P {
-                return Err(Error::unsupported(
-                    "prores encoder: Y422 chroma format requires Yuv422P",
-                ));
-            }
-        }
-        ChromaFormat::Y444 => {
-            if frame.format != PixelFormat::Yuv444P {
-                return Err(Error::unsupported(
-                    "prores encoder: Y444 chroma format requires Yuv444P",
-                ));
-            }
-        }
-    }
     if frame.planes.len() != 3 {
         return Err(Error::invalid("prores encoder: expected 3 planes"));
     }
-    let width = frame.width as usize;
-    let height = frame.height as usize;
+    let width = img_w as usize;
+    let height = img_h as usize;
     let c_w = match chroma {
         ChromaFormat::Y422 => width.div_ceil(2),
         ChromaFormat::Y444 => width,
@@ -298,8 +293,8 @@ pub fn encode_frame(
     let mut out = Vec::with_capacity(total_frame_size as usize);
     write_frame_header(
         &mut out,
-        frame.width as u16,
-        frame.height as u16,
+        img_w as u16,
+        img_h as u16,
         chroma,
         profile,
         luma_qmat,

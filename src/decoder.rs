@@ -8,7 +8,7 @@
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::Decoder;
 use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
+    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, VideoFrame,
 };
 
 use crate::dct::idct8x8;
@@ -55,7 +55,7 @@ impl Decoder for ProResDecoder {
                 Err(Error::NeedMore)
             };
         };
-        let vf = decode_packet(&pkt.data, pkt.pts, pkt.time_base)?;
+        let vf = decode_packet(&pkt.data, pkt.pts)?;
         Ok(Frame::Video(vf))
     }
 
@@ -65,7 +65,7 @@ impl Decoder for ProResDecoder {
     }
 }
 
-pub fn decode_packet(data: &[u8], pts: Option<i64>, time_base: TimeBase) -> Result<VideoFrame> {
+pub fn decode_packet(data: &[u8], pts: Option<i64>) -> Result<VideoFrame> {
     let (fh, after_frame) = parse_frame_header(data)?;
     let (ph, after_pic) = parse_picture_header(after_frame)?;
 
@@ -210,12 +210,11 @@ pub fn decode_packet(data: &[u8], pts: Option<i64>, time_base: TimeBase) -> Resu
     let cb_cropped = crop_plane(&cb_plane, padded_c_w, c_w, height);
     let cr_cropped = crop_plane(&cr_plane, padded_c_w, c_w, height);
 
+    // out_pix conveys the chroma format to the caller via the stream's
+    // CodecParameters — it's no longer carried per-frame.
+    let _ = out_pix;
     Ok(VideoFrame {
-        format: out_pix,
-        width: width as u32,
-        height: height as u32,
         pts,
-        time_base,
         planes: vec![
             VideoPlane {
                 stride: width,
