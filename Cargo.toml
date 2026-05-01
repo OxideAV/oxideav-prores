@@ -14,4 +14,4 @@ keywords = ["multimedia", "video", "prores", "apple", "codec"]
 categories = ["multimedia::encoding", "multimedia::video"]
 
 [dependencies]
-oxideav-core = "0.2"
+oxideav-core = "0.1"

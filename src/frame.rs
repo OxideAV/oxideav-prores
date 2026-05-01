@@ -278,8 +278,9 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
     ))
 }
 
-/// Write a complete frame header (frame_size + 'icpf' + frame_header()).
-/// Returns the number of bytes written.
+/// Write a complete frame header (frame_size + 'icpf' + frame_header())
+/// with `alpha_channel_type` defaulting to 0. Forwards to
+/// [`write_frame_with_alpha`].
 #[allow(clippy::too_many_arguments)]
 pub fn write_frame(
     out: &mut Vec<u8>,
@@ -293,6 +294,42 @@ pub fn write_frame(
     load_luma: bool,
     load_chroma: bool,
 ) {
+    write_frame_with_alpha(
+        out,
+        total_frame_size,
+        width,
+        height,
+        chroma_format,
+        interlace_mode,
+        luma_qmat,
+        chroma_qmat,
+        load_luma,
+        load_chroma,
+        0,
+    )
+}
+
+/// Write a complete frame header with an explicit `alpha_channel_type`
+/// code. `alpha_channel_type == 0` means no alpha plane; values 1 and 2
+/// signal 8-bit and 16-bit alpha respectively (see RDD 36 §5.3.3).
+///
+/// When `alpha_channel_type != 0` the bitstream version is forced to 1
+/// (alpha is a v1 feature per §6.4).
+#[allow(clippy::too_many_arguments)]
+pub fn write_frame_with_alpha(
+    out: &mut Vec<u8>,
+    total_frame_size: u32,
+    width: u16,
+    height: u16,
+    chroma_format: ChromaFormat,
+    interlace_mode: u8,
+    luma_qmat: &[u8; 64],
+    chroma_qmat: &[u8; 64],
+    load_luma: bool,
+    load_chroma: bool,
+    alpha_channel_type: u8,
+) {
+    debug_assert!(alpha_channel_type <= 2);
     // frame_size + magic
     out.extend_from_slice(&total_frame_size.to_be_bytes());
     out.extend_from_slice(FRAME_IDENTIFIER);
@@ -300,9 +337,13 @@ pub fn write_frame(
     let fh_size: u16 = 20 + if load_luma { 64 } else { 0 } + if load_chroma { 64 } else { 0 };
     out.extend_from_slice(&fh_size.to_be_bytes());
     out.push(0); // reserved
-    let bitstream_version: u8 = match chroma_format {
-        ChromaFormat::Y422 => 0,
-        ChromaFormat::Y444 => 1,
+    let bitstream_version: u8 = if alpha_channel_type != 0 {
+        1
+    } else {
+        match chroma_format {
+            ChromaFormat::Y422 => 0,
+            ChromaFormat::Y444 => 1,
+        }
     };
     out.push(bitstream_version);
     out.extend_from_slice(ENCODER_IDENTIFIER);
@@ -315,7 +356,7 @@ pub fn write_frame(
     out.push(0); // color_primaries (unspecified)
     out.push(0); // transfer_characteristic
     out.push(0); // matrix_coefficients
-    out.push(0); // reserved(4) + alpha_channel_type(4) = 0 (no alpha)
+    out.push(alpha_channel_type & 0x0F); // reserved(4) + alpha_channel_type(4)
     out.push(0); // reserved (high 8 of the 14)
                  // last byte: 6 reserved bits + load_luma(1) + load_chroma(1)
     let lb = ((load_luma as u8) << 1) | (load_chroma as u8);

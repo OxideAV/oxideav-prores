@@ -27,9 +27,25 @@ fn have_ffmpeg() -> bool {
 }
 
 fn ffmpeg_make_prores_mov(profile_flag: u8, width: u32, height: u32) -> Option<Vec<u8>> {
+    ffmpeg_make_prores_mov_with_pix(profile_flag, width, height, "yuv422p10le", None)
+}
+
+/// `pix_fmt` selects the source/encoder pixel format. `lavfi_input` may
+/// supply a custom lavfi pipeline (e.g. one that produces `yuva444p10le`
+/// for the 4444 + alpha profile); when None, `testsrc` is used directly.
+fn ffmpeg_make_prores_mov_with_pix(
+    profile_flag: u8,
+    width: u32,
+    height: u32,
+    pix_fmt: &str,
+    lavfi_input: Option<&str>,
+) -> Option<Vec<u8>> {
     let tmp = tempdir()?;
-    let out_path = tmp.join(format!("prores_p{profile_flag}_{width}x{height}.mov"));
-    let pix_fmt = "yuv422p10le"; // we exercise apcn / apch only
+    let out_path = tmp.join(format!(
+        "prores_p{profile_flag}_{width}x{height}_{pix_fmt}.mov"
+    ));
+    let default_input = format!("testsrc=size={width}x{height}:rate=1:duration=1");
+    let input = lavfi_input.unwrap_or(&default_input);
     let status = Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -39,7 +55,7 @@ fn ffmpeg_make_prores_mov(profile_flag: u8, width: u32, height: u32) -> Option<V
             "-f",
             "lavfi",
             "-i",
-            &format!("testsrc=size={width}x{height}:rate=1:duration=1"),
+            input,
             "-c:v",
             "prores_ks",
             "-profile:v",
@@ -249,6 +265,199 @@ fn rdd36_decode_apcn_10bit_from_ffmpeg() {
 #[test]
 fn rdd36_decode_apch_10bit_from_ffmpeg() {
     try_decode_10bit(3, 128, 128);
+}
+
+// ────────────────── 12-bit (Yuv422P12Le / Yuv444P12Le) ──────────────────
+
+#[test]
+fn rdd36_decode_apch_12bit_from_ffmpeg() {
+    if !have_ffmpeg() {
+        return;
+    }
+    // ffmpeg encodes apch from a 12-bit source when -pix_fmt yuv422p12le is
+    // requested; this exercises the 12-bit emit path on the decoder side.
+    let Some(mp4) = ffmpeg_make_prores_mov_with_pix(3, 128, 128, "yuv422p12le", None) else {
+        return;
+    };
+    let pkt = extract_prores_packet(&mp4).expect("extract icpf");
+    let frame =
+        decode_packet_with_depth(&pkt, Some(0), Some((BitDepth::Twelve, ChromaFormat::Y422)))
+            .expect("decode 12-bit");
+    assert_eq!(frame.planes.len(), 3);
+    let expected_y = (128 * 128 * 2) as usize;
+    assert_eq!(frame.planes[0].data.len(), expected_y);
+    let mut max_v: u16 = 0;
+    let mut min_v: u16 = u16::MAX;
+    for chunk in frame.planes[0].data.chunks_exact(2) {
+        let v = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if v < min_v {
+            min_v = v;
+        }
+        if v > max_v {
+            max_v = v;
+        }
+    }
+    eprintln!("12-bit luma range: {min_v}..{max_v}");
+    assert!(max_v <= 4095, "12-bit luma value out of range: {max_v}");
+    assert!(
+        max_v > 1023,
+        "12-bit luma never exceeds 1023 ({max_v}) — emit path collapsed to 10 bits"
+    );
+}
+
+// ───────────── 4444 + alpha (ap4h) interop ─────────────
+
+/// Build an ap4h fixture with a deterministic alpha plane. The lavfi
+/// `geq` filter computes alpha as `(X + Y) * 256 / (W + H)` so the
+/// alpha gradient sweeps the full 8-bit range (0 at top-left, ≈255 at
+/// bottom-right). Determinism matters because ffmpeg's `gradients`
+/// filter is animated per frame and varies between ffmpeg builds.
+fn ffmpeg_make_prores_ap4h_with_alpha_gradient(width: u32, height: u32) -> Option<Vec<u8>> {
+    let tmp = tempdir()?;
+    let out_path = tmp.join(format!("prores_ap4h_a_{width}x{height}.mov"));
+    let pattern = format!("color=c=gray:size={width}x{height}:rate=1:duration=1");
+    // (X + Y) * 256 / (W + H - 2) yields 0..255 across the diagonal.
+    let denom = (width + height - 2).max(1);
+    let geq = format!("geq=lum='(X+Y)*256/{denom}':cb=128:cr=128,format=yuv444p");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &pattern,
+            "-filter_complex",
+            &format!("[0:v]{geq}[a];[0:v][a]alphamerge,format=yuva444p10le"),
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            "4",
+            "-frames:v",
+            "1",
+            out_path.to_str()?,
+        ])
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    std::fs::read(&out_path).ok()
+}
+
+/// Decode an ap4h ProRes 4444 stream produced by ffmpeg with a uniform
+/// fully-opaque alpha plane. The decoded frame must have FOUR planes
+/// (Y, Cb, Cr, A) and the alpha plane must be at the maximum value (the
+/// 12-bit equivalent of 0xFFFF, which is 4095).
+#[test]
+fn rdd36_decode_ap4h_with_alpha_from_ffmpeg() {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping ap4h interop test");
+        return;
+    }
+    // testsrc + format=yuva444p10le → fully-opaque alpha plane. This
+    // exercises the long-run alpha codeword (single value repeated for
+    // the entire 128×128 frame).
+    let lavfi = "testsrc=size=128x128:rate=1:duration=1,format=yuva444p10le";
+    let Some(mp4) = ffmpeg_make_prores_mov_with_pix(4, 128, 128, "yuva444p10le", Some(lavfi))
+    else {
+        eprintln!("ffmpeg prores_ks ap4h unavailable, skipping");
+        return;
+    };
+    let pkt = extract_prores_packet(&mp4).expect("extract icpf");
+    eprintln!("ap4h packet: {} bytes", pkt.len());
+
+    // ffmpeg emits ap4h at 12-bit YUV (regardless of the 10-bit source)
+    // with 16-bit alpha. Request 12-bit YUV output; alpha lands in the
+    // 4th plane at 12-bit too.
+    let frame =
+        decode_packet_with_depth(&pkt, Some(0), Some((BitDepth::Twelve, ChromaFormat::Y444)))
+            .unwrap_or_else(|e| panic!("decode_packet ap4h failed: {e:?}"));
+    assert_eq!(
+        frame.planes.len(),
+        4,
+        "ap4h with alpha must yield 4 planes (Y/Cb/Cr/A)"
+    );
+    let y_bytes = (128 * 128 * 2) as usize;
+    assert_eq!(frame.planes[0].data.len(), y_bytes, "Y plane size");
+    assert_eq!(frame.planes[1].data.len(), y_bytes, "Cb plane size");
+    assert_eq!(frame.planes[2].data.len(), y_bytes, "Cr plane size");
+    assert_eq!(frame.planes[3].data.len(), y_bytes, "Alpha plane size");
+
+    let mut min_a: u16 = u16::MAX;
+    let mut max_a: u16 = 0;
+    for chunk in frame.planes[3].data.chunks_exact(2) {
+        let v = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if v < min_a {
+            min_a = v;
+        }
+        if v > max_a {
+            max_a = v;
+        }
+    }
+    eprintln!("ap4h alpha plane range (12-bit samples): {min_a}..{max_a}");
+    assert!(max_a <= 4095, "12-bit alpha sample out of range: {max_a}");
+    // testsrc → fully-opaque alpha (round((4095*65535)/65535) = 4095).
+    assert_eq!(
+        (min_a, max_a),
+        (4095, 4095),
+        "ap4h opaque-source alpha plane should be uniformly 4095"
+    );
+}
+
+/// Decode an ap4h fixture with a non-trivial alpha gradient. This
+/// exercises the alpha entropy coder's small-magnitude difference path
+/// (Tables 13/14) plus the run codeword for run lengths > 1.
+#[test]
+fn rdd36_decode_ap4h_with_alpha_gradient_from_ffmpeg() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let Some(mp4) = ffmpeg_make_prores_ap4h_with_alpha_gradient(128, 128) else {
+        eprintln!("ffmpeg ap4h+alphamerge unavailable, skipping");
+        return;
+    };
+    let pkt = extract_prores_packet(&mp4).expect("extract icpf");
+    eprintln!("ap4h-alpha-gradient packet: {} bytes", pkt.len());
+
+    let frame =
+        decode_packet_with_depth(&pkt, Some(0), Some((BitDepth::Twelve, ChromaFormat::Y444)))
+            .unwrap_or_else(|e| panic!("decode_packet ap4h-gradient failed: {e:?}"));
+    assert_eq!(frame.planes.len(), 4);
+
+    let alpha = &frame.planes[3].data;
+    let mut min_a: u16 = u16::MAX;
+    let mut max_a: u16 = 0;
+    for chunk in alpha.chunks_exact(2) {
+        let v = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if v < min_a {
+            min_a = v;
+        }
+        if v > max_a {
+            max_a = v;
+        }
+    }
+    eprintln!("ap4h gradient alpha range (12-bit): {min_a}..{max_a}");
+    // The lavfi `gradients` filter produces a non-uniform 16-bit
+    // gradient. Its exact range varies per ffmpeg build/version, so we
+    // settle for a lower bound: a broken entropy decode would yield a
+    // single constant value (range = 0).
+    assert!(
+        (max_a as i32 - min_a as i32) > 100,
+        "ap4h alpha gradient has trivial range ({min_a}..{max_a}) — entropy decode wrong"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for chunk in alpha.chunks_exact(2) {
+        seen.insert(u16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    eprintln!("ap4h gradient alpha distinct values: {}", seen.len());
+    assert!(
+        seen.len() >= 5,
+        "ap4h alpha gradient has only {} distinct values — entropy decode wrong",
+        seen.len()
+    );
 }
 
 /// Same ffmpeg apcn fixture, decoded twice — once at 8-bit, once at

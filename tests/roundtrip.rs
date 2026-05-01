@@ -409,3 +409,210 @@ fn roundtrip_422_10bit_dynamic_range() {
         "decoded 10-bit luma never exceeds 255 — emit path is collapsing to 8 bits"
     );
 }
+
+// ────────────────── 12-bit (Yuv422P12Le / Yuv444P12Le) ──────────────────
+
+fn synthetic_444_12bit(width: u32, height: u32) -> Source {
+    let w = width as usize;
+    let h = height as usize;
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; w * h * 2];
+    let mut cr = vec![0u8; w * h * 2];
+    for j in 0..h {
+        for i in 0..w {
+            // Sweep the full 12-bit range so the round-trip exercises bits 10/11.
+            let v: u16 = ((i * 31 + j * 23) as u16 % 4096).min(4095);
+            let off = (j * w + i) * 2;
+            y[off] = (v & 0xFF) as u8;
+            y[off + 1] = (v >> 8) as u8;
+            let cb_v: u16 = (2048 + ((i as i32 - w as i32 / 2) * 16).clamp(-1024, 1024)) as u16;
+            let cr_v: u16 = (2048 + ((j as i32 - h as i32 / 2) * 16).clamp(-1024, 1024)) as u16;
+            cb[off] = (cb_v & 0xFF) as u8;
+            cb[off + 1] = (cb_v >> 8) as u8;
+            cr[off] = (cr_v & 0xFF) as u8;
+            cr[off + 1] = (cr_v >> 8) as u8;
+        }
+    }
+    Source {
+        frame: VideoFrame {
+            pts: Some(0),
+            planes: vec![
+                VideoPlane {
+                    stride: w * 2,
+                    data: y,
+                },
+                VideoPlane {
+                    stride: w * 2,
+                    data: cb,
+                },
+                VideoPlane {
+                    stride: w * 2,
+                    data: cr,
+                },
+            ],
+        },
+        format: PixelFormat::Yuv444P12Le,
+        width,
+        height,
+    }
+}
+
+/// PSNR over packed-LE u16 samples in `0..=4095`.
+fn psnr_12bit(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a.len() % 2, 0);
+    let mut mse = 0.0f64;
+    let n = a.len() / 2;
+    for i in 0..n {
+        let av = u16::from_le_bytes([a[i * 2], a[i * 2 + 1]]) as f64;
+        let bv = u16::from_le_bytes([b[i * 2], b[i * 2 + 1]]) as f64;
+        let d = av - bv;
+        mse += d * d;
+    }
+    mse /= n as f64;
+    if mse == 0.0 {
+        return 120.0;
+    }
+    10.0 * (4095.0_f64 * 4095.0 / mse).log10()
+}
+
+#[test]
+fn roundtrip_4444_12bit() {
+    let src = synthetic_444_12bit(64, 48);
+    let mut enc_params = CodecParameters::video(CodecId::new(oxideav_prores::CODEC_ID_STR));
+    enc_params.media_type = MediaType::Video;
+    enc_params.width = Some(src.width);
+    enc_params.height = Some(src.height);
+    enc_params.pixel_format = Some(PixelFormat::Yuv444P12Le);
+    enc_params.frame_rate = Some(Rational::new(30, 1));
+
+    let mut reg = CodecRegistry::new();
+    oxideav_prores::register(&mut reg);
+
+    let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
+    encoder
+        .send_frame(&Frame::Video(src.frame.clone()))
+        .expect("send_frame");
+    let pkt = encoder.receive_packet().expect("receive_packet");
+    let mut decoder = reg.make_decoder(&enc_params).expect("make_decoder");
+    decoder.send_packet(&pkt).expect("send_packet");
+    let frame = decoder.receive_frame().expect("receive_frame");
+    let decoded = match frame {
+        Frame::Video(v) => v,
+        _ => panic!("expected video frame"),
+    };
+    assert_eq!(decoded.planes.len(), 3);
+    assert_eq!(decoded.planes[0].stride, (src.width as usize) * 2);
+
+    let p = psnr_12bit(&src.frame.planes[0].data, &decoded.planes[0].data);
+    eprintln!("12-bit 4444 luma PSNR = {p:.2} dB");
+    assert!(p > 32.0, "12-bit 4444 luma PSNR {p:.2} dB under threshold");
+
+    // Confirm the 12-bit emit path actually carries values above the
+    // 10-bit ceiling (1023). A broken path that collapsed to 10-bit
+    // would never produce a sample > 1023.
+    let mut max_v: u16 = 0;
+    for chunk in decoded.planes[0].data.chunks_exact(2) {
+        let v = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if v > max_v {
+            max_v = v;
+        }
+    }
+    assert!(
+        max_v > 1023,
+        "12-bit luma never exceeds 1023 ({max_v}) — emit path collapsed"
+    );
+    assert!(max_v <= 4095, "12-bit luma value out of range: {max_v}");
+}
+
+// ──────────────── 4444 + alpha (Yuv444P + 4th plane) ────────────────
+
+/// 4444 source with an explicit alpha plane appended as the 4th
+/// `VideoPlane`. The decoder treats `alpha_channel_type != 0` as a
+/// signal to populate a 4th output plane; the encoder accepts the same
+/// shape on input.
+fn synthetic_444_with_alpha_8bit(width: u32, height: u32) -> VideoFrame {
+    let w = width as usize;
+    let h = height as usize;
+    let mut y = vec![0u8; w * h];
+    let mut cb = vec![0u8; w * h];
+    let mut cr = vec![0u8; w * h];
+    let mut a = vec![0u8; w * h];
+    for j in 0..h {
+        for i in 0..w {
+            y[j * w + i] = ((i * 3 + j * 2) as u16 % 256) as u8;
+            cb[j * w + i] = (128 + ((i as i32 - w as i32 / 2).clamp(-64, 64))) as u8;
+            cr[j * w + i] = (128 + ((j as i32 - h as i32 / 2).clamp(-64, 64))) as u8;
+            // Smooth diagonal alpha gradient — 0 at (0,0), 255 at (w-1,h-1).
+            let n = (i + j) as u32 * 255 / (w + h - 2) as u32;
+            a[j * w + i] = n as u8;
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane { stride: w, data: y },
+            VideoPlane {
+                stride: w,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w,
+                data: cr,
+            },
+            VideoPlane { stride: w, data: a },
+        ],
+    }
+}
+
+/// Encode a 4444 frame whose 4th plane is alpha, decode it back, and
+/// confirm both the YUV planes and the alpha plane round-trip.
+///
+/// This exercises the full alpha pipeline:
+///   * encoder serialises an `alpha_channel_type=1` frame header
+///   * encoder emits per-slice scanned_alpha() blobs
+///   * decoder parses the alpha blob and produces a 4th plane
+#[test]
+fn roundtrip_4444_with_alpha_8bit() {
+    let frame = synthetic_444_with_alpha_8bit(64, 48);
+
+    // Encode the 4-plane frame as ap4h with 8-bit alpha
+    // (alpha_channel_type=1).
+    let pkt = oxideav_prores::encoder::encode_frame_with_alpha(
+        &frame,
+        64,
+        48,
+        oxideav_prores::frame::ChromaFormat::Y444,
+        oxideav_prores::decoder::BitDepth::Eight,
+        oxideav_prores::frame::Profile::Prores4444,
+        2,
+        Some(oxideav_prores::alpha::AlphaChannelType::Eight),
+    )
+    .expect("encode_frame_with_alpha");
+
+    // Decode at 8-bit.
+    let decoded = oxideav_prores::decoder::decode_packet_with_depth(
+        &pkt,
+        Some(0),
+        Some((
+            oxideav_prores::decoder::BitDepth::Eight,
+            oxideav_prores::frame::ChromaFormat::Y444,
+        )),
+    )
+    .expect("decode_packet_with_depth");
+
+    assert_eq!(decoded.planes.len(), 4, "alpha plane missing in output");
+
+    // Alpha is stored losslessly (entropy-coded run-length on raster
+    // values, no DCT) — decoded alpha must match the source exactly.
+    assert_eq!(
+        decoded.planes[3].data, frame.planes[3].data,
+        "alpha plane is not lossless"
+    );
+
+    // The YUV planes are lossy through DCT — assert non-trivial PSNR
+    // so we know the encoder/decoder pair did something real.
+    let p = luma_psnr(&frame.planes[0].data, &decoded.planes[0].data);
+    eprintln!("4444+alpha luma PSNR = {p:.2} dB");
+    assert!(p > 30.0, "4444+alpha luma PSNR too low: {p:.2}");
+}

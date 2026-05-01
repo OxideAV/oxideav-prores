@@ -13,11 +13,12 @@ use oxideav_core::{
     VideoFrame,
 };
 
+use crate::alpha::{encode_scanned_alpha, AlphaChannelType};
 use crate::dct::fdct8x8;
 use crate::decoder::BitDepth;
 use crate::frame::{
-    compute_slice_sizes, write_frame, write_picture_header, write_slice_header, ChromaFormat,
-    Profile,
+    compute_slice_sizes, write_frame_with_alpha, write_picture_header, write_slice_header,
+    ChromaFormat, Profile,
 };
 use crate::quant::{qscale, DEFAULT_QMAT};
 use crate::slice::{blocks_per_mb, chroma_blocks_per_mb, encode_slice_components};
@@ -74,10 +75,12 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         PixelFormat::Yuv444P => (ChromaFormat::Y444, BitDepth::Eight),
         PixelFormat::Yuv422P10Le => (ChromaFormat::Y422, BitDepth::Ten),
         PixelFormat::Yuv444P10Le => (ChromaFormat::Y444, BitDepth::Ten),
+        PixelFormat::Yuv422P12Le => (ChromaFormat::Y422, BitDepth::Twelve),
+        PixelFormat::Yuv444P12Le => (ChromaFormat::Y444, BitDepth::Twelve),
         other => {
             return Err(Error::unsupported(format!(
                 "prores encoder: pixel format {other:?} not supported \
-                 (expected Yuv422P / Yuv444P / Yuv422P10Le / Yuv444P10Le)"
+                 (expected Yuv4(2|4)4P / Yuv4(2|4)4P10Le / Yuv4(2|4)4P12Le)"
             )));
         }
     };
@@ -205,12 +208,13 @@ pub fn encode_frame(
 
 /// Encode a single picture to an RDD 36 frame at the requested bit depth.
 ///
-/// `BitDepth::Eight` reads each sample as one byte; `BitDepth::Ten`
-/// reads each sample as a little-endian `u16` whose value is bounded by
-/// `[0, 1023]` (high bits ignored). Internal DCT precision is the same
-/// for both depths — the 10-bit input is scaled into the same nominal
-/// range the 8-bit path uses (`(sample as f32) / 4.0 - 128.0`) so the
-/// quant-matrix and qScale tables apply identically.
+/// `BitDepth::Eight` reads each sample as one byte; the deeper-bit paths
+/// read each sample as a little-endian `u16` whose value is bounded by
+/// the depth (`[0, 1023]` for 10-bit, `[0, 4095]` for 12-bit; high bits
+/// ignored). Internal DCT precision is the same for all depths — deeper-
+/// bit input is scaled into the same nominal range the 8-bit path uses
+/// (`(sample as f32) / 2^(b-8) - 128.0`) so the quant-matrix and qScale
+/// tables apply identically.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_frame_with_depth(
     frame: &VideoFrame,
@@ -221,8 +225,47 @@ pub fn encode_frame_with_depth(
     profile: Profile,
     quantization_index: u8,
 ) -> Result<Vec<u8>> {
-    if frame.planes.len() != 3 {
-        return Err(Error::invalid("prores encoder: expected 3 planes"));
+    encode_frame_with_alpha(
+        frame,
+        img_w,
+        img_h,
+        chroma,
+        bit_depth,
+        profile,
+        quantization_index,
+        None,
+    )
+}
+
+/// Encode a single picture to an RDD 36 frame with optional alpha
+/// channel coding (RDD 36 §5.3.3 + §7.1.2).
+///
+/// When `alpha_channel_type` is `Some`, the input frame must carry a
+/// 4th `VideoPlane` with a per-pixel alpha array at full luma resolution.
+/// Each sample is read as one byte (`Eight`) — alpha values are
+/// promoted to the spec's 16-bit internal representation and emitted as
+/// `scanned_alpha()` blobs at the tail of every slice. The frame header
+/// `alpha_channel_type` field is set accordingly.
+///
+/// When `alpha_channel_type` is `None`, behaviour is identical to
+/// [`encode_frame_with_depth`] (3-plane input, no alpha emission).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_frame_with_alpha(
+    frame: &VideoFrame,
+    img_w: u32,
+    img_h: u32,
+    chroma: ChromaFormat,
+    bit_depth: BitDepth,
+    profile: Profile,
+    quantization_index: u8,
+    alpha_channel_type: Option<AlphaChannelType>,
+) -> Result<Vec<u8>> {
+    let expected_planes = if alpha_channel_type.is_some() { 4 } else { 3 };
+    if frame.planes.len() != expected_planes {
+        return Err(Error::invalid(format!(
+            "prores encoder: expected {expected_planes} planes (got {})",
+            frame.planes.len()
+        )));
     }
     if !(1..=224).contains(&quantization_index) {
         return Err(Error::invalid(
@@ -326,19 +369,61 @@ pub fn encode_frame_with_depth(
                     "prores encoder: slice component exceeded u16 size limit",
                 ));
             }
-            // Slice header has no `coded_size_of_cr_data` when alpha_channel_type==0.
-            let mut slice_buf =
-                Vec::with_capacity(8 + y_data.len() + cb_data.len() + cr_data.len());
+
+            // Alpha tail (only when alpha_channel_type != 0). Read the
+            // 4th plane at full luma resolution; promote 8-bit alpha to
+            // the spec's 16-bit internal value range when act == Eight.
+            let alpha_blob: Vec<u8> = if let Some(act) = alpha_channel_type {
+                let slice_vertical_size = if my < mbs_y - 1 {
+                    MB_SIDE_PX
+                } else {
+                    height - my * MB_SIDE_PX
+                };
+                let cols = MB_SIDE_PX * mbs_this_slice;
+                let mut samples: Vec<u16> = Vec::with_capacity(cols * slice_vertical_size);
+                let a_plane = &frame.planes[3];
+                let a_stride = a_plane.stride;
+                for r in 0..slice_vertical_size {
+                    for c in 0..cols {
+                        let x = (mx * MB_SIDE_PX + c).min(width.saturating_sub(1));
+                        let y = (my * MB_SIDE_PX + r).min(height.saturating_sub(1));
+                        let v: u16 = match act {
+                            AlphaChannelType::Eight => a_plane.data[y * a_stride + x] as u16,
+                            AlphaChannelType::Sixteen => {
+                                let off = y * a_stride + x * 2;
+                                u16::from_le_bytes([a_plane.data[off], a_plane.data[off + 1]])
+                            }
+                        };
+                        samples.push(v);
+                    }
+                }
+                encode_scanned_alpha(&samples, act)?
+            } else {
+                Vec::new()
+            };
+
+            // Slice header carries `coded_size_of_cr_data` when alpha is
+            // present (so the alpha-blob length is recoverable from the
+            // total slice size).
+            let cr_field = if alpha_channel_type.is_some() {
+                Some(cr_data.len() as u16)
+            } else {
+                None
+            };
+            let mut slice_buf = Vec::with_capacity(
+                8 + y_data.len() + cb_data.len() + cr_data.len() + alpha_blob.len(),
+            );
             write_slice_header(
                 &mut slice_buf,
                 quantization_index,
                 y_data.len() as u16,
                 cb_data.len() as u16,
-                None,
+                cr_field,
             );
             slice_buf.extend_from_slice(&y_data);
             slice_buf.extend_from_slice(&cb_data);
             slice_buf.extend_from_slice(&cr_data);
+            slice_buf.extend_from_slice(&alpha_blob);
             slice_payloads.push(slice_buf);
             mx += mbs_this_slice;
         }
@@ -366,7 +451,7 @@ pub fn encode_frame_with_depth(
     }
 
     let mut out = Vec::with_capacity(total_frame_size_no_padding);
-    write_frame(
+    write_frame_with_alpha(
         &mut out,
         total_frame_size_no_padding as u32,
         img_w as u16,
@@ -377,6 +462,7 @@ pub fn encode_frame_with_depth(
         qmat,
         false, // load_luma_qmat = 0 → default
         false, // load_chroma_qmat = 0
+        alpha_channel_type.map_or(0, |a| a.code()),
     );
     let pre_picture_len = out.len();
     write_picture_header(
@@ -408,10 +494,10 @@ pub fn encode_frame_with_depth(
 /// Sample one IDCT input value from the source plane at sample
 /// coordinate `(x, y)`, applying the bit-depth-dependent level shift.
 ///
-/// The 10-bit path divides by 4 so a saturated 10-bit pixel (1023) lands
-/// at the same DCT-input magnitude as a saturated 8-bit pixel (255) —
-/// keeping a single quant-matrix / qScale path across both depths.
-/// `stride` is in **bytes**; for 10-bit planes that's `2 * samples_per_row`.
+/// Deeper-bit paths divide by `2^(b-8)` so a saturated input pixel lands
+/// at the same DCT-input magnitude as a saturated 8-bit pixel — keeping
+/// a single quant-matrix / qScale path across all depths. `stride` is
+/// in **bytes**; for 10/12-bit planes that's `2 * samples_per_row`.
 fn read_sample(plane: &[u8], stride: usize, x: usize, y: usize, bit_depth: BitDepth) -> f32 {
     match bit_depth {
         BitDepth::Eight => plane[y * stride + x] as f32 - 128.0,
@@ -421,6 +507,13 @@ fn read_sample(plane: &[u8], stride: usize, x: usize, y: usize, bit_depth: BitDe
             let hi = plane[off + 1] as u16;
             let s = (lo | (hi << 8)) & 0x03FF;
             (s as f32) / 4.0 - 128.0
+        }
+        BitDepth::Twelve => {
+            let off = y * stride + x * 2;
+            let lo = plane[off] as u16;
+            let hi = plane[off + 1] as u16;
+            let s = (lo | (hi << 8)) & 0x0FFF;
+            (s as f32) / 16.0 - 128.0
         }
     }
 }

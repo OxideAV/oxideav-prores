@@ -6,40 +6,50 @@
 //!
 //! Scope: all six ProRes video profiles, dispatched by container FourCC:
 //!
-//! * 422 Proxy / LT / Standard / HQ for 4:2:2 Y'CbCr 8-bit
-//!   (`PixelFormat::Yuv422P`, fourccs `apco`/`apcs`/`apcn`/`apch`).
-//! * 4444 + 4444 XQ for 4:4:4 Y'CbCr 8-bit (`PixelFormat::Yuv444P`,
-//!   fourccs `ap4h`/`ap4x`). The alpha plane defined in RDD 36 §5.3.3
-//!   is not carried — the core pixel-format enum does not yet include
-//!   `Yuva444P`, so the A' coding layer is skipped.
+//! * 422 Proxy / LT / Standard / HQ for 4:2:2 Y'CbCr at 8-, 10-, or
+//!   12-bit depth (`Yuv422P` / `Yuv422P10Le` / `Yuv422P12Le`, fourccs
+//!   `apco`/`apcs`/`apcn`/`apch`).
+//! * 4444 + 4444 XQ for 4:4:4 Y'CbCr at 8-/10-/12-bit (`Yuv444P{,10,12}`,
+//!   fourccs `ap4h`/`ap4x`). These profiles also carry an optional
+//!   per-pixel alpha plane (RDD 36 §5.3.3) coded losslessly via the
+//!   raster-scan run-length code from §7.1.2 (Tables 12-14). The
+//!   decoded alpha lands as a 4th `VideoPlane` on the output
+//!   `VideoFrame`; the encoder accepts the same shape on input through
+//!   [`encoder::encode_frame_with_alpha`].
 //!
 //! ### Bitstream
 //!
 //! * `frame() { frame_size, 'icpf', frame_header(), picture()+ }` per
 //!   RDD 36 §5.1.
 //! * `picture() { picture_header(), slice_table(), slice()+ }` per §5.2.
-//! * `slice() { slice_header(), Y' data, Cb data, Cr data }` per §5.3,
-//!   each component coded with the run/level/sign entropy coder of
-//!   §7.1.1.
+//! * `slice() { slice_header(), Y' data, Cb data, Cr data, [A' data] }`
+//!   per §5.3, with each color component coded by §7.1.1's run/level/
+//!   sign entropy coder and the optional alpha array coded by §7.1.2's
+//!   run-length / VLC code.
 //!
-//! Bitstream syntax, entropy coder, slice + block scans, and inverse
-//! quantization are bit-exact with the spec. The IDCT is a textbook
-//! float implementation (§7.4 allows fixed- or floating-point, subject
-//! to Annex A accuracy) — sufficient for visual fidelity.
+//! Bitstream syntax, entropy coder, slice + block scans, alpha entropy
+//! coder, and inverse quantization are bit-exact with the spec. The
+//! IDCT is a textbook float implementation (§7.4 allows fixed- or
+//! floating-point, subject to Annex A accuracy) — sufficient for visual
+//! fidelity.
 //!
 //! ### Module layout
 //!
 //! * [`bitstream`] — MSB-first bit reader/writer.
 //! * [`entropy`]   — RDD 36 Golomb-Rice / exp-Golomb combination codes
 //!   plus the adaptive run/level/sign coefficient coder.
+//! * [`alpha`]     — Run-length + diff-VLC alpha entropy coder
+//!   (Tables 12-14) + alpha pixel-sample mapping (§7.5.2).
 //! * [`dct`]       — Textbook f32 8x8 forward/inverse DCT.
 //! * [`quant`]     — Default quant matrices, qScale table, block scans.
 //! * [`slice`]     — Per-slice pack/unpack: per-component encode +
 //!   inverse slice scan into natural-order blocks.
 //! * [`frame`]     — Frame / picture / slice header layouts.
-//! * [`decoder`]   — `Packet -> VideoFrame` (Yuv422P / Yuv444P).
-//! * [`encoder`]   — `VideoFrame` (Yuv422P / Yuv444P) -> `Packet`.
+//! * [`decoder`]   — `Packet -> VideoFrame` (Yuv4(2|4)4P{,10Le,12Le},
+//!   optional 4th alpha plane).
+//! * [`encoder`]   — `VideoFrame` -> `Packet`, with optional alpha.
 
+pub mod alpha;
 pub mod bitstream;
 pub mod dct;
 pub mod decoder;
@@ -108,7 +118,11 @@ pub fn register(reg: &mut CodecRegistry) {
         .with_lossy(true)
         .with_intra_only(true)
         .with_pixel_format(PixelFormat::Yuv422P)
-        .with_pixel_format(PixelFormat::Yuv444P);
+        .with_pixel_format(PixelFormat::Yuv444P)
+        .with_pixel_format(PixelFormat::Yuv422P10Le)
+        .with_pixel_format(PixelFormat::Yuv444P10Le)
+        .with_pixel_format(PixelFormat::Yuv422P12Le)
+        .with_pixel_format(PixelFormat::Yuv444P12Le);
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)
