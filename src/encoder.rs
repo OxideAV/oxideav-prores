@@ -211,10 +211,10 @@ pub fn encode_frame(
 /// `BitDepth::Eight` reads each sample as one byte; the deeper-bit paths
 /// read each sample as a little-endian `u16` whose value is bounded by
 /// the depth (`[0, 1023]` for 10-bit, `[0, 4095]` for 12-bit; high bits
-/// ignored). Internal DCT precision is the same for all depths — deeper-
-/// bit input is scaled into the same nominal range the 8-bit path uses
-/// (`(sample as f32) / 2^(b-8) - 128.0`) so the quant-matrix and qScale
-/// tables apply identically.
+/// ignored). Internal DCT precision is the same for all depths — input
+/// samples are level-shifted into the spec's centred range
+/// `v = s / 2^(b-9) - 256` (RDD 36 §7.5.1) so the quant-matrix and
+/// qScale tables apply identically across depths.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_frame_with_depth(
     frame: &VideoFrame,
@@ -260,6 +260,70 @@ pub fn encode_frame_with_alpha(
     quantization_index: u8,
     alpha_channel_type: Option<AlphaChannelType>,
 ) -> Result<Vec<u8>> {
+    encode_frame_full(
+        frame,
+        img_w,
+        img_h,
+        chroma,
+        bit_depth,
+        profile,
+        quantization_index,
+        alpha_channel_type,
+        0,
+    )
+}
+
+/// Encode an interlaced RDD 36 frame. `interlace_mode` selects the
+/// field order (1 = top-field-first, 2 = bottom-field-first). The
+/// supplied frame's planes are sliced into top + bottom field pictures
+/// per §7.5.3 (rows {0, 2, …} → top, rows {1, 3, …} → bottom) and each
+/// field is encoded as a separate `picture()` per §5.1, sharing one
+/// frame_header().
+#[allow(clippy::too_many_arguments)]
+pub fn encode_frame_interlaced(
+    frame: &VideoFrame,
+    img_w: u32,
+    img_h: u32,
+    chroma: ChromaFormat,
+    bit_depth: BitDepth,
+    profile: Profile,
+    quantization_index: u8,
+    alpha_channel_type: Option<AlphaChannelType>,
+    interlace_mode: u8,
+) -> Result<Vec<u8>> {
+    if interlace_mode != 1 && interlace_mode != 2 {
+        return Err(Error::invalid(
+            "prores encoder: encode_frame_interlaced requires interlace_mode in {1, 2}",
+        ));
+    }
+    encode_frame_full(
+        frame,
+        img_w,
+        img_h,
+        chroma,
+        bit_depth,
+        profile,
+        quantization_index,
+        alpha_channel_type,
+        interlace_mode,
+    )
+}
+
+/// Internal entrypoint shared by progressive and interlaced encodes.
+/// `interlace_mode == 0` builds a single picture; `1` (TFF) or `2`
+/// (BFF) builds two field pictures per §5.1.
+#[allow(clippy::too_many_arguments)]
+fn encode_frame_full(
+    frame: &VideoFrame,
+    img_w: u32,
+    img_h: u32,
+    chroma: ChromaFormat,
+    bit_depth: BitDepth,
+    profile: Profile,
+    quantization_index: u8,
+    alpha_channel_type: Option<AlphaChannelType>,
+    interlace_mode: u8,
+) -> Result<Vec<u8>> {
     let expected_planes = if alpha_channel_type.is_some() { 4 } else { 3 };
     if frame.planes.len() != expected_planes {
         return Err(Error::invalid(format!(
@@ -279,10 +343,6 @@ pub fn encode_frame_with_alpha(
     }
     let width = img_w as usize;
     let height = img_h as usize;
-    let c_w = match chroma {
-        ChromaFormat::Y422 => width.div_ceil(2),
-        ChromaFormat::Y444 => width,
-    };
 
     // Bound output capacity against header-declared dimensions.
     let cap = output_capacity_cap(img_w as u16, img_h as u16, chroma);
@@ -290,25 +350,133 @@ pub fn encode_frame_with_alpha(
     // Use the default flat all-4 quant matrix; do not load custom matrices.
     let qmat = &DEFAULT_QMAT;
 
-    let mbs_x = width.div_ceil(MB_SIDE_PX);
-    let mbs_y = height.div_ceil(MB_SIDE_PX);
+    // Per §6.2 picture_vertical_size derivation. Each interlaced field
+    // is a separate picture sized at half the frame height (rounded
+    // appropriately for top vs. bottom).
+    let pictures: Vec<(usize, FieldStride)> = if interlace_mode == 0 {
+        vec![(height, FieldStride::progressive())]
+    } else {
+        let top_h = height.div_ceil(2);
+        let bot_h = height / 2;
+        // interlace_mode 1: first picture is top field (offset 0)
+        // interlace_mode 2: first picture is bottom field (offset 1)
+        if interlace_mode == 1 {
+            vec![
+                (top_h, FieldStride::new(2, 0)),
+                (bot_h, FieldStride::new(2, 1)),
+            ]
+        } else {
+            vec![
+                (bot_h, FieldStride::new(2, 1)),
+                (top_h, FieldStride::new(2, 0)),
+            ]
+        }
+    };
+
+    let interlaced = interlace_mode != 0;
+    let mut picture_blobs: Vec<Vec<u8>> = Vec::with_capacity(pictures.len());
+    for (picture_height, field) in &pictures {
+        let blob = encode_one_picture(
+            frame,
+            width,
+            height,
+            *picture_height,
+            chroma,
+            bit_depth,
+            quantization_index,
+            qmat,
+            alpha_channel_type,
+            interlaced,
+            *field,
+        )?;
+        picture_blobs.push(blob);
+    }
+
+    let frame_header_size = 20usize; // no qmats loaded → 20 bytes
+    let pictures_total: usize = picture_blobs.iter().map(|p| p.len()).sum();
+    let total_frame_size_no_padding = 4 + 4 + frame_header_size + pictures_total;
+    if total_frame_size_no_padding > cap {
+        return Err(Error::invalid(
+            "prores encoder: encoded size exceeds internal cap",
+        ));
+    }
+
+    let mut out = Vec::with_capacity(total_frame_size_no_padding);
+    write_frame_with_alpha(
+        &mut out,
+        total_frame_size_no_padding as u32,
+        img_w as u16,
+        img_h as u16,
+        chroma,
+        interlace_mode,
+        qmat,
+        qmat,
+        false, // load_luma_qmat = 0 → default
+        false, // load_chroma_qmat = 0
+        alpha_channel_type.map_or(0, |a| a.code()),
+    );
+    for blob in &picture_blobs {
+        out.extend_from_slice(blob);
+    }
+    debug_assert_eq!(out.len(), total_frame_size_no_padding);
+    Ok(out)
+}
+
+/// Field-row mapping for source-plane reads on the encoder side.
+/// Mirrors `decoder::FieldStride`.
+#[derive(Copy, Clone, Debug)]
+struct FieldStride {
+    step: usize,
+    offset: usize,
+}
+
+impl FieldStride {
+    fn new(step: usize, offset: usize) -> Self {
+        Self { step, offset }
+    }
+    fn progressive() -> Self {
+        Self { step: 1, offset: 0 }
+    }
+    fn map(self, picture_row: usize) -> usize {
+        self.step * picture_row + self.offset
+    }
+}
+
+/// Build one `picture()` blob (picture_header + slice_table +
+/// concatenated slice payloads). For interlaced encodes the caller
+/// invokes this twice (once per field).
+#[allow(clippy::too_many_arguments)]
+fn encode_one_picture(
+    frame: &VideoFrame,
+    frame_w: usize,
+    frame_h: usize,
+    picture_height: usize,
+    chroma: ChromaFormat,
+    bit_depth: BitDepth,
+    quantization_index: u8,
+    qmat: &[u8; 64],
+    alpha_channel_type: Option<AlphaChannelType>,
+    interlaced: bool,
+    field: FieldStride,
+) -> Result<Vec<u8>> {
+    let c_w = match chroma {
+        ChromaFormat::Y422 => frame_w.div_ceil(2),
+        ChromaFormat::Y444 => frame_w,
+    };
+    let mbs_x = frame_w.div_ceil(MB_SIDE_PX);
+    let mbs_y = picture_height.div_ceil(MB_SIDE_PX);
     let slice_sizes_template = compute_slice_sizes(mbs_x, SLICE_MB_WIDTH_LOG2);
     let slices_per_row = slice_sizes_template.len();
     let slice_count = slices_per_row * mbs_y;
     let _cb_per_mb = chroma_blocks_per_mb(chroma);
     let per_mb = blocks_per_mb(chroma);
 
-    // Macroblock block layout inside a 16x16 MB:
-    //   luma: (0,0), (1,0), (0,1), (1,1)  in 8-px units
-    //   4:2:2 chroma: (0,0), (0,1)        (chroma is 8px wide/MB, full height)
-    //   4:4:4 chroma: same as luma
     const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
     let chroma_offsets: &[(usize, usize)] = match chroma {
         ChromaFormat::Y422 => &[(0, 0), (0, 1)],
         ChromaFormat::Y444 => &LUMA_OFFSETS,
     };
 
-    // Build each slice payload (slice_header + Y + Cb + Cr).
     let mut slice_payloads: Vec<Vec<u8>> = Vec::with_capacity(slice_count);
     for my in 0..mbs_y {
         let mut mx = 0usize;
@@ -320,23 +488,22 @@ pub fn encode_frame_with_alpha(
             let mut blocks: Vec<[i32; 64]> = Vec::with_capacity(mbs_this_slice * per_mb);
             for mb_within in 0..mbs_this_slice {
                 let mb_x = mx + mb_within;
-                // 4 luma blocks
                 for (bx, by) in LUMA_OFFSETS {
                     let x0 = mb_x * MB_SIDE_PX + bx * 8;
                     let y0 = my * MB_SIDE_PX + by * 8;
                     blocks.push(encode_block(
                         &frame.planes[0].data,
                         frame.planes[0].stride,
-                        width,
-                        height,
+                        frame_w,
+                        frame_h,
                         x0,
                         y0,
                         qmat,
                         quantization_index,
                         bit_depth,
+                        field,
                     ));
                 }
-                // Chroma blocks: Cb then Cr, with the right offsets.
                 for plane_idx in [1usize, 2] {
                     for (bx, by) in chroma_offsets.iter().copied() {
                         let (x0, y0) = match chroma {
@@ -349,18 +516,19 @@ pub fn encode_frame_with_alpha(
                             &frame.planes[plane_idx].data,
                             frame.planes[plane_idx].stride,
                             c_w,
-                            height,
+                            frame_h,
                             x0,
                             y0,
                             qmat,
                             quantization_index,
                             bit_depth,
+                            field,
                         ));
                     }
                 }
             }
             let (y_data, cb_data, cr_data) =
-                encode_slice_components(mbs_this_slice, chroma, false, &blocks)?;
+                encode_slice_components(mbs_this_slice, chroma, interlaced, &blocks)?;
             if y_data.len() > u16::MAX as usize
                 || cb_data.len() > u16::MAX as usize
                 || cr_data.len() > u16::MAX as usize
@@ -370,27 +538,28 @@ pub fn encode_frame_with_alpha(
                 ));
             }
 
-            // Alpha tail (only when alpha_channel_type != 0). Read the
-            // 4th plane at full luma resolution; promote 8-bit alpha to
-            // the spec's 16-bit internal value range when act == Eight.
             let alpha_blob: Vec<u8> = if let Some(act) = alpha_channel_type {
                 let slice_vertical_size = if my < mbs_y - 1 {
                     MB_SIDE_PX
                 } else {
-                    height - my * MB_SIDE_PX
+                    picture_height - my * MB_SIDE_PX
                 };
                 let cols = MB_SIDE_PX * mbs_this_slice;
                 let mut samples: Vec<u16> = Vec::with_capacity(cols * slice_vertical_size);
                 let a_plane = &frame.planes[3];
                 let a_stride = a_plane.stride;
                 for r in 0..slice_vertical_size {
+                    let frame_row = field
+                        .map(my * MB_SIDE_PX + r)
+                        .min(frame_h.saturating_sub(1));
                     for c in 0..cols {
-                        let x = (mx * MB_SIDE_PX + c).min(width.saturating_sub(1));
-                        let y = (my * MB_SIDE_PX + r).min(height.saturating_sub(1));
+                        let x = (mx * MB_SIDE_PX + c).min(frame_w.saturating_sub(1));
                         let v: u16 = match act {
-                            AlphaChannelType::Eight => a_plane.data[y * a_stride + x] as u16,
+                            AlphaChannelType::Eight => {
+                                a_plane.data[frame_row * a_stride + x] as u16
+                            }
                             AlphaChannelType::Sixteen => {
-                                let off = y * a_stride + x * 2;
+                                let off = frame_row * a_stride + x * 2;
                                 u16::from_le_bytes([a_plane.data[off], a_plane.data[off + 1]])
                             }
                         };
@@ -402,9 +571,6 @@ pub fn encode_frame_with_alpha(
                 Vec::new()
             };
 
-            // Slice header carries `coded_size_of_cr_data` when alpha is
-            // present (so the alpha-blob length is recoverable from the
-            // total slice size).
             let cr_field = if alpha_channel_type.is_some() {
                 Some(cr_data.len() as u16)
             } else {
@@ -435,40 +601,14 @@ pub fn encode_frame_with_alpha(
         ));
     }
 
-    // Sizes.
     let slice_table_size = slice_count * 2;
     let slice_bytes: usize = slice_payloads.iter().map(|p| p.len()).sum();
     let picture_header_size = 8usize;
     let picture_size = (picture_header_size + slice_table_size + slice_bytes) as u32;
-    let frame_header_size = 20usize; // no qmats loaded → 20 bytes
-    let total_frame_size_no_padding = 4 + 4 + frame_header_size + picture_size as usize;
-
-    // Bound the assembled buffer.
-    if total_frame_size_no_padding > cap {
-        return Err(Error::invalid(
-            "prores encoder: encoded size exceeds internal cap",
-        ));
-    }
-
-    let mut out = Vec::with_capacity(total_frame_size_no_padding);
-    write_frame_with_alpha(
-        &mut out,
-        total_frame_size_no_padding as u32,
-        img_w as u16,
-        img_h as u16,
-        chroma,
-        0, // interlace_mode: progressive
-        qmat,
-        qmat,
-        false, // load_luma_qmat = 0 → default
-        false, // load_chroma_qmat = 0
-        alpha_channel_type.map_or(0, |a| a.code()),
-    );
-    let pre_picture_len = out.len();
+    let mut blob = Vec::with_capacity(picture_size as usize);
     write_picture_header(
-        &mut out,
+        &mut blob,
         picture_size,
-        // deprecated_number_of_slices: only valid up to 65535.
         if slice_count <= u16::MAX as usize {
             slice_count as u16
         } else {
@@ -477,43 +617,37 @@ pub fn encode_frame_with_alpha(
         SLICE_MB_WIDTH_LOG2,
     );
     for p in &slice_payloads {
-        out.extend_from_slice(&(p.len() as u16).to_be_bytes());
+        blob.extend_from_slice(&(p.len() as u16).to_be_bytes());
     }
     for p in &slice_payloads {
-        out.extend_from_slice(p);
+        blob.extend_from_slice(p);
     }
-    debug_assert_eq!(
-        out.len() - pre_picture_len,
-        picture_size as usize,
-        "picture_size mismatch"
-    );
-    debug_assert_eq!(out.len(), total_frame_size_no_padding);
-    Ok(out)
+    debug_assert_eq!(blob.len(), picture_size as usize);
+    Ok(blob)
 }
 
 /// Sample one IDCT input value from the source plane at sample
-/// coordinate `(x, y)`, applying the bit-depth-dependent level shift.
-///
-/// Deeper-bit paths divide by `2^(b-8)` so a saturated input pixel lands
-/// at the same DCT-input magnitude as a saturated 8-bit pixel — keeping
-/// a single quant-matrix / qScale path across all depths. `stride` is
-/// in **bytes**; for 10/12-bit planes that's `2 * samples_per_row`.
+/// coordinate `(x, y)`, applying the spec's level-shift to a centred
+/// `v` in the range `[-256, 256)` per RDD 36 §7.5.1. The inverse of
+/// the decoder formula `s = 2^b * (v + 256) / 512` is
+/// `v = s * 512 / 2^b - 256 = s / 2^(b-9) - 256`. `stride` is in
+/// **bytes**; for 10/12-bit planes that's `2 * samples_per_row`.
 fn read_sample(plane: &[u8], stride: usize, x: usize, y: usize, bit_depth: BitDepth) -> f32 {
     match bit_depth {
-        BitDepth::Eight => plane[y * stride + x] as f32 - 128.0,
+        BitDepth::Eight => (plane[y * stride + x] as f32) * 2.0 - 256.0,
         BitDepth::Ten => {
             let off = y * stride + x * 2;
             let lo = plane[off] as u16;
             let hi = plane[off + 1] as u16;
             let s = (lo | (hi << 8)) & 0x03FF;
-            (s as f32) / 4.0 - 128.0
+            (s as f32) / 2.0 - 256.0
         }
         BitDepth::Twelve => {
             let off = y * stride + x * 2;
             let lo = plane[off] as u16;
             let hi = plane[off + 1] as u16;
             let s = (lo | (hi << 8)) & 0x0FFF;
-            (s as f32) / 16.0 - 128.0
+            (s as f32) / 8.0 - 256.0
         }
     }
 }
@@ -529,13 +663,16 @@ fn encode_block(
     qmat: &[u8; 64],
     quantization_index: u8,
     bit_depth: BitDepth,
+    field: FieldStride,
 ) -> [i32; 64] {
     let mut blk = [0.0f32; 64];
     for j in 0..8 {
-        let y = (y0 + j).min(plane_h.saturating_sub(1));
+        // Map per-picture row to per-frame row; this is the identity for
+        // progressive (`step=1, offset=0`) and 2*r+offset for interlaced.
+        let frame_row = field.map(y0 + j).min(plane_h.saturating_sub(1));
         for i in 0..8 {
             let x = (x0 + i).min(plane_w.saturating_sub(1));
-            blk[j * 8 + i] = read_sample(plane, stride, x, y, bit_depth);
+            blk[j * 8 + i] = read_sample(plane, stride, x, frame_row, bit_depth);
         }
     }
     fdct8x8(&mut blk);

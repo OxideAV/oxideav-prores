@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Interlaced encode + decode per RDD 36 §5.1 / §6.2 / §7.5.3. The frame
+  header `interlace_mode` field is honoured at decode time (mode 1 =
+  top-field-first, mode 2 = bottom-field-first) and the two field
+  pictures are split / reassembled per §7.5.3 (top field = even rows,
+  bottom = odd rows). Each field picture uses the interlaced block
+  scan from §7.2 Figure 5 (already provided as `BLOCK_SCAN_INTERLACED`).
+  New encoder entry point: `encoder::encode_frame_interlaced`.
+- ffmpeg interop tests for `apch` / `apcn` interlaced fixtures
+  (`prores_ks` `-flags +ildct -top {0,1}`) reach ≥ 40 dB Y PSNR
+  against the raw `testsrc` reference.
+- Internal roundtrip tests for top-field-first, bottom-field-first,
+  and odd-vertical-size interlaced frames.
+
+### Changed
+
+- Pixel-sample / IDCT level shift is now spec-compliant (RDD 36 §7.5.1):
+  encoder maps `s → v = s / 2^(b-9) − 256` and decoder maps
+  `v → s = clamp(round(2^b × (v + 256) / 512))`. The previous
+  off-by-one normalization (centred on 128 instead of 256, scaled by
+  `2^(b-8)` instead of `2^(b-9)`) was self-consistent but cut visual
+  contrast in half on third-party-encoded streams. Internal roundtrips
+  are unaffected because both ends moved together; ffmpeg-encoded
+  fixtures now reproduce the source pixel range (e.g. SMPTE-legal
+  64–940 for 10-bit black/white).
+
 ## [0.0.5](https://github.com/OxideAV/oxideav-prores/compare/v0.0.4...v0.0.5) - 2026-04-25
 
 ### Other

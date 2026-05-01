@@ -616,3 +616,163 @@ fn roundtrip_4444_with_alpha_8bit() {
     eprintln!("4444+alpha luma PSNR = {p:.2} dB");
     assert!(p > 30.0, "4444+alpha luma PSNR too low: {p:.2}");
 }
+
+// ────────────────── interlaced (RDD 36 §5.1 + §7.5.3) ──────────────────
+
+/// Build a 4:2:2 source whose field-row content differs from the
+/// progressive-row content. A row-index modulated luma gradient lets us
+/// verify the encoder + decoder split / interleave pixels at the
+/// correct field offsets. A bug that swapped TFF and BFF would push
+/// even/odd rows to the wrong field.
+fn synthetic_422_field_distinct(width: u32, height: u32) -> Source {
+    let w = width as usize;
+    let h = height as usize;
+    let cw = w / 2;
+    let mut y = vec![0u8; w * h];
+    let mut cb = vec![128u8; cw * h];
+    let mut cr = vec![128u8; cw * h];
+    for j in 0..h {
+        for i in 0..w {
+            // Even rows = bright gradient, odd rows = dim — a bit-exact
+            // round-trip preserves this; a swapped-field bug flips the
+            // brightness pattern.
+            let base = if j % 2 == 0 { 192 } else { 64 };
+            y[j * w + i] = (base + (i as u16 % 32)) as u8;
+        }
+        for i in 0..cw {
+            cb[j * cw + i] = (128 + ((i as i32 - cw as i32 / 2) * 2).clamp(-32, 32)) as u8;
+            cr[j * cw + i] = (128 + (j as i32 - h as i32 / 2).clamp(-32, 32)) as u8;
+        }
+    }
+    Source {
+        frame: VideoFrame {
+            pts: Some(0),
+            planes: vec![
+                VideoPlane { stride: w, data: y },
+                VideoPlane {
+                    stride: cw,
+                    data: cb,
+                },
+                VideoPlane {
+                    stride: cw,
+                    data: cr,
+                },
+            ],
+        },
+        format: PixelFormat::Yuv422P,
+        width,
+        height,
+    }
+}
+
+fn roundtrip_interlaced_422(width: u32, height: u32, interlace_mode: u8, min_psnr: f64) {
+    use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+    use oxideav_prores::encoder::encode_frame_interlaced;
+    use oxideav_prores::frame::{ChromaFormat, Profile};
+
+    let src = synthetic_422_field_distinct(width, height);
+    let pkt = encode_frame_interlaced(
+        &src.frame,
+        width,
+        height,
+        ChromaFormat::Y422,
+        BitDepth::Eight,
+        Profile::Hq,
+        2,
+        None,
+        interlace_mode,
+    )
+    .expect("encode_frame_interlaced");
+
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt).expect("parse_frame");
+    assert_eq!(
+        fh.interlace_mode, interlace_mode,
+        "frame header interlace_mode mismatch"
+    );
+    assert_eq!(
+        fh.picture_count(),
+        2,
+        "interlaced frame must declare 2 pictures"
+    );
+
+    let decoded =
+        decode_packet_with_depth(&pkt, Some(0), Some((BitDepth::Eight, ChromaFormat::Y422)))
+            .expect("decode interlaced");
+    assert_eq!(decoded.planes.len(), 3);
+    assert_eq!(decoded.planes[0].data.len(), (width * height) as usize);
+
+    let p = luma_psnr(&src.frame.planes[0].data, &decoded.planes[0].data);
+    eprintln!("interlaced (mode={interlace_mode}) luma PSNR = {p:.2} dB");
+    assert!(
+        p > min_psnr,
+        "interlaced luma PSNR {p:.2} dB under {min_psnr} dB"
+    );
+
+    // Per-field correctness: even-row luma should still average brighter
+    // than odd-row luma after the round-trip (proves the field
+    // assignment did not swap top + bottom).
+    let mut even_sum = 0u64;
+    let mut odd_sum = 0u64;
+    let w = width as usize;
+    for j in 0..(height as usize) {
+        let row_sum: u64 = decoded.planes[0].data[j * w..(j + 1) * w]
+            .iter()
+            .map(|&v| v as u64)
+            .sum();
+        if j % 2 == 0 {
+            even_sum += row_sum;
+        } else {
+            odd_sum += row_sum;
+        }
+    }
+    assert!(
+        even_sum > odd_sum,
+        "interlaced field assignment swapped: even-row sum {even_sum} not > odd-row sum {odd_sum}"
+    );
+}
+
+#[test]
+fn roundtrip_interlaced_422_tff() {
+    roundtrip_interlaced_422(64, 48, 1, 32.0);
+}
+
+#[test]
+fn roundtrip_interlaced_422_bff() {
+    roundtrip_interlaced_422(64, 48, 2, 32.0);
+}
+
+#[test]
+fn roundtrip_interlaced_422_odd_height() {
+    // odd vertical_size: top field gets ceil(h/2) rows, bottom floor.
+    roundtrip_interlaced_422(64, 50, 1, 32.0);
+}
+
+#[test]
+fn interlaced_frame_header_roundtrips() {
+    use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+    use oxideav_prores::encoder::encode_frame_interlaced;
+    use oxideav_prores::frame::{ChromaFormat, Profile};
+
+    let src = synthetic_422_field_distinct(64, 48);
+    for mode in [1u8, 2] {
+        let pkt = encode_frame_interlaced(
+            &src.frame,
+            64,
+            48,
+            ChromaFormat::Y422,
+            BitDepth::Eight,
+            Profile::Standard,
+            4,
+            None,
+            mode,
+        )
+        .expect("encode_frame_interlaced");
+        let (fh, _) = oxideav_prores::frame::parse_frame(&pkt).expect("parse_frame");
+        assert_eq!(fh.interlace_mode, mode);
+        assert_eq!(fh.chroma_format, ChromaFormat::Y422);
+        // Decode succeeds with the standard public path.
+        let _frame =
+            decode_packet_with_depth(&pkt, Some(0), Some((BitDepth::Eight, ChromaFormat::Y422)))
+                .expect("decode_packet_with_depth");
+    }
+}

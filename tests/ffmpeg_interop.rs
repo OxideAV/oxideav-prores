@@ -496,3 +496,158 @@ fn rdd36_apcn_8bit_and_10bit_outputs_are_consistent() {
         "8-bit and 10-bit/4 outputs diverge by more than 1: {max_diff}"
     );
 }
+
+// ────────────── interlaced (RDD 36 §5.1, §6.2, §7.5.3) ──────────────
+
+/// Build an ffmpeg-encoded interlaced ProRes `.mov` and return the
+/// container bytes. `top_field_first` selects ffmpeg's `-top 1` (TFF,
+/// our interlace_mode 1) vs. `-top 0` (BFF, mode 2). `+ildct` enables
+/// interlaced DCT coding so prores_ks emits one picture per field with
+/// the interlaced block-scan pattern (Figure 5).
+fn ffmpeg_make_prores_interlaced_mov(
+    profile_flag: u8,
+    width: u32,
+    height: u32,
+    top_field_first: bool,
+) -> Option<Vec<u8>> {
+    let tmp = tempdir()?;
+    let out_path = tmp.join(format!(
+        "prores_int_p{profile_flag}_{width}x{height}_{}.mov",
+        if top_field_first { "tff" } else { "bff" }
+    ));
+    let input = format!("testsrc=size={width}x{height}:rate=25:duration=1");
+    let top_flag = if top_field_first { "1" } else { "0" };
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &input,
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            &profile_flag.to_string(),
+            "-pix_fmt",
+            "yuv422p10le",
+            "-flags",
+            "+ildct",
+            "-top",
+            top_flag,
+            "-frames:v",
+            "1",
+            out_path.to_str()?,
+        ])
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    std::fs::read(&out_path).ok()
+}
+
+/// Compute luma PSNR between two equal-length 10-bit LE-packed planes.
+fn psnr_10bit(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let n = a.len() / 2;
+    let mut mse = 0.0f64;
+    for i in 0..n {
+        let av = u16::from_le_bytes([a[i * 2], a[i * 2 + 1]]) as f64;
+        let bv = u16::from_le_bytes([b[i * 2], b[i * 2 + 1]]) as f64;
+        let d = av - bv;
+        mse += d * d;
+    }
+    mse /= n as f64;
+    if mse == 0.0 {
+        return 120.0;
+    }
+    10.0 * (1023.0_f64 * 1023.0 / mse).log10()
+}
+
+/// Decode an interlaced ffmpeg fixture and validate it against the same
+/// `testsrc` pattern (re-rendered into raw 10-bit LE for the PSNR
+/// comparison). The acceptance bar per task #126 is ≥ 40 dB Y on
+/// `apch` (HQ).
+fn try_decode_interlaced(profile_flag: u8, width: u32, height: u32, top_field_first: bool) {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping interlaced interop test");
+        return;
+    }
+    let Some(mp4) = ffmpeg_make_prores_interlaced_mov(profile_flag, width, height, top_field_first)
+    else {
+        eprintln!("ffmpeg prores_ks interlaced profile={profile_flag} unavailable, skipping");
+        return;
+    };
+    let pkt = extract_prores_packet(&mp4).expect("extract icpf packet");
+    eprintln!(
+        "interlaced(top_field_first={top_field_first}) packet: {} bytes",
+        pkt.len()
+    );
+
+    // Confirm the frame header reports interlace_mode 1 or 2.
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt).expect("parse_frame");
+    let expected_mode: u8 = if top_field_first { 1 } else { 2 };
+    assert_eq!(
+        fh.interlace_mode, expected_mode,
+        "ffmpeg-produced frame header interlace_mode mismatch"
+    );
+
+    let frame = decode_packet_with_depth(&pkt, Some(0), Some((BitDepth::Ten, ChromaFormat::Y422)))
+        .unwrap_or_else(|e| panic!("decode interlaced failed: {e:?}"));
+    assert_eq!(frame.planes.len(), 3);
+    let y_bytes = (width * height * 2) as usize;
+    assert_eq!(frame.planes[0].data.len(), y_bytes);
+
+    // Render the raw 10-bit reference via ffmpeg.
+    let tmp = tempdir().expect("tempdir");
+    let raw_path = tmp.join("ref.yuv");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size={width}x{height}:rate=25:duration=1"),
+            "-pix_fmt",
+            "yuv422p10le",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            raw_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg ref render");
+    assert!(status.success(), "ffmpeg ref render failed");
+    let raw = std::fs::read(&raw_path).expect("read ref");
+    let lum_ref = &raw[..y_bytes];
+    let psnr = psnr_10bit(lum_ref, &frame.planes[0].data);
+    eprintln!("interlaced PSNR (profile={profile_flag}, tff={top_field_first}): {psnr:.2} dB");
+    assert!(
+        psnr >= 40.0,
+        "interlaced ProRes PSNR {psnr:.2} dB under 40 dB acceptance bar"
+    );
+}
+
+#[test]
+fn rdd36_decode_apch_interlaced_tff_from_ffmpeg() {
+    try_decode_interlaced(3, 128, 128, true);
+}
+
+#[test]
+fn rdd36_decode_apch_interlaced_bff_from_ffmpeg() {
+    try_decode_interlaced(3, 128, 128, false);
+}
+
+#[test]
+fn rdd36_decode_apcn_interlaced_from_ffmpeg() {
+    // Same 128x128 fixture but apcn (Standard profile) — exercises the
+    // Standard-profile interlaced path at the lower-quality preset.
+    try_decode_interlaced(2, 128, 128, true);
+}

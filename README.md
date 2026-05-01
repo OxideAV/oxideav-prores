@@ -47,10 +47,23 @@ The 4444 and 4444 XQ profiles share the same bitstream structure as
 tier and produces a larger packet at lower quantisation.
 
 ffmpeg-encoded `prores_ks` `apcn` / `apch` (4:2:2) and `ap4h` (4444 +
-alpha) streams decode interop-clean. Streams produced by this crate's
-own encoder use the spec's entropy coder for color, but the encoder
-emits a plain run-length alpha (alternative path permitted by §7.1.2);
-the coder is bit-exact with itself and decoder-compatible.
+alpha) streams decode interop-clean — both progressive and interlaced
+(`-flags +ildct -top {0,1}`). Streams produced by this crate's own
+encoder use the spec's entropy coder for color, but the encoder emits
+a plain run-length alpha (alternative path permitted by §7.1.2); the
+coder is bit-exact with itself and decoder-compatible.
+
+### Interlaced (RDD 36 §5.1, §6.2, §7.5.3)
+
+A frame's `interlace_mode` (0 = progressive, 1 = top-field-first,
+2 = bottom-field-first) controls whether the encoded bitstream carries
+one picture or two (one per field). Source rows interleave across
+fields per §7.5.3: top field = source rows 0, 2, 4, …; bottom field =
+rows 1, 3, 5, …. The encoder splits the source into two field pictures
+(each at `(height + 1) / 2` or `height / 2` rows) and emits them in
+temporal order; the decoder reverses the deinterleave. Each field
+picture uses the interlaced block scan (§7.2 Figure 5) instead of the
+progressive Figure 4. See [`encoder::encode_frame_interlaced`].
 
 ## Usage
 

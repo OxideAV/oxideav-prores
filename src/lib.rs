@@ -33,6 +33,17 @@
 //! floating-point, subject to Annex A accuracy) — sufficient for visual
 //! fidelity.
 //!
+//! ### Interlaced (RDD 36 §5.1, §6.2, §7.5.3)
+//!
+//! Interlaced frames carry two pictures (one per field) sharing one
+//! frame_header(). The encoder splits the source into top + bottom
+//! fields per §7.5.3 (top field = source rows 0, 2, 4, …; bottom field
+//! = rows 1, 3, 5, …) and emits them in the order indicated by
+//! `interlace_mode` (1 = top-field-first, 2 = bottom-field-first).
+//! Each picture uses the interlaced block scan (§7.2 Figure 5) instead
+//! of the progressive one (Figure 4). The decoder reverses the
+//! deinterleave on output. See [`encoder::encode_frame_interlaced`].
+//!
 //! ### Module layout
 //!
 //! * [`bitstream`] — MSB-first bit reader/writer.

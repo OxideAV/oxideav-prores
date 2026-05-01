@@ -43,6 +43,7 @@ use crate::alpha::{decode_scanned_alpha, AlphaChannelType};
 use crate::dct::idct8x8;
 use crate::frame::{
     compute_slice_sizes, parse_frame, parse_picture_header, parse_slice_header, ChromaFormat,
+    FrameHeader,
 };
 use crate::quant::qscale;
 use crate::slice::{
@@ -203,11 +204,6 @@ pub fn decode_packet_with_depth(
     let alpha_kind = AlphaChannelType::from_code(fh.alpha_channel_type)?;
     let has_alpha = alpha_kind.is_some();
     let interlaced = fh.interlace_mode != 0;
-    if interlaced {
-        return Err(Error::unsupported(
-            "prores: interlaced pictures are not yet implemented",
-        ));
-    }
 
     let chroma = fh.chroma_format;
     let bit_depth = if let Some((bd, requested_chroma)) = requested {
@@ -224,202 +220,120 @@ pub fn decode_packet_with_depth(
     };
     let bps = bit_depth.bytes_per_sample();
     let mbs_x = width.div_ceil(MB_SIDE_PX);
-    let mbs_y = height.div_ceil(MB_SIDE_PX);
 
-    // ---- picture() ----
-    let (ph, after_pic) = parse_picture_header(after_frame)?;
-    let slice_sizes_template = compute_slice_sizes(mbs_x, ph.log2_desired_slice_size_in_mb);
-    let slices_per_row = slice_sizes_template.len();
-    let expected_slice_count = slices_per_row * mbs_y;
-
-    // Read slice-size table.
-    let slice_table_bytes = expected_slice_count
-        .checked_mul(2)
-        .ok_or_else(|| Error::invalid("prores: slice count overflow"))?;
-    if after_pic.len() < slice_table_bytes {
-        return Err(Error::invalid("prores: slice-size table truncated"));
-    }
-    let mut slice_sizes = Vec::with_capacity(expected_slice_count);
-    for i in 0..expected_slice_count {
-        let off = i * 2;
-        slice_sizes.push(u16::from_be_bytes(after_pic[off..off + 2].try_into().unwrap()) as usize);
-    }
-    let mut cursor = &after_pic[slice_table_bytes..];
-
-    // Per-chroma plane geometry.
+    // Allocate full-frame padded planes. For interlaced the two field
+    // pictures decode into rows {0, 2, 4, …} (top) and {1, 3, 5, …}
+    // (bottom) of these buffers per RDD 36 §7.5.3.
     let padded_w = mbs_x * MB_SIDE_PX;
-    let padded_h = mbs_y * MB_SIDE_PX;
     let padded_c_w = match chroma {
         ChromaFormat::Y422 => padded_w / 2,
         ChromaFormat::Y444 => padded_w,
     };
-    // Bound padded plane allocations.
-    let y_alloc = padded_w.saturating_mul(padded_h);
-    let c_alloc = padded_c_w.saturating_mul(padded_h);
+    // Padded frame height: round up to a multiple of MB_SIDE_PX, then
+    // (for interlaced) ensure each field gets a whole MB row count by
+    // rounding the per-field MB-row count up.
+    let padded_frame_h = if interlaced {
+        let top_h = height.div_ceil(2);
+        let bot_h = height / 2;
+        let top_mb_rows = top_h.div_ceil(MB_SIDE_PX);
+        let bot_mb_rows = bot_h.div_ceil(MB_SIDE_PX);
+        // Interleaved padded height = max field padded * 2.
+        top_mb_rows.max(bot_mb_rows) * MB_SIDE_PX * 2
+    } else {
+        height.div_ceil(MB_SIDE_PX) * MB_SIDE_PX
+    };
+    let y_alloc = padded_w.saturating_mul(padded_frame_h);
+    let c_alloc = padded_c_w.saturating_mul(padded_frame_h);
     if y_alloc > MAX_DECODED_PIXELS || c_alloc > MAX_DECODED_PIXELS {
         return Err(Error::invalid("prores: padded plane size exceeds cap"));
     }
-    // Padded planes store byte-strided rows of `padded_w * bps` /
-    // `padded_c_w * bps` bytes. The block paste/crop helpers operate
-    // in *sample* units and multiply by `bps` internally so the same
-    // code path serves both 8-bit and 10-bit outputs.
     let y_byte_stride = padded_w * bps;
     let c_byte_stride = padded_c_w * bps;
-    let mut y_plane = vec![0u8; y_byte_stride * padded_h];
-    let mut cb_plane = vec![0u8; c_byte_stride * padded_h];
-    let mut cr_plane = vec![0u8; c_byte_stride * padded_h];
-    // Alpha plane (only allocated when has_alpha). Stored at full luma
-    // resolution per RDD 36 §5.3.3 / §7.5.3 — alpha is raster-scanned
-    // per-pixel, not block-coded. The padded width matches the luma
-    // padded width since alpha is full-resolution.
     let a_byte_stride = padded_w * bps;
+    let mut y_plane = vec![0u8; y_byte_stride * padded_frame_h];
+    let mut cb_plane = vec![0u8; c_byte_stride * padded_frame_h];
+    let mut cr_plane = vec![0u8; c_byte_stride * padded_frame_h];
     let mut a_plane: Vec<u8> = if has_alpha {
-        vec![0u8; a_byte_stride * padded_h]
+        vec![0u8; a_byte_stride * padded_frame_h]
     } else {
         Vec::new()
     };
 
-    const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
-    let chroma_offsets: &[(usize, usize)] = match chroma {
-        ChromaFormat::Y422 => &[(0, 0), (0, 1)],
-        ChromaFormat::Y444 => &LUMA_OFFSETS,
-    };
-    let cb_per_mb = chroma_blocks_per_mb(chroma);
-    let per_mb = blocks_per_mb(chroma);
-
-    let mut slice_idx = 0usize;
-    for my in 0..mbs_y {
-        let mut mx = 0usize;
-        for &slice_size_in_mb_template in &slice_sizes_template {
-            let mbs_this_slice = slice_size_in_mb_template.min(mbs_x - mx);
-            if mbs_this_slice == 0 {
-                break;
+    let mut cursor = after_frame;
+    if interlaced {
+        // Per §6.2 picture_vertical_size:
+        //   topFieldVerticalSize = (vertical_size + 1) / 2
+        //   bottomFieldVerticalSize = vertical_size / 2
+        // interlace_mode==1 → first picture is top field
+        // interlace_mode==2 → first picture is bottom field
+        let top_h = height.div_ceil(2);
+        let bot_h = height / 2;
+        let (first_h, first_field_offset, second_h, second_field_offset) = match fh.interlace_mode {
+            1 => (top_h, 0usize, bot_h, 1usize),
+            2 => (bot_h, 1usize, top_h, 0usize),
+            other => {
+                return Err(Error::invalid(format!(
+                    "prores: invalid interlace_mode {other}"
+                )));
             }
-            let coded_size = slice_sizes[slice_idx];
-            if cursor.len() < coded_size {
-                return Err(Error::invalid("prores: slice payload truncated"));
-            }
-            let slice_data = &cursor[..coded_size];
-            cursor = &cursor[coded_size..];
-            slice_idx += 1;
-
-            // Parse slice_header — when the frame has alpha, the slice
-            // header carries the explicit `coded_size_of_cr_data` field.
-            let (sh, after_sh) = parse_slice_header(slice_data, has_alpha)?;
-            let coded_y = sh.coded_size_of_y_data as usize;
-            let coded_cb = sh.coded_size_of_cb_data as usize;
-            let cr_data_size = if let Some(sz) = sh.coded_size_of_cr_data {
-                sz as usize
-            } else {
-                slice_data
-                    .len()
-                    .checked_sub(sh.slice_header_size as usize + coded_y + coded_cb)
-                    .ok_or_else(|| Error::invalid("prores: cr_data size underflow"))?
-            };
-            if after_sh.len() < coded_y + coded_cb + cr_data_size {
-                return Err(Error::invalid("prores: slice components truncated"));
-            }
-            let y_data = &after_sh[..coded_y];
-            let cb_data = &after_sh[coded_y..coded_y + coded_cb];
-            let cr_data = &after_sh[coded_y + coded_cb..coded_y + coded_cb + cr_data_size];
-            // Alpha tail spans whatever remains of the slice payload
-            // after the slice header + Y + Cb + Cr coefficient blobs.
-            let alpha_data: &[u8] = if has_alpha {
-                &after_sh[coded_y + coded_cb + cr_data_size..]
-            } else {
-                &[]
-            };
-
-            let blocks =
-                decode_slice_components(y_data, cb_data, cr_data, mbs_this_slice, chroma, false)?;
-            if blocks.len() != mbs_this_slice * per_mb {
-                return Err(Error::invalid(
-                    "prores: decoded block count mismatch in slice",
-                ));
-            }
-
-            // Dequant + IDCT + paste each block.
-            for mb_within in 0..mbs_this_slice {
-                let mb_x = mx + mb_within;
-                let base = mb_within * per_mb;
-                // Luma blocks
-                for (i, (bx, by)) in LUMA_OFFSETS.iter().enumerate() {
-                    let mut blk_f =
-                        dequant_to_f32(&blocks[base + i], &fh.luma_qmat, sh.quantization_index);
-                    idct8x8(&mut blk_f);
-                    paste_block(
-                        &mut y_plane,
-                        y_byte_stride,
-                        mb_x * MB_SIDE_PX + bx * 8,
-                        my * MB_SIDE_PX + by * 8,
-                        &blk_f,
-                        bit_depth,
-                    );
-                }
-                // Cb blocks
-                for (i, (bx, by)) in chroma_offsets.iter().enumerate() {
-                    let mut blk_f = dequant_to_f32(
-                        &blocks[base + LUMA_BLOCKS_PER_MB + i],
-                        &fh.chroma_qmat,
-                        sh.quantization_index,
-                    );
-                    idct8x8(&mut blk_f);
-                    let (x0, y0) = match chroma {
-                        ChromaFormat::Y422 => (mb_x * 8, my * MB_SIDE_PX + by * 8),
-                        ChromaFormat::Y444 => {
-                            (mb_x * MB_SIDE_PX + bx * 8, my * MB_SIDE_PX + by * 8)
-                        }
-                    };
-                    paste_block(&mut cb_plane, c_byte_stride, x0, y0, &blk_f, bit_depth);
-                }
-                // Cr blocks
-                for (i, (bx, by)) in chroma_offsets.iter().enumerate() {
-                    let mut blk_f = dequant_to_f32(
-                        &blocks[base + LUMA_BLOCKS_PER_MB + cb_per_mb + i],
-                        &fh.chroma_qmat,
-                        sh.quantization_index,
-                    );
-                    idct8x8(&mut blk_f);
-                    let (x0, y0) = match chroma {
-                        ChromaFormat::Y422 => (mb_x * 8, my * MB_SIDE_PX + by * 8),
-                        ChromaFormat::Y444 => {
-                            (mb_x * MB_SIDE_PX + bx * 8, my * MB_SIDE_PX + by * 8)
-                        }
-                    };
-                    paste_block(&mut cr_plane, c_byte_stride, x0, y0, &blk_f, bit_depth);
-                }
-            }
-            // Decode + paste alpha for this slice. Alpha is raster-
-            // scanned at full luma resolution: 16*sliceSizeInMb columns
-            // by sliceVerticalSize rows.
-            if let Some(act) = alpha_kind {
-                // sliceVerticalSize per §5.3 / §6.3: 16 unless this is
-                // the bottom MB row, where it shrinks to the picture's
-                // remaining-row count. Excess rows at the bottom are NOT
-                // present in the bitstream.
-                let slice_vertical_size = if my < mbs_y - 1 {
-                    MB_SIDE_PX
-                } else {
-                    height - my * MB_SIDE_PX
-                };
-                let cols = MB_SIDE_PX * mbs_this_slice;
-                let num_alpha_values = cols * slice_vertical_size;
-                let alpha_values = decode_scanned_alpha(alpha_data, num_alpha_values, act)?;
-                paste_alpha(
-                    &mut a_plane,
-                    a_byte_stride,
-                    mx * MB_SIDE_PX,
-                    my * MB_SIDE_PX,
-                    cols,
-                    slice_vertical_size,
-                    &alpha_values,
-                    act,
-                    bit_depth,
-                );
-            }
-            mx += mbs_this_slice;
-        }
+        };
+        cursor = decode_picture_into_planes(
+            cursor,
+            &fh,
+            mbs_x,
+            first_h,
+            chroma,
+            bit_depth,
+            alpha_kind,
+            true,
+            FieldStride::new(2, first_field_offset),
+            &mut y_plane,
+            y_byte_stride,
+            &mut cb_plane,
+            c_byte_stride,
+            &mut cr_plane,
+            &mut a_plane,
+            a_byte_stride,
+        )?;
+        cursor = decode_picture_into_planes(
+            cursor,
+            &fh,
+            mbs_x,
+            second_h,
+            chroma,
+            bit_depth,
+            alpha_kind,
+            true,
+            FieldStride::new(2, second_field_offset),
+            &mut y_plane,
+            y_byte_stride,
+            &mut cb_plane,
+            c_byte_stride,
+            &mut cr_plane,
+            &mut a_plane,
+            a_byte_stride,
+        )?;
+    } else {
+        cursor = decode_picture_into_planes(
+            cursor,
+            &fh,
+            mbs_x,
+            height,
+            chroma,
+            bit_depth,
+            alpha_kind,
+            false,
+            FieldStride::progressive(),
+            &mut y_plane,
+            y_byte_stride,
+            &mut cb_plane,
+            c_byte_stride,
+            &mut cr_plane,
+            &mut a_plane,
+            a_byte_stride,
+        )?;
     }
+    let _ = cursor; // remaining bytes are stuffing per §5.1 / §6.1.2
 
     // Crop padded buffers to declared picture size.
     let c_w = match chroma {
@@ -453,6 +367,221 @@ pub fn decode_packet_with_depth(
     Ok(VideoFrame { pts, planes })
 }
 
+/// Field-row mapping. For progressive: `step=1, offset=0` (rows are
+/// contiguous). For interlaced: `step=2` and `offset` is 0 (top field)
+/// or 1 (bottom field). When pasting block sample row `r`, the actual
+/// frame row is `step * r + offset`.
+#[derive(Copy, Clone, Debug)]
+struct FieldStride {
+    step: usize,
+    offset: usize,
+}
+
+impl FieldStride {
+    fn new(step: usize, offset: usize) -> Self {
+        Self { step, offset }
+    }
+    fn progressive() -> Self {
+        Self { step: 1, offset: 0 }
+    }
+    fn map(self, picture_row: usize) -> usize {
+        self.step * picture_row + self.offset
+    }
+}
+
+/// Decode one `picture()` (header + slice table + slice payloads) into
+/// the supplied padded plane buffers. `picture_height` is the picture's
+/// luma-sample height (= field height for interlaced, full height
+/// otherwise). `field` controls how picture-row indices map onto
+/// destination plane rows; for progressive pictures it is the identity.
+///
+/// Returns a slice positioned just past the consumed picture bytes —
+/// the caller advances its cursor with the returned slice.
+#[allow(clippy::too_many_arguments)]
+fn decode_picture_into_planes<'a>(
+    data: &'a [u8],
+    fh: &FrameHeader,
+    mbs_x: usize,
+    picture_height: usize,
+    chroma: ChromaFormat,
+    bit_depth: BitDepth,
+    alpha_kind: Option<AlphaChannelType>,
+    interlaced: bool,
+    field: FieldStride,
+    y_plane: &mut [u8],
+    y_byte_stride: usize,
+    cb_plane: &mut [u8],
+    c_byte_stride: usize,
+    cr_plane: &mut [u8],
+    a_plane: &mut [u8],
+    a_byte_stride: usize,
+) -> Result<&'a [u8]> {
+    let has_alpha = alpha_kind.is_some();
+    let mbs_y = picture_height.div_ceil(MB_SIDE_PX);
+    let (ph, after_pic) = parse_picture_header(data)?;
+    let slice_sizes_template = compute_slice_sizes(mbs_x, ph.log2_desired_slice_size_in_mb);
+    let slices_per_row = slice_sizes_template.len();
+    let expected_slice_count = slices_per_row * mbs_y;
+    let slice_table_bytes = expected_slice_count
+        .checked_mul(2)
+        .ok_or_else(|| Error::invalid("prores: slice count overflow"))?;
+    if after_pic.len() < slice_table_bytes {
+        return Err(Error::invalid("prores: slice-size table truncated"));
+    }
+    let mut slice_sizes = Vec::with_capacity(expected_slice_count);
+    for i in 0..expected_slice_count {
+        let off = i * 2;
+        slice_sizes.push(u16::from_be_bytes(after_pic[off..off + 2].try_into().unwrap()) as usize);
+    }
+    let mut cursor = &after_pic[slice_table_bytes..];
+    let total_picture_bytes: usize =
+        ph.picture_header_size as usize + slice_table_bytes + slice_sizes.iter().sum::<usize>();
+    if (total_picture_bytes as u32) != ph.picture_size {
+        return Err(Error::invalid(
+            "prores: picture_size mismatch with header + slice table + payloads",
+        ));
+    }
+    if data.len() < total_picture_bytes {
+        return Err(Error::invalid("prores: picture overruns buffer"));
+    }
+
+    const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    let chroma_offsets: &[(usize, usize)] = match chroma {
+        ChromaFormat::Y422 => &[(0, 0), (0, 1)],
+        ChromaFormat::Y444 => &LUMA_OFFSETS,
+    };
+    let cb_per_mb = chroma_blocks_per_mb(chroma);
+    let per_mb = blocks_per_mb(chroma);
+
+    let mut slice_idx = 0usize;
+    for my in 0..mbs_y {
+        let mut mx = 0usize;
+        for &slice_size_in_mb_template in &slice_sizes_template {
+            let mbs_this_slice = slice_size_in_mb_template.min(mbs_x - mx);
+            if mbs_this_slice == 0 {
+                break;
+            }
+            let coded_size = slice_sizes[slice_idx];
+            if cursor.len() < coded_size {
+                return Err(Error::invalid("prores: slice payload truncated"));
+            }
+            let slice_data = &cursor[..coded_size];
+            cursor = &cursor[coded_size..];
+            slice_idx += 1;
+
+            let (sh, after_sh) = parse_slice_header(slice_data, has_alpha)?;
+            let coded_y = sh.coded_size_of_y_data as usize;
+            let coded_cb = sh.coded_size_of_cb_data as usize;
+            let cr_data_size = if let Some(sz) = sh.coded_size_of_cr_data {
+                sz as usize
+            } else {
+                slice_data
+                    .len()
+                    .checked_sub(sh.slice_header_size as usize + coded_y + coded_cb)
+                    .ok_or_else(|| Error::invalid("prores: cr_data size underflow"))?
+            };
+            if after_sh.len() < coded_y + coded_cb + cr_data_size {
+                return Err(Error::invalid("prores: slice components truncated"));
+            }
+            let y_data = &after_sh[..coded_y];
+            let cb_data = &after_sh[coded_y..coded_y + coded_cb];
+            let cr_data = &after_sh[coded_y + coded_cb..coded_y + coded_cb + cr_data_size];
+            let alpha_data: &[u8] = if has_alpha {
+                &after_sh[coded_y + coded_cb + cr_data_size..]
+            } else {
+                &[]
+            };
+
+            let blocks = decode_slice_components(
+                y_data,
+                cb_data,
+                cr_data,
+                mbs_this_slice,
+                chroma,
+                interlaced,
+            )?;
+            if blocks.len() != mbs_this_slice * per_mb {
+                return Err(Error::invalid(
+                    "prores: decoded block count mismatch in slice",
+                ));
+            }
+
+            for mb_within in 0..mbs_this_slice {
+                let mb_x = mx + mb_within;
+                let base = mb_within * per_mb;
+                for (i, (bx, by)) in LUMA_OFFSETS.iter().enumerate() {
+                    let mut blk_f =
+                        dequant_to_f32(&blocks[base + i], &fh.luma_qmat, sh.quantization_index);
+                    idct8x8(&mut blk_f);
+                    paste_block(
+                        y_plane,
+                        y_byte_stride,
+                        mb_x * MB_SIDE_PX + bx * 8,
+                        my * MB_SIDE_PX + by * 8,
+                        &blk_f,
+                        bit_depth,
+                        field,
+                    );
+                }
+                for (i, (bx, by)) in chroma_offsets.iter().enumerate() {
+                    let mut blk_f = dequant_to_f32(
+                        &blocks[base + LUMA_BLOCKS_PER_MB + i],
+                        &fh.chroma_qmat,
+                        sh.quantization_index,
+                    );
+                    idct8x8(&mut blk_f);
+                    let (x0, y0) = match chroma {
+                        ChromaFormat::Y422 => (mb_x * 8, my * MB_SIDE_PX + by * 8),
+                        ChromaFormat::Y444 => {
+                            (mb_x * MB_SIDE_PX + bx * 8, my * MB_SIDE_PX + by * 8)
+                        }
+                    };
+                    paste_block(cb_plane, c_byte_stride, x0, y0, &blk_f, bit_depth, field);
+                }
+                for (i, (bx, by)) in chroma_offsets.iter().enumerate() {
+                    let mut blk_f = dequant_to_f32(
+                        &blocks[base + LUMA_BLOCKS_PER_MB + cb_per_mb + i],
+                        &fh.chroma_qmat,
+                        sh.quantization_index,
+                    );
+                    idct8x8(&mut blk_f);
+                    let (x0, y0) = match chroma {
+                        ChromaFormat::Y422 => (mb_x * 8, my * MB_SIDE_PX + by * 8),
+                        ChromaFormat::Y444 => {
+                            (mb_x * MB_SIDE_PX + bx * 8, my * MB_SIDE_PX + by * 8)
+                        }
+                    };
+                    paste_block(cr_plane, c_byte_stride, x0, y0, &blk_f, bit_depth, field);
+                }
+            }
+            if let Some(act) = alpha_kind {
+                let slice_vertical_size = if my < mbs_y - 1 {
+                    MB_SIDE_PX
+                } else {
+                    picture_height - my * MB_SIDE_PX
+                };
+                let cols = MB_SIDE_PX * mbs_this_slice;
+                let num_alpha_values = cols * slice_vertical_size;
+                let alpha_values = decode_scanned_alpha(alpha_data, num_alpha_values, act)?;
+                paste_alpha(
+                    a_plane,
+                    a_byte_stride,
+                    mx * MB_SIDE_PX,
+                    my * MB_SIDE_PX,
+                    cols,
+                    slice_vertical_size,
+                    &alpha_values,
+                    act,
+                    bit_depth,
+                    field,
+                );
+            }
+            mx += mbs_this_slice;
+        }
+    }
+    Ok(&data[total_picture_bytes..])
+}
+
 fn dequant_to_f32(blk: &[i32; 64], qmat: &[u8; 64], quantization_index: u8) -> [f32; 64] {
     // F[v][u] = (QF[v][u] * W[v][u] * qScale) / 8
     let qs = qscale(quantization_index) as f32;
@@ -467,14 +596,11 @@ fn dequant_to_f32(blk: &[i32; 64], qmat: &[u8; 64], quantization_index: u8) -> [
 /// position `(x0, y0)`. `byte_stride` is the row stride of `plane` in
 /// **bytes** (i.e. samples_per_row * bytes_per_sample).
 ///
-/// The encoder applied a constant level shift `pixel - 128` regardless
-/// of bit depth, so the IDCT output `v` lives in the same nominal
-/// range (~[-128, 127]) for all bit-depth paths. The deeper-bit emitters
-/// scale the centre-restored value by `2^(b-8)` so a saturated 8-bit
-/// pixel (value 255) lands at the deeper equivalent (1020 at 10-bit,
-/// 4080 at 12-bit). This is the same scaling convention the encoder
-/// uses on the input side, allowing one quant matrix and qScale path
-/// across all depths.
+/// Per RDD 36 §7.5.1, the IDCT output `v` is centred in the half-open
+/// range `[-256, 256)` (9-bit signed integers). The pixel sample is
+/// `s = clamp(round(2^b * (v + 256) / 512))`. For 8-bit that simplifies
+/// to `s = clamp(round((v + 256) / 2))`; for 10-bit `s = (v+256) * 2`;
+/// for 12-bit `s = (v+256) * 8`.
 fn paste_block(
     plane: &mut [u8],
     byte_stride: usize,
@@ -482,41 +608,45 @@ fn paste_block(
     y0: usize,
     blk: &[f32; 64],
     bit_depth: BitDepth,
+    field: FieldStride,
 ) {
+    let scale = match bit_depth {
+        BitDepth::Eight => 0.5,
+        BitDepth::Ten => 2.0,
+        BitDepth::Twelve => 8.0,
+    };
+    let max_u32 = bit_depth.max_value();
     match bit_depth {
         BitDepth::Eight => {
             for j in 0..8 {
+                let row = field.map(y0 + j);
                 for i in 0..8 {
-                    let v = blk[j * 8 + i] + 128.0;
+                    let v = (blk[j * 8 + i] + 256.0) * scale;
                     let px = if v <= 0.0 {
                         0
-                    } else if v >= 255.0 {
-                        255
+                    } else if v >= max_u32 as f32 {
+                        max_u32 as u8
                     } else {
                         v.round() as u8
                     };
-                    plane[(y0 + j) * byte_stride + x0 + i] = px;
+                    plane[row * byte_stride + x0 + i] = px;
                 }
             }
         }
         BitDepth::Ten | BitDepth::Twelve => {
-            let scale = match bit_depth {
-                BitDepth::Ten => 4.0,
-                BitDepth::Twelve => 16.0,
-                _ => unreachable!(),
-            };
-            let max = bit_depth.max_value() as f32;
+            let max = max_u32 as f32;
             for j in 0..8 {
+                let row = field.map(y0 + j);
                 for i in 0..8 {
-                    let v = (blk[j * 8 + i] + 128.0) * scale;
+                    let v = (blk[j * 8 + i] + 256.0) * scale;
                     let px: u16 = if v <= 0.0 {
                         0
                     } else if v >= max {
-                        bit_depth.max_value() as u16
+                        max_u32 as u16
                     } else {
                         v.round() as u16
                     };
-                    let off = (y0 + j) * byte_stride + (x0 + i) * 2;
+                    let off = row * byte_stride + (x0 + i) * 2;
                     plane[off] = (px & 0xFF) as u8;
                     plane[off + 1] = (px >> 8) as u8;
                 }
@@ -552,13 +682,15 @@ fn paste_alpha(
     values: &[u16],
     act: AlphaChannelType,
     out_depth: BitDepth,
+    field: FieldStride,
 ) {
     debug_assert_eq!(values.len(), cols * rows);
     let bps = out_depth.bytes_per_sample();
     for r in 0..rows {
+        let row = field.map(y0 + r);
         for c in 0..cols {
             let s = alpha_to_sample(values[r * cols + c], act, out_depth);
-            let off = (y0 + r) * byte_stride + (x0 + c) * bps;
+            let off = row * byte_stride + (x0 + c) * bps;
             match out_depth {
                 BitDepth::Eight => {
                     plane[off] = s as u8;
