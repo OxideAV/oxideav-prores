@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Configurable per-component quantisation matrices for the encoder
+  (RDD 36 §5.3.4 + §6.3.7 + §7.3). New public types:
+  `quant::QuantMatrices` (luma + chroma `[u8; 64]` weights, both
+  validated against the spec range `2..=63`) and
+  `encoder::EncoderConfig` (carries the optional matrices). Reference
+  perceptual matrices `quant::PERCEPTUAL_LUMA_QMAT` /
+  `PERCEPTUAL_CHROMA_QMAT` are JPEG K.1/K.2 normalised so DC weight
+  is 2 (twice as fine as the flat all-4s default), with HF weights
+  rising to ~12 (luma) / 12 (chroma). New entry points:
+  `encoder::make_encoder_with_config(params, EncoderConfig)`,
+  `encoder::EncoderConfig::{flat, perceptual, with_quant_matrices}`,
+  `encoder::encode_frame_with_qmats(...)`. The encoder writes the
+  matrices into the frame header (setting `load_luma_qmat = 1` and,
+  when `chroma != luma`, `load_chroma_qmat = 1`) so any RDD 36
+  decoder picks them up; ffmpeg cross-decodes the resulting bitstream
+  cleanly. On broadband content the perceptual matrices cut packet
+  size by 20-25% at every `quantization_index` from 2 to 16; PSNR
+  trades off because flat is provably PSNR-optimal under uniform
+  quantisation, but perceptual quality (JPEG-style CSF rolloff) is
+  preserved. New integration tests in `tests/perceptual_quant.rs`
+  (7 cases) cover A/B sizes, header roundtrip, ffmpeg cross-decode,
+  and config validation.
 - Interlaced encode + decode per RDD 36 §5.1 / §6.2 / §7.5.3. The frame
   header `interlace_mode` field is honoured at decode time (mode 1 =
   top-field-first, mode 2 = bottom-field-first) and the two field

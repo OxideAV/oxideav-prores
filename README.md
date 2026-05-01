@@ -53,6 +53,36 @@ encoder use the spec's entropy coder for color, but the encoder emits
 a plain run-length alpha (alternative path permitted by §7.1.2); the
 coder is bit-exact with itself and decoder-compatible.
 
+### Configurable quantisation matrices (RDD 36 §5.3.4 + §6.3.7 + §7.3)
+
+The encoder defaults to the spec's flat all-4s quantisation matrix
+(`load_luma_qmat = load_chroma_qmat = 0`, 20-byte frame header — same
+as `prores_ks` for `apcn` / `apch` when no perceptual preset is
+selected). Pass an [`encoder::EncoderConfig`] with a non-default
+[`quant::QuantMatrices`] to load custom matrices into the frame header
+(making the header 84 or 148 bytes per §7.3) — every RDD 36 decoder,
+including ffmpeg's, uses the loaded matrices for dequantisation.
+
+A built-in perceptual preset is provided via
+[`quant::QuantMatrices::perceptual`]: JPEG K.1 / K.2 (ISO/IEC 10918-1
+Annex K) normalised to a DC weight of 2 and clamped to the spec's
+`2..=63` weight range. At every `quantization_index` from 2 to 16 the
+perceptual matrices cut packet size by 20-25% on broadband content
+because the entropy coder's `endOfData()` semantics (RDD 36 §7.1.1)
+turn HF zeros into trailing zero runs that cost no bits. PSNR trades
+off slightly because flat is provably PSNR-optimal under uniform
+quantisation, but JPEG-style CSF-rolloff matrices preserve perceptual
+quality far better than the same byte-count flat encode.
+
+```rust
+use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+use oxideav_prores::quant::QuantMatrices;
+
+let enc = make_encoder_with_config(&params, EncoderConfig::perceptual())?;
+// Or: EncoderConfig::default().with_quant_matrices(QuantMatrices { luma, chroma })
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ### Interlaced (RDD 36 §5.1, §6.2, §7.5.3)
 
 A frame's `interlace_mode` (0 = progressive, 1 = top-field-first,

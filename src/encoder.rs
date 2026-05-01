@@ -20,8 +20,47 @@ use crate::frame::{
     compute_slice_sizes, write_frame_with_alpha, write_picture_header, write_slice_header,
     ChromaFormat, Profile,
 };
-use crate::quant::{qscale, DEFAULT_QMAT};
+use crate::quant::{qscale, QuantMatrices, DEFAULT_QMAT};
 use crate::slice::{blocks_per_mb, chroma_blocks_per_mb, encode_slice_components};
+
+/// Encoder-side configuration. Defaults match the legacy behaviour
+/// (flat all-4s quantisation matrices, `load_luma_qmat = 0`,
+/// `load_chroma_qmat = 0`).
+#[derive(Clone, Debug, Default)]
+pub struct EncoderConfig {
+    /// Per-component quantisation weight matrices. `None` is identical
+    /// to `Some(QuantMatrices::flat())` — the encoder writes
+    /// `load_luma_qmat = load_chroma_qmat = 0` and uses the spec's
+    /// default matrix internally for quantisation. When non-default
+    /// matrices are supplied the encoder writes the matrices into the
+    /// frame header (setting `load_*_qmat` to 1) so any RDD 36 decoder
+    /// can dequantise correctly.
+    pub quant_matrices: Option<QuantMatrices>,
+}
+
+impl EncoderConfig {
+    /// Construct a config that emits the flat all-4s matrices and
+    /// `load_*_qmat = 0` (back-compat with the pre-config encoder).
+    pub fn flat() -> Self {
+        Self::default()
+    }
+
+    /// Construct a config that emits perceptual JPEG-derived quant
+    /// matrices (see [`QuantMatrices::perceptual`]). The matrices are
+    /// written into the frame header so cross-decoders pick them up.
+    pub fn perceptual() -> Self {
+        Self {
+            quant_matrices: Some(QuantMatrices::perceptual()),
+        }
+    }
+
+    /// Use the supplied per-component matrices. Both must have weights
+    /// in `2..=63` per RDD 36 §7.3 (validated at encode time).
+    pub fn with_quant_matrices(mut self, qm: QuantMatrices) -> Self {
+        self.quant_matrices = Some(qm);
+        self
+    }
+}
 
 /// Default `quantization_index` used for 422 Standard. Lower = higher quality.
 pub const DEFAULT_QUANT_INDEX: u8 = 4;
@@ -62,6 +101,24 @@ pub fn pick_profile(chroma: ChromaFormat, bit_rate: Option<u64>) -> Profile {
 }
 
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+    make_encoder_with_config(params, EncoderConfig::default())
+}
+
+/// Build a ProRes encoder with explicit [`EncoderConfig`] — wires
+/// optional perceptual quantisation matrices through to the frame
+/// header (setting `load_luma_qmat = load_chroma_qmat = 1` when the
+/// matrices differ from the spec default of all-4s).
+pub fn make_encoder_with_config(
+    params: &CodecParameters,
+    config: EncoderConfig,
+) -> Result<Box<dyn Encoder>> {
+    if let Some(qm) = &config.quant_matrices {
+        if !qm.weights_valid() {
+            return Err(Error::invalid(
+                "prores encoder: quant matrix weight outside RDD 36 range 2..=63",
+            ));
+        }
+    }
     let width = params
         .width
         .ok_or_else(|| Error::invalid("prores encoder: missing width"))?;
@@ -103,6 +160,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         bit_depth,
         profile,
         quant_index,
+        config,
         time_base: params
             .frame_rate
             .map_or(TimeBase::new(1, 90_000), |r| TimeBase::new(r.den, r.num)),
@@ -119,6 +177,7 @@ struct ProResEncoder {
     bit_depth: BitDepth,
     profile: Profile,
     quant_index: u8,
+    config: EncoderConfig,
     time_base: TimeBase,
     pending: VecDeque<Packet>,
     eof: bool,
@@ -136,7 +195,7 @@ impl Encoder for ProResEncoder {
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         match frame {
             Frame::Video(v) => {
-                let data = encode_frame_with_depth(
+                let data = encode_frame_full(
                     v,
                     self.width,
                     self.height,
@@ -144,6 +203,9 @@ impl Encoder for ProResEncoder {
                     self.bit_depth,
                     self.profile,
                     self.quant_index,
+                    None,
+                    0,
+                    self.config.quant_matrices,
                 )?;
                 let mut pkt = Packet::new(0, self.time_base, data);
                 pkt.pts = v.pts;
@@ -237,6 +299,39 @@ pub fn encode_frame_with_depth(
     )
 }
 
+/// Encode a single picture using explicit per-component quantisation
+/// weight matrices (RDD 36 §7.3). When `qmats` differs from the spec
+/// default of all-4s the encoder loads the matrices into the frame
+/// header (`load_luma_qmat = load_chroma_qmat = 1`) so any RDD 36
+/// decoder reconstructs them correctly.
+///
+/// Equivalent to [`encode_frame_with_depth`] when
+/// `qmats == QuantMatrices::flat()`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_frame_with_qmats(
+    frame: &VideoFrame,
+    img_w: u32,
+    img_h: u32,
+    chroma: ChromaFormat,
+    bit_depth: BitDepth,
+    profile: Profile,
+    quantization_index: u8,
+    qmats: QuantMatrices,
+) -> Result<Vec<u8>> {
+    encode_frame_full(
+        frame,
+        img_w,
+        img_h,
+        chroma,
+        bit_depth,
+        profile,
+        quantization_index,
+        None,
+        0,
+        Some(qmats),
+    )
+}
+
 /// Encode a single picture to an RDD 36 frame with optional alpha
 /// channel coding (RDD 36 §5.3.3 + §7.1.2).
 ///
@@ -270,6 +365,7 @@ pub fn encode_frame_with_alpha(
         quantization_index,
         alpha_channel_type,
         0,
+        None,
     )
 }
 
@@ -306,12 +402,21 @@ pub fn encode_frame_interlaced(
         quantization_index,
         alpha_channel_type,
         interlace_mode,
+        None,
     )
 }
 
 /// Internal entrypoint shared by progressive and interlaced encodes.
 /// `interlace_mode == 0` builds a single picture; `1` (TFF) or `2`
 /// (BFF) builds two field pictures per §5.1.
+///
+/// `qmats == None` reproduces the legacy behaviour: flat all-4s
+/// matrices, `load_luma_qmat = load_chroma_qmat = 0`, frame_header_size
+/// = 20. `qmats == Some(QuantMatrices::flat())` is treated identically
+/// (no point loading the default matrix into the bitstream). For any
+/// other matrices, the encoder writes `load_luma_qmat = 1` and (when
+/// the chroma matrix differs from the luma matrix) `load_chroma_qmat
+/// = 1`, growing the frame header by 64 or 128 bytes per §7.3.
 #[allow(clippy::too_many_arguments)]
 fn encode_frame_full(
     frame: &VideoFrame,
@@ -323,6 +428,7 @@ fn encode_frame_full(
     quantization_index: u8,
     alpha_channel_type: Option<AlphaChannelType>,
     interlace_mode: u8,
+    qmats: Option<QuantMatrices>,
 ) -> Result<Vec<u8>> {
     let expected_planes = if alpha_channel_type.is_some() { 4 } else { 3 };
     if frame.planes.len() != expected_planes {
@@ -341,14 +447,35 @@ fn encode_frame_full(
             "prores encoder: profile chroma_format does not match requested chroma",
         ));
     }
+    if let Some(qm) = &qmats {
+        if !qm.weights_valid() {
+            return Err(Error::invalid(
+                "prores encoder: quant matrix weight outside RDD 36 range 2..=63",
+            ));
+        }
+    }
     let width = img_w as usize;
     let height = img_h as usize;
 
     // Bound output capacity against header-declared dimensions.
     let cap = output_capacity_cap(img_w as u16, img_h as u16, chroma);
 
-    // Use the default flat all-4 quant matrix; do not load custom matrices.
-    let qmat = &DEFAULT_QMAT;
+    // Resolve the per-component matrices used for quantisation. When
+    // the caller passed flat (or no) matrices we keep load_*_qmat = 0
+    // for byte-exact compatibility with the pre-config encoder.
+    let qmat_pair = qmats.unwrap_or_default();
+    let load_luma = !qmat_pair.is_default();
+    let load_chroma = load_luma && qmat_pair.chroma != qmat_pair.luma;
+    let luma_qmat = if load_luma {
+        &qmat_pair.luma
+    } else {
+        &DEFAULT_QMAT
+    };
+    let chroma_qmat = if load_luma {
+        &qmat_pair.chroma
+    } else {
+        &DEFAULT_QMAT
+    };
 
     // Per §6.2 picture_vertical_size derivation. Each interlaced field
     // is a separate picture sized at half the frame height (rounded
@@ -384,7 +511,8 @@ fn encode_frame_full(
             chroma,
             bit_depth,
             quantization_index,
-            qmat,
+            luma_qmat,
+            chroma_qmat,
             alpha_channel_type,
             interlaced,
             *field,
@@ -392,7 +520,9 @@ fn encode_frame_full(
         picture_blobs.push(blob);
     }
 
-    let frame_header_size = 20usize; // no qmats loaded → 20 bytes
+    // Per §5.1.1 frame_header_size: 20 + 64 (load_luma) + 64 (load_chroma).
+    let frame_header_size =
+        20usize + if load_luma { 64 } else { 0 } + if load_chroma { 64 } else { 0 };
     let pictures_total: usize = picture_blobs.iter().map(|p| p.len()).sum();
     let total_frame_size_no_padding = 4 + 4 + frame_header_size + pictures_total;
     if total_frame_size_no_padding > cap {
@@ -409,10 +539,10 @@ fn encode_frame_full(
         img_h as u16,
         chroma,
         interlace_mode,
-        qmat,
-        qmat,
-        false, // load_luma_qmat = 0 → default
-        false, // load_chroma_qmat = 0
+        luma_qmat,
+        chroma_qmat,
+        load_luma,
+        load_chroma,
         alpha_channel_type.map_or(0, |a| a.code()),
     );
     for blob in &picture_blobs {
@@ -445,6 +575,11 @@ impl FieldStride {
 /// Build one `picture()` blob (picture_header + slice_table +
 /// concatenated slice payloads). For interlaced encodes the caller
 /// invokes this twice (once per field).
+///
+/// `luma_qmat` is applied to all four luma blocks per macroblock;
+/// `chroma_qmat` is applied to both Cb and Cr blocks. Both matrices
+/// must be the same matrices written into the frame header so the
+/// decoder dequantises with the matching W[][].
 #[allow(clippy::too_many_arguments)]
 fn encode_one_picture(
     frame: &VideoFrame,
@@ -454,7 +589,8 @@ fn encode_one_picture(
     chroma: ChromaFormat,
     bit_depth: BitDepth,
     quantization_index: u8,
-    qmat: &[u8; 64],
+    luma_qmat: &[u8; 64],
+    chroma_qmat: &[u8; 64],
     alpha_channel_type: Option<AlphaChannelType>,
     interlaced: bool,
     field: FieldStride,
@@ -498,7 +634,7 @@ fn encode_one_picture(
                         frame_h,
                         x0,
                         y0,
-                        qmat,
+                        luma_qmat,
                         quantization_index,
                         bit_depth,
                         field,
@@ -519,7 +655,7 @@ fn encode_one_picture(
                             frame_h,
                             x0,
                             y0,
-                            qmat,
+                            chroma_qmat,
                             quantization_index,
                             bit_depth,
                             field,
