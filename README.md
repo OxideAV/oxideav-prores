@@ -2,7 +2,7 @@
 
 Pure-Rust **Apple ProRes** codec — decoder + encoder for all six
 ProRes video profiles (422 Proxy / LT / Standard / HQ and 4444 /
-4444 XQ). 8-bit Y'CbCr only; alpha not currently carried.
+4444 XQ). 8-bit and 10-bit Y'CbCr; alpha not currently carried.
 
 Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace)
 framework but usable standalone. No C libraries, no FFI wrappers, no
@@ -10,14 +10,22 @@ framework but usable standalone. No C libraries, no FFI wrappers, no
 
 ## Status
 
-| Profile        | FourCC | Input pixel format | State           |
-|----------------|--------|--------------------|-----------------|
-| 422 Proxy      | `apco` | `Yuv422P` 8-bit    | decode + encode |
-| 422 LT         | `apcs` | `Yuv422P` 8-bit    | decode + encode |
-| 422 Standard   | `apcn` | `Yuv422P` 8-bit    | decode + encode |
-| 422 HQ         | `apch` | `Yuv422P` 8-bit    | decode + encode |
-| 4444           | `ap4h` | `Yuv444P` 8-bit    | decode + encode (no alpha) |
-| 4444 XQ        | `ap4x` | `Yuv444P` 8-bit    | decode + encode (no alpha) |
+| Profile        | FourCC | Pixel formats                    | State           |
+|----------------|--------|----------------------------------|-----------------|
+| 422 Proxy      | `apco` | `Yuv422P`, `Yuv422P10Le`         | decode + encode |
+| 422 LT         | `apcs` | `Yuv422P`, `Yuv422P10Le`         | decode + encode |
+| 422 Standard   | `apcn` | `Yuv422P`, `Yuv422P10Le`         | decode + encode |
+| 422 HQ         | `apch` | `Yuv422P`, `Yuv422P10Le`         | decode + encode |
+| 4444           | `ap4h` | `Yuv444P`, `Yuv444P10Le`         | decode + encode (no alpha) |
+| 4444 XQ        | `ap4x` | `Yuv444P`, `Yuv444P10Le`         | decode + encode (no alpha) |
+
+Bit-depth selection follows the stream's `CodecParameters::pixel_format`
+— RDD 36 §5 carries no per-frame bit-depth syntax element; §7.5.1
+defines the conversion from reconstructed color component values to
+pixel samples of arbitrary bit depth `b`. Pass `Yuv422P10Le` /
+`Yuv444P10Le` to get 10-bit planar output (LE u16 pairs, valid range
+`0..=1023`); pass `Yuv422P` / `Yuv444P` (or omit `pixel_format`) to
+get 8-bit planar output. 12-bit + alpha are separate follow-ups.
 
 The 4444 and 4444 XQ profiles share the same bitstream structure as
 4444 — XQ is selected when the caller requests the highest quality

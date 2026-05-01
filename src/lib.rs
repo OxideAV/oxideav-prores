@@ -1,55 +1,50 @@
 // Parallel-array index loops are idiomatic in codec/DCT code; skip the lint.
 #![allow(clippy::needless_range_loop)]
 
-//! Apple ProRes codec — minimal pure-Rust decoder + encoder.
+//! Apple ProRes codec — pure-Rust decoder + encoder following SMPTE
+//! RDD 36:2022.
 //!
-//! Scope: all six ProRes video profiles, selected via
-//! `CodecParameters::bit_rate` and `pixel_format`:
+//! Scope: all six ProRes video profiles, dispatched by container FourCC:
 //!
 //! * 422 Proxy / LT / Standard / HQ for 4:2:2 Y'CbCr 8-bit
 //!   (`PixelFormat::Yuv422P`, fourccs `apco`/`apcs`/`apcn`/`apch`).
 //! * 4444 + 4444 XQ for 4:4:4 Y'CbCr 8-bit (`PixelFormat::Yuv444P`,
-//!   fourccs `ap4h`/`ap4x`). The alpha plane of RDD 36 Annex B is
-//!   not carried — the core pixel-format enum does not yet include
+//!   fourccs `ap4h`/`ap4x`). The alpha plane defined in RDD 36 §5.3.3
+//!   is not carried — the core pixel-format enum does not yet include
 //!   `Yuva444P`, so the A' coding layer is skipped.
 //!
-//! The wire format follows SMPTE RDD 36 structurally (frame header
-//! with `icpf` magic, picture header, per-slice table, slices holding
-//! 8x8 DCT coefficients for 4 luma + 2 Cb + 2 Cr blocks per MB in
-//! 4:2:2, or 4 Y + 4 Cb + 4 Cr blocks per MB in 4:4:4) but uses a
-//! simplified entropy layer (unsigned / signed exp-Golomb on
-//! zig-zag-scanned coefficients) that is internally round-trip-exact
-//! but **not** bit-compatible with Apple ProRes in the wild. See the
-//! module docs of [`bitstream`] and [`slice`] for the deviation.
+//! ### Bitstream
+//!
+//! * `frame() { frame_size, 'icpf', frame_header(), picture()+ }` per
+//!   RDD 36 §5.1.
+//! * `picture() { picture_header(), slice_table(), slice()+ }` per §5.2.
+//! * `slice() { slice_header(), Y' data, Cb data, Cr data }` per §5.3,
+//!   each component coded with the run/level/sign entropy coder of
+//!   §7.1.1.
+//!
+//! Bitstream syntax, entropy coder, slice + block scans, and inverse
+//! quantization are bit-exact with the spec. The IDCT is a textbook
+//! float implementation (§7.4 allows fixed- or floating-point, subject
+//! to Annex A accuracy) — sufficient for visual fidelity.
 //!
 //! ### Module layout
 //!
-//! * [`bitstream`] — MSB-first bit reader/writer, unsigned/signed exp-Golomb.
+//! * [`bitstream`] — MSB-first bit reader/writer.
+//! * [`entropy`]   — RDD 36 Golomb-Rice / exp-Golomb combination codes
+//!   plus the adaptive run/level/sign coefficient coder.
 //! * [`dct`]       — Textbook f32 8x8 forward/inverse DCT.
-//! * [`quant`]     — Hard-coded luma/chroma quant matrices + zig-zag table.
-//! * [`slice`]     — Per-slice pack/unpack of coefficient blocks.
-//! * [`frame`]     — Frame + picture header layouts.
+//! * [`quant`]     — Default quant matrices, qScale table, block scans.
+//! * [`slice`]     — Per-slice pack/unpack: per-component encode +
+//!   inverse slice scan into natural-order blocks.
+//! * [`frame`]     — Frame / picture / slice header layouts.
 //! * [`decoder`]   — `Packet -> VideoFrame` (Yuv422P / Yuv444P).
 //! * [`encoder`]   — `VideoFrame` (Yuv422P / Yuv444P) -> `Packet`.
-//!
-//! ### Container dispatch
-//!
-//! MP4 / MOV demuxers can recognise a ProRes stream in two ways:
-//!
-//! 1. **Dynamic** — call [`register`] on a `CodecRegistry`; the crate
-//!    claims the six profile FourCCs as case-insensitive tags so
-//!    `CodecRegistry::resolve_tag` returns `CodecId::new("prores")`
-//!    for any of them. This is what `oxideav-mp4`'s demuxer does when
-//!    a resolver is plumbed in.
-//! 2. **Static** — call [`codec_id_for_fourcc`] for the same mapping
-//!    without touching a registry. Useful for demuxers that cannot
-//!    consult a resolver (early probing, unit tests). [`PRORES_FOURCCS`]
-//!    enumerates the six canonical lower-case tags.
 
 pub mod bitstream;
 pub mod dct;
 pub mod decoder;
 pub mod encoder;
+pub mod entropy;
 pub mod frame;
 pub mod quant;
 pub mod slice;
@@ -72,21 +67,10 @@ pub const CODEC_ID_STR: &str = "prores";
 /// | apch   | Apple ProRes 422 HQ                         |
 /// | ap4h   | Apple ProRes 4444                           |
 /// | ap4x   | Apple ProRes 4444 XQ                        |
-///
-/// Container dispatch is case-insensitive in practice (demuxers
-/// upper-case for comparison, some `.mov`s stored them as `APCN`
-/// etc. since QuickTime originally normalised FourCCs), so callers
-/// should compare case-insensitively. This constant gives the
-/// canonical lower-case spelling only.
 pub const PRORES_FOURCCS: [&[u8; 4]; 6] = [b"apco", b"apcs", b"apcn", b"apch", b"ap4h", b"ap4x"];
 
 /// Returns `Some(CodecId::new("prores"))` if `fourcc` (case-insensitive)
-/// is one of the six ProRes MP4/MOV `VisualSampleEntry` FourCCs,
-/// otherwise `None`. Intended as a static fallback for demuxers that
-/// cannot consult a `CodecRegistry` — callers that _do_ have a
-/// registry should just register this crate via [`register`] and
-/// consult `CodecRegistry::resolve_tag`, which already claims the
-/// same six FourCCs as case-insensitive tags.
+/// is one of the six ProRes MP4/MOV `VisualSampleEntry` FourCCs.
 pub fn codec_id_for_fourcc(fourcc: &[u8; 4]) -> Option<CodecId> {
     let mut upper = [0u8; 4];
     for i in 0..4 {
@@ -100,8 +84,7 @@ pub fn codec_id_for_fourcc(fourcc: &[u8; 4]) -> Option<CodecId> {
     }
 }
 
-/// Returns the matching [`frame::Profile`] for a given MP4/MOV FourCC
-/// (case-insensitive), or `None` for non-ProRes tags.
+/// Returns the matching [`frame::Profile`] for a given MP4/MOV FourCC.
 pub fn profile_for_fourcc(fourcc: &[u8; 4]) -> Option<frame::Profile> {
     let mut upper = [0u8; 4];
     for i in 0..4 {
@@ -126,11 +109,6 @@ pub fn register(reg: &mut CodecRegistry) {
         .with_intra_only(true)
         .with_pixel_format(PixelFormat::Yuv422P)
         .with_pixel_format(PixelFormat::Yuv444P);
-    // FourCC claims — ProRes profile FourCCs. Each profile gets its own
-    // FourCC at the container level but they all decode through the
-    // same path here. Unambiguous.
-    //   APCO = 422 Proxy, APCS = 422 LT, APCN = 422 (Standard),
-    //   APCH = 422 HQ, AP4H = 4444, AP4X = 4444 XQ.
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)
@@ -151,9 +129,7 @@ pub fn register(reg: &mut CodecRegistry) {
 mod tests {
     use super::*;
     use oxideav_core::frame::VideoPlane;
-    use oxideav_core::{
-        CodecId, CodecParameters, Frame, MediaType, PixelFormat, VideoFrame,
-    };
+    use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, VideoFrame};
 
     /// Build a 64x48 gradient in Yuv422P. Values are deliberately
     /// smooth so the codec's lossy path can hit reasonable PSNR at
@@ -209,8 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn encoder_decoder_roundtrip_psnr() {
-        // 64x48 fits exactly 4x3 MBs of 16x16 — no padding edge cases.
+    fn rdd36_encoder_decoder_roundtrip_psnr() {
         let width = 64u32;
         let height = 48u32;
         let original = synthetic_gradient(width, height);
@@ -238,11 +213,7 @@ mod tests {
             _ => panic!("expected video frame"),
         };
 
-        // Stream-level format / width / height live on CodecParameters
-        // (asserted via dec_params clone above); the frame is just
-        // pts + planes.
         assert_eq!(decoded.planes.len(), 3);
-
         for (i, (o, d)) in original
             .planes
             .iter()
@@ -292,7 +263,6 @@ mod tests {
         assert_eq!(codec_id_for_fourcc(b"avc1"), None);
         assert_eq!(codec_id_for_fourcc(b"hvc1"), None);
         assert_eq!(codec_id_for_fourcc(b"mp4v"), None);
-        // Non-ProRes `a*` tags: close but not ours.
         assert_eq!(codec_id_for_fourcc(b"alac"), None);
         assert_eq!(codec_id_for_fourcc(b"av01"), None);
     }
@@ -309,7 +279,6 @@ mod tests {
         ] {
             let fc = p.fourcc();
             assert_eq!(profile_for_fourcc(fc), Some(p), "fourcc roundtrip");
-            // Upper-case variant must also map.
             let mut up = *fc;
             up.make_ascii_uppercase();
             assert_eq!(profile_for_fourcc(&up), Some(p));
@@ -331,7 +300,6 @@ mod tests {
         }
     }
 
-    /// Build a 64x48 gradient in Yuv444P (chroma at full luma resolution).
     fn synthetic_gradient_444(width: u32, height: u32) -> VideoFrame {
         let w = width as usize;
         let h = height as usize;
@@ -345,8 +313,6 @@ mod tests {
                 cr[j * w + i] = (128 + ((j as i32 - h as i32 / 2) * 2).clamp(-64, 64)) as u8;
             }
         }
-        let _ = width;
-        let _ = height;
         VideoFrame {
             pts: Some(0),
             planes: vec![
@@ -364,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn encoder_decoder_roundtrip_psnr_4444() {
+    fn rdd36_encoder_decoder_roundtrip_psnr_4444() {
         let width = 64u32;
         let height = 48u32;
         let original = synthetic_gradient_444(width, height);
@@ -392,9 +358,7 @@ mod tests {
             _ => panic!("expected video frame"),
         };
 
-        // Stream-level format / width / height live on CodecParameters.
         assert_eq!(decoded.planes.len(), 3);
-
         for (i, (o, d)) in original
             .planes
             .iter()

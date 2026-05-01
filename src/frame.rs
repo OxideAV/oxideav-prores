@@ -1,76 +1,78 @@
-//! ProRes frame / picture headers.
+//! ProRes frame, picture, and slice headers (SMPTE RDD 36 §5).
 //!
-//! This module models a simplified, progressive-only, single-picture
-//! ProRes container that stays faithful to the shape of SMPTE RDD 36
-//! without requiring byte-exact compatibility with the spec's
-//! trailing-bits or reserved-field encoding. Fields match the spec
-//! ones we care about; the quant-matrix bytes are emitted literally so
-//! the decoder can recover the two per-plane matrices without any
-//! profile lookup.
+//! Wire layout (big-endian throughout):
 //!
-//! ## Frame header (fixed 152 bytes)
+//! ```text
+//! frame() {
+//!   frame_size:        u32  // total bytes including frame_size itself
+//!   frame_identifier:  4*u8 // 'icpf' (0x69637066)
+//!   frame_header():
+//!     frame_header_size:    u16
+//!     reserved:              u8
+//!     bitstream_version:     u8  // 0 (4:2:2 only) or 1 (4:2:2 / 4:4:4 + alpha)
+//!     encoder_identifier:  4*u8
+//!     horizontal_size:      u16
+//!     vertical_size:        u16
+//!     chroma_format:       u2 + reserved u2  // 2=4:2:2, 3=4:4:4
+//!     interlace_mode:      u2 + reserved u2
+//!     aspect_ratio_info:   u4
+//!     frame_rate_code:     u4
+//!     color_primaries:      u8
+//!     transfer_charac:      u8
+//!     matrix_coefficients:  u8
+//!     reserved:            u4
+//!     alpha_channel_type:  u4
+//!     reserved:           u14
+//!     load_luma_qmat:      u1
+//!     load_chroma_qmat:    u1
+//!     [luma_qmat 64*u8]   if load_luma_qmat
+//!     [chroma_qmat 64*u8] if load_chroma_qmat
+//!   picture():
+//!     picture_header():
+//!       picture_header_size: u5  // in bytes (= 8 normally)
+//!       reserved:           u3
+//!       picture_size:      u32  // bytes incl. picture header
+//!       deprecated_n_slc:  u16
+//!       reserved:           u2
+//!       log2_desired_slice_size_in_mb: u2
+//!       reserved:           u4
+//!     slice_table():
+//!       coded_size_of_slice[]: u16 each
+//!     slice() ...
+//! }
+//! ```
 //!
-//! | offset | size | field                           |
-//! |------- |----- |---------------------------------|
-//! | 0      | 4    | frame_size (BE u32, incl. hdr)  |
-//! | 4      | 4    | magic = b"icpf"                 |
-//! | 8      | 2    | frame_hdr_size (BE u16 = 152)   |
-//! | 10     | 2    | reserved = 0                    |
-//! | 12     | 4    | creator id = b"oxav"            |
-//! | 16     | 2    | width (BE u16)                  |
-//! | 18     | 2    | height (BE u16)                 |
-//! | 20     | 1    | chroma_fmt (2 = 4:2:2, 3 = 4:4:4) |
-//! | 21     | 1    | flags (bit0 = load_luma_qmat,   |
-//! |        |      |        bit1 = load_chroma_qmat) |
-//! | 22     | 1    | profile_code (0=Proxy, 1=LT,    |
-//! |        |      |               2=Standard,       |
-//! |        |      |               3=4444)           |
-//! | 23     | 1    | reserved = 0                    |
-//! | 24     | 64   | luma_qmat (natural order)       |
-//! | 88     | 64   | chroma_qmat (natural order)     |
-//!
-//! ## Picture header (fixed 8 bytes)
-//!
-//! | offset | size | field                           |
-//! |------- |----- |---------------------------------|
-//! | 0      | 1    | picture_hdr_size = 8            |
-//! | 1      | 4    | picture_size (BE u32, payload   |
-//! |        |      |   = slice-table + slice bytes)  |
-//! | 5      | 2    | slice_count (BE u16)            |
-//! | 7      | 1    | log2_desired_slice_mb_width (=3)|
-//!
-//! Followed by a slice-size table: `slice_count * u16` BE sizes, then
-//! the concatenated slice payloads.
+//! The `picture_header_size` field is in **bytes** (per §5.2.1), and the
+//! 5 bits used to encode it makes the maximum picture_header 31 bytes
+//! long. The standard layout above totals 8 bytes — the value emitted
+//! is therefore 8.
 
 use oxideav_core::{Error, Result};
 
-pub const MAGIC: &[u8; 4] = b"icpf";
-pub const CREATOR: &[u8; 4] = b"oxav";
-pub const FRAME_HDR_SIZE: usize = 152;
-pub const PICTURE_HDR_SIZE: usize = 8;
+/// 'icpf' magic, big-endian. Spec value: 0x69637066.
+pub const FRAME_IDENTIFIER: &[u8; 4] = b"icpf";
 
-pub const CHROMA_FMT_422: u8 = 2;
-pub const CHROMA_FMT_444: u8 = 3;
+/// 'oxav' encoder identifier — the four-character code we emit when
+/// producing ProRes frames.
+pub const ENCODER_IDENTIFIER: &[u8; 4] = b"oxav";
 
-pub const FLAG_LOAD_LUMA_QMAT: u8 = 1 << 0;
-pub const FLAG_LOAD_CHROMA_QMAT: u8 = 1 << 1;
+pub const CHROMA_FMT_422_CODE: u8 = 2;
+pub const CHROMA_FMT_444_CODE: u8 = 3;
 
 /// Chroma sampling format for a ProRes picture.
-///
-/// * [`ChromaFormat::Y422`] — 4:2:2 (chroma at half luma width, full luma height).
-/// * [`ChromaFormat::Y444`] — 4:4:4 (chroma planes at full luma resolution,
-///   the 4444 profile family).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ChromaFormat {
+    /// 4:2:2 — 2 Cb + 2 Cr blocks per macroblock.
     Y422,
+    /// 4:4:4 — 4 Cb + 4 Cr blocks per macroblock.
     Y444,
 }
 
 impl ChromaFormat {
     pub fn from_code(c: u8) -> Result<Self> {
         match c {
-            CHROMA_FMT_422 => Ok(Self::Y422),
-            CHROMA_FMT_444 => Ok(Self::Y444),
+            CHROMA_FMT_422_CODE => Ok(Self::Y422),
+            CHROMA_FMT_444_CODE => Ok(Self::Y444),
             other => Err(Error::unsupported(format!(
                 "prores: chroma_format {other} not supported"
             ))),
@@ -79,54 +81,26 @@ impl ChromaFormat {
 
     pub fn code(self) -> u8 {
         match self {
-            Self::Y422 => CHROMA_FMT_422,
-            Self::Y444 => CHROMA_FMT_444,
+            Self::Y422 => CHROMA_FMT_422_CODE,
+            Self::Y444 => CHROMA_FMT_444_CODE,
         }
     }
 }
 
-/// Profile discriminator stored in the frame header.
-///
-/// Numeric codes follow SMPTE RDD 36 Annex C (profile-id field in the
-/// decode-order header). They are preserved on the wire so a
-/// round-trip reports the exact profile that was encoded.
+/// Profile inferred from the container FourCC. Not a bitstream syntax
+/// element — RDD 36 frames carry only `chroma_format`, not a profile
+/// code. We keep it for the encoder API and to set sensible defaults.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Profile {
-    /// ProRes 422 Proxy (`apco`).
-    Proxy = 0,
-    /// ProRes 422 LT (`apcs`).
-    Lt = 1,
-    /// ProRes 422 Standard (`apcn`).
-    Standard = 2,
-    /// ProRes 422 HQ (`apch`).
-    Hq = 3,
-    /// ProRes 4444 (4:4:4 chroma, `ap4h`). No alpha plane in this
-    /// implementation — the core pixel-format enum does not yet carry
-    /// `Yuva444P`, so the A' plane of RDD 36 Annex B is not emitted.
-    Prores4444 = 4,
-    /// ProRes 4444 XQ (`ap4x`). Same bitstream shape as 4444 but
-    /// targets the highest quality tier (quant index 1).
-    Prores4444Xq = 5,
+    Proxy,
+    Lt,
+    Standard,
+    Hq,
+    Prores4444,
+    Prores4444Xq,
 }
 
 impl Profile {
-    pub fn from_code(c: u8) -> Result<Self> {
-        match c {
-            0 => Ok(Self::Proxy),
-            1 => Ok(Self::Lt),
-            2 => Ok(Self::Standard),
-            3 => Ok(Self::Hq),
-            4 => Ok(Self::Prores4444),
-            5 => Ok(Self::Prores4444Xq),
-            other => Err(Error::unsupported(format!(
-                "prores: profile code {other} not supported"
-            ))),
-        }
-    }
-
-    /// Macroblock-FourCC for this profile as would appear in a `.mov`
-    /// `VisualSampleEntry`. Informational — the header stores a
-    /// numeric code.
     pub fn fourcc(self) -> &'static [u8; 4] {
         match self {
             Profile::Proxy => b"apco",
@@ -138,7 +112,6 @@ impl Profile {
         }
     }
 
-    /// Native chroma format for this profile.
     pub fn chroma_format(self) -> ChromaFormat {
         match self {
             Profile::Proxy | Profile::Lt | Profile::Standard | Profile::Hq => ChromaFormat::Y422,
@@ -146,9 +119,8 @@ impl Profile {
         }
     }
 
-    /// Default quant index for this profile. Lower index → higher
-    /// quality + larger packets. Used when the caller does not
-    /// override via `bit_rate`.
+    /// Default `quantization_index` used by the encoder when the caller
+    /// does not specify one. Lower index → higher quality + larger packets.
     pub fn default_quant_index(self) -> u8 {
         match self {
             Profile::Proxy => 8,
@@ -161,119 +133,352 @@ impl Profile {
     }
 }
 
-/// Parsed frame header view.
+/// Parsed RDD 36 frame header. Fields the rest of the decoder needs.
+#[derive(Clone, Debug)]
 pub struct FrameHeader {
     pub frame_size: u32,
+    pub frame_header_size: u16,
+    pub bitstream_version: u8,
     pub width: u16,
     pub height: u16,
     pub chroma_format: ChromaFormat,
-    pub profile: Profile,
+    pub interlace_mode: u8,
+    pub aspect_ratio_information: u8,
+    pub frame_rate_code: u8,
+    pub color_primaries: u8,
+    pub transfer_characteristic: u8,
+    pub matrix_coefficients: u8,
+    pub alpha_channel_type: u8,
     pub luma_qmat: [u8; 64],
     pub chroma_qmat: [u8; 64],
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn write_frame_header(
-    out: &mut Vec<u8>,
-    width: u16,
-    height: u16,
-    chroma_format: ChromaFormat,
-    profile: Profile,
-    luma_qmat: &[u8; 64],
-    chroma_qmat: &[u8; 64],
-    total_frame_size: u32,
-) {
-    out.extend_from_slice(&total_frame_size.to_be_bytes());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&(FRAME_HDR_SIZE as u16).to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes()); // reserved
-    out.extend_from_slice(CREATOR);
-    out.extend_from_slice(&width.to_be_bytes());
-    out.extend_from_slice(&height.to_be_bytes());
-    out.push(chroma_format.code());
-    out.push(FLAG_LOAD_LUMA_QMAT | FLAG_LOAD_CHROMA_QMAT);
-    out.push(profile as u8);
-    out.push(0); // reserved
-    out.extend_from_slice(luma_qmat);
-    out.extend_from_slice(chroma_qmat);
-    debug_assert_eq!(out.len(), FRAME_HDR_SIZE);
+impl FrameHeader {
+    pub fn picture_count(&self) -> u32 {
+        if self.interlace_mode == 0 {
+            1
+        } else {
+            2
+        }
+    }
 }
 
-pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
-    if data.len() < FRAME_HDR_SIZE {
-        return Err(Error::invalid("prores: frame header truncated"));
+/// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
+/// Returns the parsed header and the remaining bytes (everything after
+/// the frame header, i.e. starting at the first picture()).
+pub fn parse_frame(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
+    if data.len() < 8 {
+        return Err(Error::invalid("prores: frame truncated (need 8 bytes)"));
     }
     let frame_size = u32::from_be_bytes(data[0..4].try_into().unwrap());
-    if &data[4..8] != MAGIC {
+    if &data[4..8] != FRAME_IDENTIFIER {
         return Err(Error::invalid("prores: frame magic mismatch (not 'icpf')"));
     }
-    let hdr_size = u16::from_be_bytes(data[8..10].try_into().unwrap()) as usize;
-    if hdr_size != FRAME_HDR_SIZE {
-        return Err(Error::invalid("prores: unexpected frame header size"));
-    }
-    let width = u16::from_be_bytes(data[16..18].try_into().unwrap());
-    let height = u16::from_be_bytes(data[18..20].try_into().unwrap());
-    let chroma_format = ChromaFormat::from_code(data[20])?;
-    let flags = data[21];
-    let profile = Profile::from_code(data[22])?;
-    if flags & FLAG_LOAD_LUMA_QMAT == 0 || flags & FLAG_LOAD_CHROMA_QMAT == 0 {
+    if (frame_size as usize) > data.len() {
         return Err(Error::invalid(
-            "prores: frame header must carry both quant matrices",
+            "prores: frame_size exceeds available buffer",
         ));
     }
-    let mut luma_qmat = [0u8; 64];
-    let mut chroma_qmat = [0u8; 64];
-    luma_qmat.copy_from_slice(&data[24..88]);
-    chroma_qmat.copy_from_slice(&data[88..152]);
+    let frame_data = &data[..frame_size as usize];
+    let after_magic = &frame_data[8..];
+    let (fh, after_fh) = parse_frame_header(after_magic)?;
+    Ok((fh, after_fh))
+}
+
+/// Parse just the frame_header() block (assumes `data` starts at the
+/// frame_header_size field; i.e. caller has already consumed the 8
+/// bytes of frame_size + 'icpf').
+pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
+    if data.len() < 20 {
+        return Err(Error::invalid("prores: frame header truncated"));
+    }
+    let frame_header_size = u16::from_be_bytes(data[0..2].try_into().unwrap());
+    if (frame_header_size as usize) < 20 || (frame_header_size as usize) > data.len() {
+        return Err(Error::invalid("prores: bad frame_header_size"));
+    }
+    let _reserved = data[2];
+    let bitstream_version = data[3];
+    if bitstream_version > 1 {
+        return Err(Error::unsupported(format!(
+            "prores: unsupported bitstream_version {bitstream_version}"
+        )));
+    }
+    let _enc_id = &data[4..8];
+    let width = u16::from_be_bytes(data[8..10].try_into().unwrap());
+    let height = u16::from_be_bytes(data[10..12].try_into().unwrap());
+    // byte 12: chroma_format (u2) + reserved (u2) + interlace_mode (u2) + reserved (u2)
+    let b12 = data[12];
+    let chroma_code = (b12 >> 6) & 0x3;
+    let interlace_mode = (b12 >> 2) & 0x3;
+    let chroma_format = ChromaFormat::from_code(chroma_code)?;
+    // byte 13: aspect_ratio_information (u4) + frame_rate_code (u4)
+    let b13 = data[13];
+    let aspect_ratio_information = (b13 >> 4) & 0xF;
+    let frame_rate_code = b13 & 0xF;
+    let color_primaries = data[14];
+    let transfer_characteristic = data[15];
+    let matrix_coefficients = data[16];
+    // byte 17: reserved u4 + alpha_channel_type u4
+    let b17 = data[17];
+    let alpha_channel_type = b17 & 0xF;
+    // bytes 18..20: 14 reserved + load_luma + load_chroma (the last two bits)
+    let b19 = data[19];
+    let load_luma = (b19 >> 1) & 1;
+    let load_chroma = b19 & 1;
+
+    let mut luma_qmat = [4u8; 64];
+    let mut chroma_qmat = [4u8; 64];
+    let mut cursor = 20usize;
+    if load_luma == 1 {
+        if data.len() < cursor + 64 {
+            return Err(Error::invalid("prores: luma_qmat truncated"));
+        }
+        luma_qmat.copy_from_slice(&data[cursor..cursor + 64]);
+        cursor += 64;
+    }
+    if load_chroma == 1 {
+        if data.len() < cursor + 64 {
+            return Err(Error::invalid("prores: chroma_qmat truncated"));
+        }
+        chroma_qmat.copy_from_slice(&data[cursor..cursor + 64]);
+        cursor += 64;
+    } else if load_luma == 1 {
+        // Per §7.3: when load_chroma=0 but load_luma=1, chroma uses
+        // the loaded luma matrix.
+        chroma_qmat = luma_qmat;
+    }
+    // Skip up to frame_header_size, allowing trailing reserved bytes.
+    if cursor > frame_header_size as usize {
+        return Err(Error::invalid(
+            "prores: frame header parser overran declared size",
+        ));
+    }
+    // We don't use the frame_size from frame() here (parse_frame_header
+    // is also called directly in tests). Use 0 as a placeholder — the
+    // encoder fills it in.
     Ok((
         FrameHeader {
-            frame_size,
+            frame_size: 0,
+            frame_header_size,
+            bitstream_version,
             width,
             height,
             chroma_format,
-            profile,
+            interlace_mode,
+            aspect_ratio_information,
+            frame_rate_code,
+            color_primaries,
+            transfer_characteristic,
+            matrix_coefficients,
+            alpha_channel_type,
             luma_qmat,
             chroma_qmat,
         },
-        &data[FRAME_HDR_SIZE..],
+        &data[frame_header_size as usize..],
     ))
 }
 
+/// Write a complete frame header (frame_size + 'icpf' + frame_header()).
+/// Returns the number of bytes written.
+#[allow(clippy::too_many_arguments)]
+pub fn write_frame(
+    out: &mut Vec<u8>,
+    total_frame_size: u32,
+    width: u16,
+    height: u16,
+    chroma_format: ChromaFormat,
+    interlace_mode: u8,
+    luma_qmat: &[u8; 64],
+    chroma_qmat: &[u8; 64],
+    load_luma: bool,
+    load_chroma: bool,
+) {
+    // frame_size + magic
+    out.extend_from_slice(&total_frame_size.to_be_bytes());
+    out.extend_from_slice(FRAME_IDENTIFIER);
+    // frame_header()
+    let fh_size: u16 = 20 + if load_luma { 64 } else { 0 } + if load_chroma { 64 } else { 0 };
+    out.extend_from_slice(&fh_size.to_be_bytes());
+    out.push(0); // reserved
+    let bitstream_version: u8 = match chroma_format {
+        ChromaFormat::Y422 => 0,
+        ChromaFormat::Y444 => 1,
+    };
+    out.push(bitstream_version);
+    out.extend_from_slice(ENCODER_IDENTIFIER);
+    out.extend_from_slice(&width.to_be_bytes());
+    out.extend_from_slice(&height.to_be_bytes());
+    // chroma(2) + reserved(2) + interlace(2) + reserved(2)
+    out.push((chroma_format.code() << 6) | ((interlace_mode & 0x3) << 2));
+    // aspect_ratio_information(4) + frame_rate_code(4) — 0 = unknown
+    out.push(0);
+    out.push(0); // color_primaries (unspecified)
+    out.push(0); // transfer_characteristic
+    out.push(0); // matrix_coefficients
+    out.push(0); // reserved(4) + alpha_channel_type(4) = 0 (no alpha)
+    out.push(0); // reserved (high 8 of the 14)
+                 // last byte: 6 reserved bits + load_luma(1) + load_chroma(1)
+    let lb = ((load_luma as u8) << 1) | (load_chroma as u8);
+    out.push(lb);
+    if load_luma {
+        out.extend_from_slice(luma_qmat);
+    }
+    if load_chroma {
+        out.extend_from_slice(chroma_qmat);
+    }
+}
+
+/// Parsed picture_header().
+#[derive(Clone, Debug)]
 pub struct PictureHeader {
-    pub slice_count: u16,
-    pub log2_slice_mb_width: u8,
+    pub picture_header_size: u8,
+    pub picture_size: u32,
+    pub deprecated_number_of_slices: u16,
+    pub log2_desired_slice_size_in_mb: u8,
+}
+
+/// Parse a picture_header(). Returns the header and a slice that begins
+/// at the slice_table().
+pub fn parse_picture_header(data: &[u8]) -> Result<(PictureHeader, &[u8])> {
+    if data.len() < 8 {
+        return Err(Error::invalid("prores: picture header truncated"));
+    }
+    // byte 0: picture_header_size(5) + reserved(3)
+    let b0 = data[0];
+    let picture_header_size = (b0 >> 3) & 0x1F;
+    if picture_header_size < 8 {
+        return Err(Error::invalid("prores: picture_header_size < 8"));
+    }
+    let picture_size = u32::from_be_bytes(data[1..5].try_into().unwrap());
+    let deprecated_number_of_slices = u16::from_be_bytes(data[5..7].try_into().unwrap());
+    // byte 7: reserved(2) + log2_desired_slice_size_in_mb(2) + reserved(4)
+    let b7 = data[7];
+    let log2_desired_slice_size_in_mb = (b7 >> 4) & 0x3;
+    if data.len() < picture_header_size as usize {
+        return Err(Error::invalid("prores: picture header overruns buffer"));
+    }
+    Ok((
+        PictureHeader {
+            picture_header_size,
+            picture_size,
+            deprecated_number_of_slices,
+            log2_desired_slice_size_in_mb,
+        },
+        &data[picture_header_size as usize..],
+    ))
 }
 
 pub fn write_picture_header(
     out: &mut Vec<u8>,
     picture_size: u32,
-    slice_count: u16,
-    log2_slice_mb_width: u8,
+    deprecated_number_of_slices: u16,
+    log2_desired_slice_size_in_mb: u8,
 ) {
-    out.push(PICTURE_HDR_SIZE as u8);
+    let picture_header_size: u8 = 8;
+    out.push(picture_header_size << 3);
     out.extend_from_slice(&picture_size.to_be_bytes());
-    out.extend_from_slice(&slice_count.to_be_bytes());
-    out.push(log2_slice_mb_width);
+    out.extend_from_slice(&deprecated_number_of_slices.to_be_bytes());
+    // reserved(2) + log2(2) + reserved(4)
+    out.push((log2_desired_slice_size_in_mb & 0x3) << 4);
 }
 
-pub fn parse_picture_header(data: &[u8]) -> Result<(PictureHeader, &[u8])> {
-    if data.len() < PICTURE_HDR_SIZE {
-        return Err(Error::invalid("prores: picture header truncated"));
+/// Parsed slice_header().
+#[derive(Clone, Debug)]
+pub struct SliceHeader {
+    pub slice_header_size: u8,
+    pub quantization_index: u8,
+    pub coded_size_of_y_data: u16,
+    pub coded_size_of_cb_data: u16,
+    /// Present only when `alpha_channel_type != 0`. When absent the
+    /// caller derives it from `coded_size_of_slice - header - y - cb`.
+    pub coded_size_of_cr_data: Option<u16>,
+}
+
+/// Parse one slice_header(). `has_alpha` controls whether the
+/// `coded_size_of_cr_data` field is present.
+pub fn parse_slice_header(data: &[u8], has_alpha: bool) -> Result<(SliceHeader, &[u8])> {
+    let min = if has_alpha { 8 } else { 6 };
+    if data.len() < min {
+        return Err(Error::invalid("prores: slice header truncated"));
     }
-    let hdr_size = data[0] as usize;
-    if hdr_size != PICTURE_HDR_SIZE {
-        return Err(Error::invalid("prores: unexpected picture header size"));
+    let b0 = data[0];
+    let slice_header_size = (b0 >> 3) & 0x1F;
+    let quantization_index = data[1];
+    if !(1..=224).contains(&quantization_index) {
+        return Err(Error::invalid(
+            "prores: quantization_index out of range (1..=224)",
+        ));
     }
-    let _picture_size = u32::from_be_bytes(data[1..5].try_into().unwrap());
-    let slice_count = u16::from_be_bytes(data[5..7].try_into().unwrap());
-    let log2_slice_mb_width = data[7];
+    let coded_size_of_y_data = u16::from_be_bytes(data[2..4].try_into().unwrap());
+    let coded_size_of_cb_data = u16::from_be_bytes(data[4..6].try_into().unwrap());
+    let coded_size_of_cr_data = if has_alpha {
+        Some(u16::from_be_bytes(data[6..8].try_into().unwrap()))
+    } else {
+        None
+    };
+    let consumed = slice_header_size as usize;
+    if consumed < min {
+        return Err(Error::invalid("prores: slice_header_size < required"));
+    }
+    if data.len() < consumed {
+        return Err(Error::invalid("prores: slice header overruns buffer"));
+    }
     Ok((
-        PictureHeader {
-            slice_count,
-            log2_slice_mb_width,
+        SliceHeader {
+            slice_header_size,
+            quantization_index,
+            coded_size_of_y_data,
+            coded_size_of_cb_data,
+            coded_size_of_cr_data,
         },
-        &data[PICTURE_HDR_SIZE..],
+        &data[consumed..],
     ))
+}
+
+pub fn write_slice_header(
+    out: &mut Vec<u8>,
+    quantization_index: u8,
+    coded_size_of_y_data: u16,
+    coded_size_of_cb_data: u16,
+    coded_size_of_cr_data: Option<u16>,
+) {
+    let slice_header_size: u8 = if coded_size_of_cr_data.is_some() {
+        8
+    } else {
+        6
+    };
+    out.push(slice_header_size << 3);
+    out.push(quantization_index);
+    out.extend_from_slice(&coded_size_of_y_data.to_be_bytes());
+    out.extend_from_slice(&coded_size_of_cb_data.to_be_bytes());
+    if let Some(cr) = coded_size_of_cr_data {
+        out.extend_from_slice(&cr.to_be_bytes());
+    }
+}
+
+/// Compute the slice_size_in_mb array per §6.2 (the same array applies
+/// to every macroblock row). For the typical case `width=128` and
+/// `log2_desired_slice_size_in_mb=3`, this returns `[8]` (1 slice per row,
+/// 8 MBs each). Returns `(slice_sizes, slice_count)`.
+pub fn compute_slice_sizes(width_in_mb: usize, log2_desired_slice_size_in_mb: u8) -> Vec<usize> {
+    let mut sizes = Vec::new();
+    let mut slice_size = 1usize << log2_desired_slice_size_in_mb;
+    let mut remaining = width_in_mb;
+    loop {
+        while remaining >= slice_size {
+            sizes.push(slice_size);
+            remaining -= slice_size;
+        }
+        slice_size /= 2;
+        if remaining == 0 {
+            break;
+        }
+        if slice_size == 0 {
+            // Defensive — should not occur for width_in_mb > 0.
+            break;
+        }
+    }
+    sizes
 }
 
 #[cfg(test)]
@@ -281,88 +486,97 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_header_roundtrip() {
-        let luma = [4u8; 64];
-        let mut chroma = [0u8; 64];
-        for (i, c) in chroma.iter_mut().enumerate() {
-            *c = i as u8;
-        }
-        let mut out = Vec::new();
-        write_frame_header(
-            &mut out,
-            1920,
-            1080,
-            ChromaFormat::Y422,
-            Profile::Standard,
-            &luma,
-            &chroma,
-            200,
-        );
-        assert_eq!(out.len(), FRAME_HDR_SIZE);
-        let (hdr, rest) = parse_frame_header(&out).unwrap();
-        assert_eq!(hdr.width, 1920);
-        assert_eq!(hdr.height, 1080);
-        assert_eq!(hdr.chroma_format, ChromaFormat::Y422);
-        assert_eq!(hdr.profile, Profile::Standard);
-        assert_eq!(hdr.luma_qmat, luma);
-        assert_eq!(hdr.chroma_qmat, chroma);
-        assert!(rest.is_empty());
-    }
-
-    #[test]
-    fn frame_header_roundtrip_4444() {
+    fn frame_roundtrip_422() {
         let luma = [4u8; 64];
         let chroma = [4u8; 64];
-        let mut out = Vec::new();
-        write_frame_header(
-            &mut out,
-            1920,
-            1080,
-            ChromaFormat::Y444,
-            Profile::Prores4444,
+        let mut buf = Vec::new();
+        // size unknown; we'll write 0 and patch later.
+        write_frame(
+            &mut buf,
+            0,
+            128,
+            128,
+            ChromaFormat::Y422,
+            0,
             &luma,
             &chroma,
-            200,
+            false,
+            false,
         );
-        let (hdr, _rest) = parse_frame_header(&out).unwrap();
-        assert_eq!(hdr.chroma_format, ChromaFormat::Y444);
-        assert_eq!(hdr.profile, Profile::Prores4444);
-        assert_eq!(hdr.profile.fourcc(), b"ap4h");
-        assert_eq!(hdr.profile.chroma_format(), ChromaFormat::Y444);
+        // Patch frame_size.
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(fh.width, 128);
+        assert_eq!(fh.height, 128);
+        assert_eq!(fh.chroma_format, ChromaFormat::Y422);
+        assert_eq!(fh.bitstream_version, 0);
+        assert_eq!(fh.luma_qmat, [4u8; 64]);
+        assert_eq!(fh.chroma_qmat, [4u8; 64]);
     }
 
     #[test]
-    fn profile_fourccs() {
-        assert_eq!(Profile::Proxy.fourcc(), b"apco");
-        assert_eq!(Profile::Lt.fourcc(), b"apcs");
-        assert_eq!(Profile::Standard.fourcc(), b"apcn");
-        assert_eq!(Profile::Hq.fourcc(), b"apch");
-        assert_eq!(Profile::Prores4444.fourcc(), b"ap4h");
-        assert_eq!(Profile::Prores4444Xq.fourcc(), b"ap4x");
-    }
-
-    #[test]
-    fn profile_code_roundtrip() {
-        for p in [
-            Profile::Proxy,
-            Profile::Lt,
-            Profile::Standard,
-            Profile::Hq,
-            Profile::Prores4444,
-            Profile::Prores4444Xq,
-        ] {
-            assert_eq!(Profile::from_code(p as u8).unwrap(), p);
+    fn frame_roundtrip_444_with_qmats() {
+        let mut luma = [0u8; 64];
+        let mut chroma = [0u8; 64];
+        for i in 0..64 {
+            luma[i] = (i + 4) as u8;
+            chroma[i] = (i + 8) as u8;
         }
+        let mut buf = Vec::new();
+        write_frame(
+            &mut buf,
+            0,
+            64,
+            64,
+            ChromaFormat::Y444,
+            0,
+            &luma,
+            &chroma,
+            true,
+            true,
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(fh.chroma_format, ChromaFormat::Y444);
+        assert_eq!(fh.bitstream_version, 1);
+        assert_eq!(fh.luma_qmat, luma);
+        assert_eq!(fh.chroma_qmat, chroma);
     }
 
     #[test]
     fn picture_header_roundtrip() {
-        let mut out = Vec::new();
-        write_picture_header(&mut out, 4321, 12, 3);
-        assert_eq!(out.len(), PICTURE_HDR_SIZE);
-        let (hdr, rest) = parse_picture_header(&out).unwrap();
-        assert_eq!(hdr.slice_count, 12);
-        assert_eq!(hdr.log2_slice_mb_width, 3);
-        assert!(rest.is_empty());
+        let mut buf = Vec::new();
+        write_picture_header(&mut buf, 1234, 12, 3);
+        let (ph, _) = parse_picture_header(&buf).unwrap();
+        assert_eq!(ph.picture_header_size, 8);
+        assert_eq!(ph.picture_size, 1234);
+        assert_eq!(ph.deprecated_number_of_slices, 12);
+        assert_eq!(ph.log2_desired_slice_size_in_mb, 3);
+    }
+
+    #[test]
+    fn slice_header_roundtrip_no_alpha() {
+        let mut buf = Vec::new();
+        write_slice_header(&mut buf, 4, 100, 50, None);
+        let (sh, _) = parse_slice_header(&buf, false).unwrap();
+        assert_eq!(sh.slice_header_size, 6);
+        assert_eq!(sh.quantization_index, 4);
+        assert_eq!(sh.coded_size_of_y_data, 100);
+        assert_eq!(sh.coded_size_of_cb_data, 50);
+        assert!(sh.coded_size_of_cr_data.is_none());
+    }
+
+    #[test]
+    fn compute_slice_sizes_examples() {
+        // RDD 36 example: width=720→ 45 MBs, slice size 8 → [8,8,8,8,8,4,1].
+        assert_eq!(compute_slice_sizes(45, 3), vec![8, 8, 8, 8, 8, 4, 1]);
+        // 8 MBs flat
+        assert_eq!(compute_slice_sizes(8, 3), vec![8]);
+        // 1 MB
+        assert_eq!(compute_slice_sizes(1, 3), vec![1]);
+        // log2=0 → all 1s
+        assert_eq!(compute_slice_sizes(5, 0), vec![1, 1, 1, 1, 1]);
     }
 }

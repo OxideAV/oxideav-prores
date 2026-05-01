@@ -1,25 +1,9 @@
-//! Bit I/O for the ProRes entropy layer.
+//! Bit I/O primitives used by the SMPTE RDD 36 entropy coder.
 //!
-//! SMPTE RDD 36 uses several coefficient codes (Rice, exp-Golomb with
-//! adaptive code length, etc.). Since this crate round-trips its own
-//! bitstream end-to-end we pick the **simplest** variants that encode /
-//! decode byte-identically with no reference dependency, and document
-//! the deviation here:
-//!
-//! * Unsigned values (runs, magnitudes): **plain unsigned exp-Golomb**
-//!   (the H.264 `ue(v)` code). For `N >= 0`, write `leading_zeros`
-//!   zeros, a `1`, then `leading_zeros` bits of `N + 1 - 2^leading_zeros`.
-//!
-//! * Signed values (DC residuals, AC levels): the **H.264 `se(v)`**
-//!   mapping on top of `ue(v)`. `0 -> 0`, positive `v -> 2v - 1`,
-//!   negative `v -> -2v`.
-//!
-//! This is *not* what a streaming ProRes player from Apple would
-//! output, but it is fully deterministic and byte-exact for any
-//! encoder/decoder pair that both read this file. Callers that need to
-//! interop with real `.mov` ProRes files will have to swap these two
-//! helpers for the RDD 36 codes — the rest of the pipeline
-//! (DCT/quant/frame-layout) is format-compatible.
+//! ProRes coefficients are coded with Golomb-Rice / exponential-Golomb
+//! combination codes; the actual codeword decoders live in
+//! [`crate::entropy`]. This module only provides the underlying MSB-first
+//! bit reader / writer.
 
 use oxideav_core::{Error, Result};
 
@@ -38,7 +22,7 @@ impl<'a> BitReader<'a> {
     pub fn read_bit(&mut self) -> Result<u32> {
         let byte_idx = self.bit_pos / 8;
         if byte_idx >= self.buf.len() {
-            return Err(Error::invalid("prores: bitstream EOF"));
+            return Err(Error::invalid("prores bitstream: EOF"));
         }
         let bit_idx = 7 - (self.bit_pos % 8);
         self.bit_pos += 1;
@@ -55,37 +39,44 @@ impl<'a> BitReader<'a> {
         Ok(v)
     }
 
-    /// Unsigned exp-Golomb (H.264 `ue(v)`).
-    pub fn read_ue(&mut self) -> Result<u32> {
-        let mut zeros = 0u32;
-        while self.read_bit()? == 0 {
-            zeros += 1;
-            if zeros > 31 {
-                return Err(Error::invalid("prores: ue exponent too large"));
+    /// Approximation of the spec's `endOfData(dataSize)` predicate
+    /// (RDD 36 §5.2): true if the number of remaining bits is 31 or
+    /// fewer and any remaining bits are zero. This is used to terminate
+    /// the AC-coefficient run-level loop.
+    ///
+    /// A correct implementation requires knowing the slice payload's
+    /// exact byte length (the buffer we were constructed from is sized
+    /// to that — `data` should be the per-component slice data only).
+    pub fn end_of_data(&self) -> bool {
+        let total_bits = self.buf.len() * 8;
+        if self.bit_pos >= total_bits {
+            return true;
+        }
+        let remaining = total_bits - self.bit_pos;
+        if remaining > 31 {
+            return false;
+        }
+        // Any remaining bit non-zero → not at EOD yet.
+        let mut pos = self.bit_pos;
+        while pos < total_bits {
+            let byte_idx = pos / 8;
+            let bit_idx = 7 - (pos % 8);
+            if ((self.buf[byte_idx] >> bit_idx) & 1) != 0 {
+                return false;
             }
+            pos += 1;
         }
-        if zeros == 0 {
-            return Ok(0);
-        }
-        let tail = self.read_bits(zeros)?;
-        Ok((1u32 << zeros) - 1 + tail)
-    }
-
-    /// Signed exp-Golomb (H.264 `se(v)`).
-    pub fn read_se(&mut self) -> Result<i32> {
-        let k = self.read_ue()? as i64;
-        if k == 0 {
-            return Ok(0);
-        }
-        // k=1 -> +1, k=2 -> -1, k=3 -> +2, k=4 -> -2, ...
-        let abs = (k + 1) / 2;
-        let v = if (k & 1) == 1 { abs } else { -abs };
-        Ok(v as i32)
+        true
     }
 
     /// How many whole bytes we've consumed, rounding up any partial byte.
     pub fn byte_pos(&self) -> usize {
         self.bit_pos.div_ceil(8)
+    }
+
+    /// Current bit position (absolute, from start of buffer).
+    pub fn bit_pos(&self) -> usize {
+        self.bit_pos
     }
 }
 
@@ -129,35 +120,6 @@ impl BitWriter {
         }
     }
 
-    pub fn write_ue(&mut self, v: u32) {
-        // Choose the smallest `zeros` such that v < 2^(zeros+1) - 1, i.e.
-        // v + 1 fits in `zeros+1` bits with the leading 1. The code is
-        // `zeros` zeros + one 1 + `zeros` value bits.
-        let x = (v as u64) + 1;
-        let zeros = 63 - x.leading_zeros();
-        // prefix
-        for _ in 0..zeros {
-            self.write_bit(0);
-        }
-        self.write_bit(1);
-        if zeros > 0 {
-            // tail = (v + 1) - 2^zeros, in `zeros` bits
-            let tail = (x - (1u64 << zeros)) as u32;
-            self.write_bits(tail, zeros);
-        }
-    }
-
-    pub fn write_se(&mut self, v: i32) {
-        let k = if v == 0 {
-            0u32
-        } else if v > 0 {
-            (2 * v as u32) - 1
-        } else {
-            2 * (-v) as u32
-        };
-        self.write_ue(k);
-    }
-
     /// Pad to the next byte boundary with zero bits.
     pub fn align_byte(&mut self) {
         while self.cur_bits_used != 8 {
@@ -173,33 +135,20 @@ impl BitWriter {
     pub fn byte_len(&self) -> usize {
         self.buf.len()
     }
+
+    /// Number of bits written so far (including any partial trailing byte).
+    pub fn bit_len(&self) -> usize {
+        if self.cur_bits_used == 8 {
+            self.buf.len() * 8
+        } else {
+            (self.buf.len() - 1) * 8 + self.cur_bits_used as usize
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ue_roundtrip() {
-        for &v in &[0u32, 1, 2, 7, 255, 1023, 65_535, 1_000_000] {
-            let mut w = BitWriter::new();
-            w.write_ue(v);
-            let data = w.finish();
-            let mut r = BitReader::new(&data);
-            assert_eq!(r.read_ue().unwrap(), v, "roundtrip failed for {v}");
-        }
-    }
-
-    #[test]
-    fn se_roundtrip() {
-        for &v in &[0i32, 1, -1, 42, -42, 1023, -1023, 1_000_000, -1_000_000] {
-            let mut w = BitWriter::new();
-            w.write_se(v);
-            let data = w.finish();
-            let mut r = BitReader::new(&data);
-            assert_eq!(r.read_se().unwrap(), v, "roundtrip failed for {v}");
-        }
-    }
 
     #[test]
     fn bits_roundtrip() {
@@ -214,5 +163,25 @@ mod tests {
         assert_eq!(r.read_bits(16).unwrap(), 0x5A_5A);
         assert_eq!(r.read_bit().unwrap(), 1);
         assert_eq!(r.read_bit().unwrap(), 0);
+    }
+
+    #[test]
+    fn end_of_data_with_zero_padding() {
+        // Buffer of one byte 0b10000000 (just the bit '1' followed by 7 zero pads).
+        let buf = [0b1000_0000u8];
+        let mut r = BitReader::new(&buf);
+        assert!(!r.end_of_data()); // 8 bits left, not at EOD
+        let _ = r.read_bit().unwrap();
+        // Now 7 zero bits remain; EOD should be true.
+        assert!(r.end_of_data());
+    }
+
+    #[test]
+    fn end_of_data_with_nonzero_padding() {
+        let buf = [0b1000_0001u8];
+        let mut r = BitReader::new(&buf);
+        let _ = r.read_bit().unwrap(); // consume the leading 1
+                                       // Trailing bit is non-zero → not yet at EOD.
+        assert!(!r.end_of_data());
     }
 }
