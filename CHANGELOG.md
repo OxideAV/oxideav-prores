@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-prores/compare/v0.0.5...v0.0.6) - 2026-05-03
+
+### Other
+
+- wire docs/video/prores/ fixture corpus as docs_corpus.rs
+- replace never-match regex with semver_check = false
+- migrate to centralized OxideAV/.github reusable workflows
+- round 5 — configurable perceptual quantisation matrices
+- round 4 — interlaced field pictures + spec §7.5.1 normalization
+- round 3 — alpha plane, 12-bit pixel output, ap4h interop
+- round 2 — 10-bit Yuv422P10Le / Yuv444P10Le pixel output
+- adopt slim VideoFrame shape
+- pin release-plz to patch-only bumps
+
 ### Added
 
 - Configurable per-component quantisation matrices for the encoder
