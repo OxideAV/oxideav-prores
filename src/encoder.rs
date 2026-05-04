@@ -25,7 +25,7 @@ use crate::slice::{blocks_per_mb, chroma_blocks_per_mb, encode_slice_components}
 
 /// Encoder-side configuration. Defaults match the legacy behaviour
 /// (flat all-4s quantisation matrices, `load_luma_qmat = 0`,
-/// `load_chroma_qmat = 0`).
+/// `load_chroma_qmat = 0`, per-profile default quantisation index).
 #[derive(Clone, Debug, Default)]
 pub struct EncoderConfig {
     /// Per-component quantisation weight matrices. `None` is identical
@@ -36,6 +36,16 @@ pub struct EncoderConfig {
     /// frame header (setting `load_*_qmat` to 1) so any RDD 36 decoder
     /// can dequantise correctly.
     pub quant_matrices: Option<QuantMatrices>,
+    /// Per-slice `quantization_index` (RDD 36 §7.3 / Table 15) used for
+    /// every slice in every encoded frame. Lower index → finer step →
+    /// higher quality + larger packet. Range `1..=224`.
+    ///
+    /// `None` (the default) selects the per-profile default returned by
+    /// [`Profile::default_quant_index`] — currently `8 / 6 / 4 / 2 /
+    /// 2 / 1` for Proxy / LT / Standard / HQ / 4444 / 4444 XQ. Set this
+    /// when the caller wants a different point on the rate/quality
+    /// curve without re-mapping the profile selection.
+    pub quantization_index: Option<u8>,
 }
 
 impl EncoderConfig {
@@ -51,6 +61,7 @@ impl EncoderConfig {
     pub fn perceptual() -> Self {
         Self {
             quant_matrices: Some(QuantMatrices::perceptual()),
+            ..Self::default()
         }
     }
 
@@ -58,6 +69,14 @@ impl EncoderConfig {
     /// in `2..=63` per RDD 36 §7.3 (validated at encode time).
     pub fn with_quant_matrices(mut self, qm: QuantMatrices) -> Self {
         self.quant_matrices = Some(qm);
+        self
+    }
+
+    /// Override the per-profile default `quantization_index` (RDD 36
+    /// §7.3 / Table 15). Must be in `1..=224`; validated at encoder
+    /// construction. Lower index = finer step = higher quality.
+    pub fn with_quantization_index(mut self, qi: u8) -> Self {
+        self.quantization_index = Some(qi);
         self
     }
 }
@@ -119,6 +138,14 @@ pub fn make_encoder_with_config(
             ));
         }
     }
+    if let Some(qi) = config.quantization_index {
+        if !(1..=224).contains(&qi) {
+            return Err(Error::invalid(
+                "prores encoder: EncoderConfig::quantization_index out of range \
+                 (must be 1..=224 per RDD 36 §7.3 / Table 15)",
+            ));
+        }
+    }
     let width = params
         .width
         .ok_or_else(|| Error::invalid("prores encoder: missing width"))?;
@@ -150,7 +177,9 @@ pub fn make_encoder_with_config(
     output_params.height = Some(height);
     output_params.pixel_format = Some(pix);
 
-    let quant_index = profile.default_quant_index();
+    let quant_index = config
+        .quantization_index
+        .unwrap_or_else(|| profile.default_quant_index());
 
     Ok(Box::new(ProResEncoder {
         output_params,

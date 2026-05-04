@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Configurable per-slice `quantization_index` for the encoder (RDD 36
+  §7.3 / Table 15). New field
+  `encoder::EncoderConfig::quantization_index: Option<u8>` and
+  builder method `EncoderConfig::with_quantization_index(qi)`. `None`
+  preserves the per-profile default (`8 / 6 / 4 / 2 / 2 / 1` for
+  Proxy / LT / Standard / HQ / 4444 / 4444 XQ); `Some(qi)` overrides
+  it. Validated against the spec range `1..=224` at encoder
+  construction. Lets callers override quality without remapping
+  `bit_rate` to a different profile (e.g. "Proxy at qi=2 for archival
+  intermediates"). New integration tests in `tests/quant_index.rs`
+  (7 cases) cover packet-size monotonicity, PSNR monotonicity, range
+  validation, profile-override interplay, and the equivalence
+  `EncoderConfig{qi=None} == EncoderConfig{qi=Some(profile_default)}`.
+
+### Changed
+
+- `tests/docs_corpus`: drop hard-coded `n_frames: 2` per fixture; the
+  driver now derives the comparable count from the actual container
+  (`extract_prores_frames(...).len()`) and the actual reference
+  (`expected.yuv.len() / frame_bytes`). Restores green CI on the two
+  fixtures shipping a real `expected.yuv` (`tiny-320x240-sq` and
+  `mxf-container`), each of which actually carries one frame, not the
+  two the trace.txt claimed.
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-prores/compare/v0.0.5...v0.0.6) - 2026-05-03
 
 ### Other

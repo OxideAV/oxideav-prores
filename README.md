@@ -53,6 +53,28 @@ encoder use the spec's entropy coder for color, but the encoder emits
 a plain run-length alpha (alternative path permitted by §7.1.2); the
 coder is bit-exact with itself and decoder-compatible.
 
+### Configurable quantisation index (RDD 36 §7.3 / Table 15)
+
+The encoder picks one `quantization_index` per profile by default
+(`8 / 6 / 4 / 2 / 2 / 1` for Proxy / LT / Standard / HQ / 4444 /
+4444 XQ — see [`frame::Profile::default_quant_index`]). Lower index =
+finer step = higher quality + larger packet. Override the default for
+custom rate/quality trade-offs:
+
+```rust
+use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+
+// Highest-quality Proxy: same profile selection (bit_rate hint), but
+// the qscale floor of qi=2 instead of the Proxy default qi=8.
+let cfg = EncoderConfig::default().with_quantization_index(2);
+let enc = make_encoder_with_config(&params, cfg)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The valid range is `1..=224` (rejected at encoder construction
+otherwise). The override applies to every slice in every encoded frame
+and roundtrips through any RDD 36 decoder.
+
 ### Configurable quantisation matrices (RDD 36 §5.3.4 + §6.3.7 + §7.3)
 
 The encoder defaults to the spec's flat all-4s quantisation matrix
