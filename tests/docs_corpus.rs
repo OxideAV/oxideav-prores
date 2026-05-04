@@ -182,6 +182,21 @@ fn diff_plane(our: &[u8], refp: &[u8], bit_depth: BitDepth) -> (usize, usize, i3
 enum Tier {
     /// Must decode bit-exactly. Test fails on any divergence.
     BitExact,
+    /// Every frame must decode without error AND, when expected.yuv
+    /// is shipped, every plane must achieve at least `min_y_psnr_db` /
+    /// `min_uv_psnr_db`. Sample-pixel match counts are still logged.
+    /// Use this to lock in a permissive quality floor while leaving
+    /// room for the float IDCT vs ffmpeg's fixed-point IDCT to diverge
+    /// by ~1 LSB.
+    MinPsnr {
+        min_y_psnr_db: f64,
+        min_uv_psnr_db: f64,
+    },
+    /// Every frame must decode without error. Use this for fixtures
+    /// where there's no expected.yuv to compare against — promotes
+    /// "decoder errored out" from a silent log line into a CI-red
+    /// failure.
+    DecodesCleanly,
     /// Decode is permitted to diverge from the reference; per-fixture
     /// stats are logged but the test does not fail.
     ReportOnly,
@@ -519,6 +534,45 @@ fn evaluate(case: &CorpusCase) {
                 pct
             );
         }
+        Tier::MinPsnr {
+            min_y_psnr_db,
+            min_uv_psnr_db,
+        } => {
+            assert!(
+                errors.is_empty(),
+                "{}: {} frame decode errors: {:?}",
+                case.name,
+                errors.len(),
+                errors
+            );
+            if report.had_reference {
+                let y_psnr = psnr(agg.y_sse, agg.y_total, case.bit_depth);
+                let uv_psnr = psnr(agg.uv_sse, agg.uv_total, case.bit_depth);
+                assert!(
+                    y_psnr >= min_y_psnr_db,
+                    "{}: luma PSNR {:.2} dB below floor {:.2} dB",
+                    case.name,
+                    y_psnr,
+                    min_y_psnr_db
+                );
+                assert!(
+                    uv_psnr >= min_uv_psnr_db,
+                    "{}: chroma PSNR {:.2} dB below floor {:.2} dB",
+                    case.name,
+                    uv_psnr,
+                    min_uv_psnr_db
+                );
+            }
+        }
+        Tier::DecodesCleanly => {
+            assert!(
+                errors.is_empty(),
+                "{}: {} frame decode errors: {:?}",
+                case.name,
+                errors.len(),
+                errors
+            );
+        }
         Tier::ReportOnly => {
             // Don't fail. The eprintln output above is the report.
             // TODO(prores-corpus): tighten to BitExact once the
@@ -557,7 +611,13 @@ fn corpus_tiny_320x240_sq() {
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
-        tier: Tier::ReportOnly,
+        // Measured 82.65 / 81.62 dB; floor at 60 dB leaves headroom
+        // for any future float→fixed-point IDCT switch but locks in
+        // the current near-bit-exact decode.
+        tier: Tier::MinPsnr {
+            min_y_psnr_db: 60.0,
+            min_uv_psnr_db: 60.0,
+        },
     });
 }
 
@@ -574,7 +634,11 @@ fn corpus_mxf_container() {
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
-        tier: Tier::ReportOnly,
+        // Same payload as tiny-320x240-sq — decode quality must match.
+        tier: Tier::MinPsnr {
+            min_y_psnr_db: 60.0,
+            min_uv_psnr_db: 60.0,
+        },
     });
 }
 
@@ -591,7 +655,7 @@ fn corpus_proxy_1280x720() {
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
-        tier: Tier::ReportOnly,
+        tier: Tier::DecodesCleanly,
     });
 }
 
@@ -606,7 +670,7 @@ fn corpus_lt_1280x720() {
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
-        tier: Tier::ReportOnly,
+        tier: Tier::DecodesCleanly,
     });
 }
 
@@ -622,7 +686,7 @@ fn corpus_sq_1920x1080() {
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
-        tier: Tier::ReportOnly,
+        tier: Tier::DecodesCleanly,
     });
 }
 
@@ -638,7 +702,7 @@ fn corpus_hq_1920x1080() {
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
-        tier: Tier::ReportOnly,
+        tier: Tier::DecodesCleanly,
     });
 }
 
@@ -655,7 +719,9 @@ fn corpus_4444_1920x1080() {
         bit_depth: BitDepth::Twelve,
         chroma: ChromaFormat::Y444,
         planes: 3,
-        tier: Tier::ReportOnly,
+        // 4:4:4 12-bit decode path (chroma blocks doubled — RDD 36
+        // §7.4.2 macroblock layout); guard against silent regressions.
+        tier: Tier::DecodesCleanly,
     });
 }
 
@@ -673,7 +739,12 @@ fn corpus_4444_with_alpha() {
         bit_depth: BitDepth::Twelve,
         chroma: ChromaFormat::Y444,
         planes: 4,
-        tier: Tier::ReportOnly,
+        // Alpha plane is lossless per RDD 36 §7.1.2; the path just
+        // needs to decode without a "run overruns" error against
+        // ffmpeg-encoded streams whose picture height is not a
+        // multiple of MB_SIDE_PX. BitExact on Y/Cb/Cr is gated on
+        // the IDCT switch.
+        tier: Tier::DecodesCleanly,
     });
 }
 
@@ -690,7 +761,7 @@ fn corpus_4444xq_1920x1080() {
         bit_depth: BitDepth::Twelve,
         chroma: ChromaFormat::Y444,
         planes: 3,
-        tier: Tier::ReportOnly,
+        tier: Tier::DecodesCleanly,
     });
 }
 
@@ -706,7 +777,9 @@ fn corpus_interlaced_tff() {
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
-        tier: Tier::ReportOnly,
+        // Two field pictures per coded frame (RDD 36 §5.1, §7.5.3) —
+        // both must decode without error.
+        tier: Tier::DecodesCleanly,
     });
 }
 
@@ -723,7 +796,7 @@ fn corpus_pal_1080i50() {
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
-        tier: Tier::ReportOnly,
+        tier: Tier::DecodesCleanly,
     });
 }
 

@@ -738,11 +738,15 @@ fn encode_one_picture(
             }
 
             let alpha_blob: Vec<u8> = if let Some(act) = alpha_channel_type {
-                let slice_vertical_size = if my < mbs_y - 1 {
-                    MB_SIDE_PX
-                } else {
-                    picture_height - my * MB_SIDE_PX
-                };
+                // Emit alpha for the FULL macroblock-row height (16
+                // sample rows) regardless of visible picture clipping.
+                // Decoders MUST allocate the padded MB-aligned plane
+                // and crop after decode (RDD 36 §7.5.2 — alphaValues is
+                // the padded picture size); ffmpeg's prores_ks behaves
+                // the same way. Edge-pixels for the partially-visible
+                // last MB row are clamped to the last visible row so
+                // the stream stays self-roundtrippable.
+                let slice_vertical_size = MB_SIDE_PX;
                 let cols = MB_SIDE_PX * mbs_this_slice;
                 let mut samples: Vec<u16> = Vec::with_capacity(cols * slice_vertical_size);
                 let a_plane = &frame.planes[3];

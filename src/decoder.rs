@@ -555,21 +555,34 @@ fn decode_picture_into_planes<'a>(
                 }
             }
             if let Some(act) = alpha_kind {
-                let slice_vertical_size = if my < mbs_y - 1 {
-                    MB_SIDE_PX
-                } else {
-                    picture_height - my * MB_SIDE_PX
-                };
+                // The encoder writes alpha for the FULL macroblock-row
+                // height (16 sample rows) even when the picture's last
+                // MB row is partially visible; the padded plane has the
+                // extra rows allocated and the final crop trims them.
+                // Decoding only the visible-row count produces a "run
+                // overruns alphaValues array" error on streams where
+                // picture_height is not a multiple of 16.
+                let slice_vertical_size = MB_SIDE_PX;
                 let cols = MB_SIDE_PX * mbs_this_slice;
                 let num_alpha_values = cols * slice_vertical_size;
                 let alpha_values = decode_scanned_alpha(alpha_data, num_alpha_values, act)?;
+                // Clamp visible rows to the padded plane bounds —
+                // `paste_alpha` would otherwise overrun for the last
+                // MB row of a picture whose height isn't a multiple of
+                // MB_SIDE_PX (mapped through field).
+                let plane_rows = a_plane.len() / a_byte_stride;
+                let dst_y = my * MB_SIDE_PX;
+                let usable_rows = plane_rows
+                    .saturating_sub(field.map(dst_y))
+                    .div_ceil(field.step.max(1))
+                    .min(MB_SIDE_PX);
                 paste_alpha(
                     a_plane,
                     a_byte_stride,
                     mx * MB_SIDE_PX,
-                    my * MB_SIDE_PX,
+                    dst_y,
                     cols,
-                    slice_vertical_size,
+                    usable_rows,
                     &alpha_values,
                     act,
                     bit_depth,
@@ -670,7 +683,10 @@ fn alpha_to_sample(alpha: u16, act: AlphaChannelType, out_depth: BitDepth) -> u1
 }
 
 /// Paste a slice's worth of decoded alpha values into the padded alpha
-/// plane. `cols`/`rows` describe the alpha array shape (in samples).
+/// plane. `cols` is the alpha array width (in samples); `rows` is the
+/// number of rows to actually write to the plane (may be < the decoded
+/// macroblock-row height of 16 when the picture's last MB row is
+/// partially visible — see decode dispatch).
 #[allow(clippy::too_many_arguments)]
 fn paste_alpha(
     plane: &mut [u8],
@@ -684,7 +700,7 @@ fn paste_alpha(
     out_depth: BitDepth,
     field: FieldStride,
 ) {
-    debug_assert_eq!(values.len(), cols * rows);
+    debug_assert!(values.len() >= cols * rows);
     let bps = out_depth.bytes_per_sample();
     for r in 0..rows {
         let row = field.map(y0 + r);

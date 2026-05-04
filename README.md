@@ -46,12 +46,15 @@ The 4444 and 4444 XQ profiles share the same bitstream structure as
 4444 — XQ is selected when the caller requests the highest quality
 tier and produces a larger packet at lower quantisation.
 
-ffmpeg-encoded `prores_ks` `apcn` / `apch` (4:2:2) and `ap4h` (4444 +
-alpha) streams decode interop-clean — both progressive and interlaced
-(`-flags +ildct -top {0,1}`). Streams produced by this crate's own
-encoder use the spec's entropy coder for color, but the encoder emits
-a plain run-length alpha (alternative path permitted by §7.1.2); the
-coder is bit-exact with itself and decoder-compatible.
+ffmpeg-encoded `prores_ks` `apcn` / `apch` (4:2:2) and `ap4h` /
+`ap4x` (4444 ± alpha) streams decode interop-clean across 8-/10-/12-bit
+and both progressive and interlaced (`-flags +ildct -top {0,1}`)
+modes. The picture-height-not-multiple-of-16 alpha edge case is
+covered: the decoder reads the full padded macroblock-row alpha
+(per RDD 36 §7.5.2) and crops on output. Streams produced by this
+crate's own encoder use the spec's entropy coder for color, but the
+encoder emits a plain run-length alpha (alternative path permitted by
+§7.1.2); the coder is bit-exact with itself and decoder-compatible.
 
 ### Frame-header metadata (RDD 36 §5.1.1 / §6.2)
 

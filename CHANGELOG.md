@@ -7,7 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Alpha decode against streams whose picture height is not a multiple
+  of `MB_SIDE_PX` (16). The decoder now reads `mbs_this_slice * 16 * 16`
+  alpha samples per slice (the padded macroblock-row size) regardless
+  of visible-row clipping and pastes only the visible rows into the
+  cropped output plane, matching the encoder side. The encoder
+  symmetrically writes the full padded MB-row alpha (clamped edge
+  pixels for partially-visible bottom rows) so self-roundtrip stays
+  bit-stable. Pre-fix, the docs-corpus `4444-with-alpha` fixture (1080
+  rows = 67.5 MB rows) failed with
+  `InvalidData("prores alpha: run overruns alphaValues array")` on
+  every slice in the last MB row — the in-tree decoder is now
+  interop-clean against ffmpeg-produced ap4h+alpha. RDD 36 §7.5.2.
+
 ### Added
+
+- Corpus test driver gains `Tier::DecodesCleanly` (every container
+  frame must return Ok from `decode_packet_with_depth` — turns silent
+  decode errors into CI-red failures) and `Tier::MinPsnr { min_y_psnr_db,
+  min_uv_psnr_db }` (decode + reference-PSNR floor when expected.yuv
+  is shipped). Promotions: `4444-with-alpha`, `interlaced-tff`,
+  `pal-1080i50`, `4444-1920x1080`, `4444xq-1920x1080`,
+  `proxy-1280x720`, `lt-1280x720`, `sq-1920x1080`, `hq-1920x1080` →
+  `DecodesCleanly`; `tiny-320x240-sq`, `mxf-container` →
+  `MinPsnr { 60.0, 60.0 }` (measured 82.65 / 81.62 dB, ample headroom
+  above the floor). Promotes 9 corpus fixtures out of "decoder errors
+  out silently" and 2 out of "no quality gate" status.
+- `tests/roundtrip.rs::roundtrip_4444_with_alpha_16bit` — focused
+  regression for the §7.1.2 16-bit alpha path (8-bit YUV body with
+  16-bit alpha; round-trip max diff ≤ 1 LSB after 16-bit→8-bit
+  promotion via `round((255 * v) / 65535)`).
+- `tests/roundtrip.rs::roundtrip_4444_with_alpha_non_mb_aligned_height`
+  — focused regression for the bug above (24-row picture, alpha must
+  decode without the "run overruns" error and round-trip identically
+  on the visible 24 rows).
 
 - `frame::FrameMeta` carries the descriptive frame-header fields
   (`aspect_ratio_information`, `frame_rate_code`, `color_primaries`,

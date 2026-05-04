@@ -617,6 +617,166 @@ fn roundtrip_4444_with_alpha_8bit() {
     assert!(p > 30.0, "4444+alpha luma PSNR too low: {p:.2}");
 }
 
+/// Regression: 16-bit alpha (`alpha_channel_type=2`) round-trips
+/// through the per-slice scanned_alpha codec (RDD 36 §7.1.2 / Tables
+/// 12 + 14). 8-bit YUV with 16-bit alpha is a real-world combination
+/// (alpha at higher precision than chroma); the encoder accepts the
+/// alpha plane stride as a hint so 16-bit alpha data fits in a 4-plane
+/// VideoFrame regardless of YUV bit depth.
+#[test]
+fn roundtrip_4444_with_alpha_16bit() {
+    use oxideav_core::frame::VideoPlane;
+    let w = 64usize;
+    let h = 48usize;
+    let mut y = vec![0u8; w * h];
+    let mut cb = vec![0u8; w * h];
+    let mut cr = vec![0u8; w * h];
+    let mut a = vec![0u8; w * h * 2]; // 16-bit packed LE
+    for j in 0..h {
+        for i in 0..w {
+            y[j * w + i] = ((i * 3 + j * 2) as u16 % 256) as u8;
+            cb[j * w + i] = (128 + ((i as i32 - w as i32 / 2).clamp(-64, 64))) as u8;
+            cr[j * w + i] = (128 + ((j as i32 - h as i32 / 2).clamp(-64, 64))) as u8;
+            // 16-bit alpha: smooth gradient over 0..=65535 range.
+            let v = (((i + j) as u32 * 65535) / (w + h - 2) as u32) as u16;
+            a[(j * w + i) * 2] = (v & 0xFF) as u8;
+            a[(j * w + i) * 2 + 1] = (v >> 8) as u8;
+        }
+    }
+    let frame = VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane { stride: w, data: y },
+            VideoPlane {
+                stride: w,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w,
+                data: cr,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: a,
+            },
+        ],
+    };
+    // Encode at 8-bit YUV with 16-bit alpha (the encoder respects the
+    // alpha plane's own stride for sample reads).
+    let pkt = oxideav_prores::encoder::encode_frame_with_alpha(
+        &frame,
+        w as u32,
+        h as u32,
+        oxideav_prores::frame::ChromaFormat::Y444,
+        oxideav_prores::decoder::BitDepth::Eight,
+        oxideav_prores::frame::Profile::Prores4444,
+        2,
+        Some(oxideav_prores::alpha::AlphaChannelType::Sixteen),
+    )
+    .expect("encode 16-bit alpha");
+    let decoded = oxideav_prores::decoder::decode_packet_with_depth(
+        &pkt,
+        Some(0),
+        Some((
+            oxideav_prores::decoder::BitDepth::Eight,
+            oxideav_prores::frame::ChromaFormat::Y444,
+        )),
+    )
+    .expect("decode 16-bit alpha");
+    assert_eq!(decoded.planes.len(), 4, "alpha plane missing");
+    // Output bit depth = 8: §7.5.2 promotes 16-bit alpha to an 8-bit
+    // sample via round((255 * v) / 65535).
+    let out_a = &decoded.planes[3].data;
+    assert_eq!(out_a.len(), w * h);
+    let mut max_diff = 0i32;
+    for j in 0..h {
+        for i in 0..w {
+            let v_in = u16::from_le_bytes([
+                frame.planes[3].data[(j * w + i) * 2],
+                frame.planes[3].data[(j * w + i) * 2 + 1],
+            ]) as u64;
+            let expected = ((255u64 * v_in) + 32_767) / 65_535;
+            let v_out = out_a[j * w + i] as i64;
+            let d = (v_out - expected as i64).unsigned_abs() as i32;
+            if d > max_diff {
+                max_diff = d;
+            }
+        }
+    }
+    assert!(
+        max_diff <= 1,
+        "16-bit alpha round-trip max diff {max_diff} > 1"
+    );
+}
+
+/// Regression: alpha decode against a fixture-style picture whose
+/// height is not a multiple of MB_SIDE_PX (16). The encoder writes
+/// alpha for the FULL macroblock-row height (16 rows) and the decoder
+/// must allocate the padded plane and crop after — see decode dispatch
+/// in src/decoder.rs. Pre-fix this surfaced as
+/// `InvalidData("prores alpha: run overruns alphaValues array")` on
+/// the docs-corpus 4444-with-alpha fixture.
+#[test]
+fn roundtrip_4444_with_alpha_non_mb_aligned_height() {
+    use oxideav_core::frame::VideoPlane;
+    let w = 64usize;
+    let h = 24usize; // 24 is NOT a multiple of 16
+    let mut y = vec![0u8; w * h];
+    let mut cb = vec![0u8; w * h];
+    let mut cr = vec![0u8; w * h];
+    let mut a = vec![0xFFu8; w * h]; // fully opaque
+    for j in 0..h {
+        for i in 0..w {
+            y[j * w + i] = ((i * 3 + j * 2) as u16 % 256) as u8;
+            cb[j * w + i] = 128;
+            cr[j * w + i] = 128;
+            a[j * w + i] = 0xFF;
+        }
+    }
+    let frame = VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane { stride: w, data: y },
+            VideoPlane {
+                stride: w,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w,
+                data: cr,
+            },
+            VideoPlane { stride: w, data: a },
+        ],
+    };
+    let pkt = oxideav_prores::encoder::encode_frame_with_alpha(
+        &frame,
+        w as u32,
+        h as u32,
+        oxideav_prores::frame::ChromaFormat::Y444,
+        oxideav_prores::decoder::BitDepth::Eight,
+        oxideav_prores::frame::Profile::Prores4444,
+        2,
+        Some(oxideav_prores::alpha::AlphaChannelType::Eight),
+    )
+    .expect("encode non-mb-aligned alpha");
+    let decoded = oxideav_prores::decoder::decode_packet_with_depth(
+        &pkt,
+        Some(0),
+        Some((
+            oxideav_prores::decoder::BitDepth::Eight,
+            oxideav_prores::frame::ChromaFormat::Y444,
+        )),
+    )
+    .expect("decode non-mb-aligned alpha");
+    assert_eq!(decoded.planes.len(), 4);
+    assert_eq!(decoded.planes[3].data.len(), w * h);
+    // All-opaque alpha must round-trip identically.
+    assert_eq!(
+        decoded.planes[3].data, frame.planes[3].data,
+        "non-MB-aligned alpha plane corrupted"
+    );
+}
+
 // ────────────────── interlaced (RDD 36 §5.1 + §7.5.3) ──────────────────
 
 /// Build a 4:2:2 source whose field-row content differs from the
