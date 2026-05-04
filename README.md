@@ -53,6 +53,35 @@ encoder use the spec's entropy coder for color, but the encoder emits
 a plain run-length alpha (alternative path permitted by §7.1.2); the
 coder is bit-exact with itself and decoder-compatible.
 
+### Frame-header metadata (RDD 36 §5.1.1 / §6.2)
+
+The encoder fills the descriptive frame-header fields
+(`aspect_ratio_information`, `frame_rate_code`, `color_primaries`,
+`transfer_characteristic`, `matrix_coefficients`) automatically from
+[`CodecParameters::frame_rate`] — e.g. `Rational::new(30_000, 1001)`
+maps to `frame_rate_code = 4` (29.97 fps NTSC). Set every field
+explicitly via [`encoder::EncoderConfig::with_meta`]:
+
+```rust
+use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+use oxideav_prores::frame::FrameMeta;
+
+let cfg = EncoderConfig::default().with_meta(FrameMeta {
+    aspect_ratio_information: 3,  // 16:9
+    frame_rate_code: 8,           // 60 fps
+    color_primaries: 9,           // BT.2020
+    transfer_characteristic: 16,  // SMPTE ST 2084 (PQ)
+    matrix_coefficients: 9,       // BT.2020 NCL
+});
+let enc = make_encoder_with_config(&params, cfg)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The mapping from `Rational` to `frame_rate_code` lives in
+[`frame::frame_rate_code_from_rational`] and covers the 11 spec-named
+rates (RDD 36 §6.2 Table 4); any other rate yields `0`
+("unknown"), which RDD 36 decoders treat as a hint only.
+
 ### Configurable quantisation index (RDD 36 §7.3 / Table 15)
 
 The encoder picks one `quantization_index` per profile by default

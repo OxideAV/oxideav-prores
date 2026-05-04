@@ -17,8 +17,8 @@ use crate::alpha::{encode_scanned_alpha, AlphaChannelType};
 use crate::dct::fdct8x8;
 use crate::decoder::BitDepth;
 use crate::frame::{
-    compute_slice_sizes, write_frame_with_alpha, write_picture_header, write_slice_header,
-    ChromaFormat, Profile,
+    compute_slice_sizes, frame_rate_code_from_rational, write_frame_with_meta,
+    write_picture_header, write_slice_header, ChromaFormat, FrameMeta, Profile,
 };
 use crate::quant::{qscale, QuantMatrices, DEFAULT_QMAT};
 use crate::slice::{blocks_per_mb, chroma_blocks_per_mb, encode_slice_components};
@@ -46,6 +46,14 @@ pub struct EncoderConfig {
     /// when the caller wants a different point on the rate/quality
     /// curve without re-mapping the profile selection.
     pub quantization_index: Option<u8>,
+    /// Descriptive metadata fields written into the RDD 36 frame header
+    /// (`aspect_ratio_information`, `frame_rate_code`,
+    /// `color_primaries`, `transfer_characteristic`,
+    /// `matrix_coefficients` — all per §5.1.1 / §6.2). `None` lets
+    /// [`make_encoder_with_config`] derive `frame_rate_code` from
+    /// `CodecParameters::frame_rate` and leave the rest at 0
+    /// ("unknown"); `Some(meta)` overrides everything verbatim.
+    pub meta: Option<FrameMeta>,
 }
 
 impl EncoderConfig {
@@ -77,6 +85,15 @@ impl EncoderConfig {
     /// construction. Lower index = finer step = higher quality.
     pub fn with_quantization_index(mut self, qi: u8) -> Self {
         self.quantization_index = Some(qi);
+        self
+    }
+
+    /// Override the descriptive frame-header metadata
+    /// (aspect_ratio_information, frame_rate_code, color_primaries,
+    /// transfer_characteristic, matrix_coefficients). Equivalent to
+    /// setting the [`Self::meta`] field directly.
+    pub fn with_meta(mut self, meta: FrameMeta) -> Self {
+        self.meta = Some(meta);
         self
     }
 }
@@ -181,6 +198,15 @@ pub fn make_encoder_with_config(
         .quantization_index
         .unwrap_or_else(|| profile.default_quant_index());
 
+    // Resolve the metadata block once at construction. When the caller
+    // doesn't supply an explicit `FrameMeta`, derive `frame_rate_code`
+    // from `params.frame_rate` (per RDD 36 §6.2 / Table 4) and leave
+    // every other field at 0 ("unknown / unspecified").
+    let meta = config.meta.unwrap_or_else(|| FrameMeta {
+        frame_rate_code: params.frame_rate.map_or(0, frame_rate_code_from_rational),
+        ..FrameMeta::default()
+    });
+
     Ok(Box::new(ProResEncoder {
         output_params,
         width,
@@ -189,6 +215,7 @@ pub fn make_encoder_with_config(
         bit_depth,
         profile,
         quant_index,
+        meta,
         config,
         time_base: params
             .frame_rate
@@ -206,6 +233,7 @@ struct ProResEncoder {
     bit_depth: BitDepth,
     profile: Profile,
     quant_index: u8,
+    meta: FrameMeta,
     config: EncoderConfig,
     time_base: TimeBase,
     pending: VecDeque<Packet>,
@@ -235,6 +263,7 @@ impl Encoder for ProResEncoder {
                     None,
                     0,
                     self.config.quant_matrices,
+                    self.meta,
                 )?;
                 let mut pkt = Packet::new(0, self.time_base, data);
                 pkt.pts = v.pts;
@@ -358,6 +387,7 @@ pub fn encode_frame_with_qmats(
         None,
         0,
         Some(qmats),
+        FrameMeta::default(),
     )
 }
 
@@ -395,6 +425,7 @@ pub fn encode_frame_with_alpha(
         alpha_channel_type,
         0,
         None,
+        FrameMeta::default(),
     )
 }
 
@@ -432,6 +463,7 @@ pub fn encode_frame_interlaced(
         alpha_channel_type,
         interlace_mode,
         None,
+        FrameMeta::default(),
     )
 }
 
@@ -458,6 +490,7 @@ fn encode_frame_full(
     alpha_channel_type: Option<AlphaChannelType>,
     interlace_mode: u8,
     qmats: Option<QuantMatrices>,
+    meta: FrameMeta,
 ) -> Result<Vec<u8>> {
     let expected_planes = if alpha_channel_type.is_some() { 4 } else { 3 };
     if frame.planes.len() != expected_planes {
@@ -561,7 +594,7 @@ fn encode_frame_full(
     }
 
     let mut out = Vec::with_capacity(total_frame_size_no_padding);
-    write_frame_with_alpha(
+    write_frame_with_meta(
         &mut out,
         total_frame_size_no_padding as u32,
         img_w as u16,
@@ -573,6 +606,7 @@ fn encode_frame_full(
         load_luma,
         load_chroma,
         alpha_channel_type.map_or(0, |a| a.code()),
+        meta,
     );
     for blob in &picture_blobs {
         out.extend_from_slice(blob);

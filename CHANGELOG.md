@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `frame::FrameMeta` carries the descriptive frame-header fields
+  (`aspect_ratio_information`, `frame_rate_code`, `color_primaries`,
+  `transfer_characteristic`, `matrix_coefficients` per RDD 36 §5.1.1
+  / §6.2). New field `encoder::EncoderConfig::meta: Option<FrameMeta>`
+  + builder method `EncoderConfig::with_meta(meta)` plus a new
+  `frame::write_frame_with_meta` writer. When the field is `None`,
+  `make_encoder_with_config` derives `frame_rate_code` from
+  `CodecParameters::frame_rate` via the new helper
+  `frame::frame_rate_code_from_rational` (Table 4 — 24/1.001, 24, 25,
+  30/1.001, 30, 50, 60/1.001, 60, 100, 120/1.001, 120). `Some(meta)`
+  overrides every field verbatim. The legacy `write_frame` /
+  `write_frame_with_alpha` shims still write all metadata at 0
+  ("unknown") so byte-for-byte compatibility is preserved. New tests:
+  6 in `tests/frame_meta.rs` (param derivation, override, unknown
+  rate, missing rate, byte-compat) + 5 unit tests in `frame::tests`
+  (Table 4 mapping for every named rate, unnormalised fractions,
+  unknown rates, `FrameMeta` helpers, full round-trip).
 - Configurable per-slice `quantization_index` for the encoder (RDD 36
   §7.3 / Table 15). New field
   `encoder::EncoderConfig::quantization_index: Option<u8>` and

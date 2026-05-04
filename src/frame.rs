@@ -278,9 +278,99 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
     ))
 }
 
+/// Optional descriptive metadata fields written into the frame header.
+/// All fields are documented in RDD 36 §5.1.1 / §6.2 and default to 0
+/// (= "unknown / unspecified") so RDD 36 decoders treat them as a hint
+/// only.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameMeta {
+    /// `aspect_ratio_information` per §6.2 / Table 3 (0 = unknown,
+    /// 1 = square pixels, 2 = 4:3, 3 = 16:9, 4..=15 = reserved).
+    pub aspect_ratio_information: u8,
+    /// `frame_rate_code` per §6.2 / Table 4 — see
+    /// [`frame_rate_code_from_rational`] for the mapping. 0 = unknown.
+    pub frame_rate_code: u8,
+    /// `color_primaries` per §6.2 (BT.601, BT.709, etc — uses the same
+    /// codes as ISO/IEC 23001-8 / Rec. ITU-T H.273).
+    pub color_primaries: u8,
+    /// `transfer_characteristic` per §6.2.
+    pub transfer_characteristic: u8,
+    /// `matrix_coefficients` per §6.2.
+    pub matrix_coefficients: u8,
+}
+
+impl FrameMeta {
+    /// All fields zeroed = "unknown / unspecified". Identical to
+    /// `Default::default()`.
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// True when every field is 0 ("unknown / unspecified"). Encoder
+    /// uses this to detect the no-op case for short-circuit testing.
+    pub fn is_unknown(self) -> bool {
+        self.aspect_ratio_information == 0
+            && self.frame_rate_code == 0
+            && self.color_primaries == 0
+            && self.transfer_characteristic == 0
+            && self.matrix_coefficients == 0
+    }
+}
+
+/// Map a frame rate (as a [`oxideav_core::Rational`]) to the RDD 36
+/// §6.2 / Table 4 `frame_rate_code` (4-bit field). Returns 0
+/// ("unknown") for any rate that is not one of the spec's named codes.
+///
+/// The spec's named rates (rounded to the table values):
+///
+/// | code | rate                |
+/// |------|---------------------|
+/// | 1    | 24000 / 1001 (~23.976) |
+/// | 2    | 24                  |
+/// | 3    | 25                  |
+/// | 4    | 30000 / 1001 (~29.97)  |
+/// | 5    | 30                  |
+/// | 6    | 50                  |
+/// | 7    | 60000 / 1001 (~59.94)  |
+/// | 8    | 60                  |
+/// | 9    | 100                 |
+/// | 10   | 120000 / 1001 (~119.88) |
+/// | 11   | 120                 |
+///
+/// `12..=15` are reserved per the spec — never emitted.
+pub fn frame_rate_code_from_rational(r: oxideav_core::Rational) -> u8 {
+    if r.num <= 0 || r.den <= 0 {
+        return 0;
+    }
+    // Compare against each named rate by integer cross-product
+    // (num * d_named == n_named * den) — exact, drift-free for the
+    // canonical fractions that ship as TimeBase / Rational pairs.
+    let num = r.num as i128;
+    let den = r.den as i128;
+    let candidates: &[(u8, i128, i128)] = &[
+        (1, 24_000, 1001),
+        (2, 24, 1),
+        (3, 25, 1),
+        (4, 30_000, 1001),
+        (5, 30, 1),
+        (6, 50, 1),
+        (7, 60_000, 1001),
+        (8, 60, 1),
+        (9, 100, 1),
+        (10, 120_000, 1001),
+        (11, 120, 1),
+    ];
+    for &(code, n, d) in candidates {
+        if num * d == n * den {
+            return code;
+        }
+    }
+    0
+}
+
 /// Write a complete frame header (frame_size + 'icpf' + frame_header())
-/// with `alpha_channel_type` defaulting to 0. Forwards to
-/// [`write_frame_with_alpha`].
+/// with `alpha_channel_type` defaulting to 0 and all metadata fields
+/// zeroed ("unknown"). Forwards to [`write_frame_with_meta`].
 #[allow(clippy::too_many_arguments)]
 pub fn write_frame(
     out: &mut Vec<u8>,
@@ -294,7 +384,7 @@ pub fn write_frame(
     load_luma: bool,
     load_chroma: bool,
 ) {
-    write_frame_with_alpha(
+    write_frame_with_meta(
         out,
         total_frame_size,
         width,
@@ -306,15 +396,14 @@ pub fn write_frame(
         load_luma,
         load_chroma,
         0,
+        FrameMeta::default(),
     )
 }
 
 /// Write a complete frame header with an explicit `alpha_channel_type`
-/// code. `alpha_channel_type == 0` means no alpha plane; values 1 and 2
-/// signal 8-bit and 16-bit alpha respectively (see RDD 36 §5.3.3).
-///
-/// When `alpha_channel_type != 0` the bitstream version is forced to 1
-/// (alpha is a v1 feature per §6.4).
+/// code, all other metadata zeroed. Kept for back-compat with callers
+/// that don't carry frame_rate / aspect_ratio info; new code should use
+/// [`write_frame_with_meta`].
 #[allow(clippy::too_many_arguments)]
 pub fn write_frame_with_alpha(
     out: &mut Vec<u8>,
@@ -328,6 +417,49 @@ pub fn write_frame_with_alpha(
     load_luma: bool,
     load_chroma: bool,
     alpha_channel_type: u8,
+) {
+    write_frame_with_meta(
+        out,
+        total_frame_size,
+        width,
+        height,
+        chroma_format,
+        interlace_mode,
+        luma_qmat,
+        chroma_qmat,
+        load_luma,
+        load_chroma,
+        alpha_channel_type,
+        FrameMeta::default(),
+    )
+}
+
+/// Write a complete frame header with explicit alpha + descriptive
+/// metadata (aspect_ratio_information, frame_rate_code,
+/// color_primaries, transfer_characteristic, matrix_coefficients).
+///
+/// `alpha_channel_type == 0` means no alpha plane; values 1 and 2
+/// signal 8-bit and 16-bit alpha respectively (see RDD 36 §5.3.3).
+/// When `alpha_channel_type != 0` the bitstream version is forced to 1
+/// (alpha is a v1 feature per §6.4).
+///
+/// All `meta` fields are written verbatim into the corresponding header
+/// bytes; only the low 4 bits of `aspect_ratio_information` and
+/// `frame_rate_code` are honoured (those are u4 fields per §5.1.1).
+#[allow(clippy::too_many_arguments)]
+pub fn write_frame_with_meta(
+    out: &mut Vec<u8>,
+    total_frame_size: u32,
+    width: u16,
+    height: u16,
+    chroma_format: ChromaFormat,
+    interlace_mode: u8,
+    luma_qmat: &[u8; 64],
+    chroma_qmat: &[u8; 64],
+    load_luma: bool,
+    load_chroma: bool,
+    alpha_channel_type: u8,
+    meta: FrameMeta,
 ) {
     debug_assert!(alpha_channel_type <= 2);
     // frame_size + magic
@@ -351,11 +483,11 @@ pub fn write_frame_with_alpha(
     out.extend_from_slice(&height.to_be_bytes());
     // chroma(2) + reserved(2) + interlace(2) + reserved(2)
     out.push((chroma_format.code() << 6) | ((interlace_mode & 0x3) << 2));
-    // aspect_ratio_information(4) + frame_rate_code(4) — 0 = unknown
-    out.push(0);
-    out.push(0); // color_primaries (unspecified)
-    out.push(0); // transfer_characteristic
-    out.push(0); // matrix_coefficients
+    // aspect_ratio_information(4) + frame_rate_code(4)
+    out.push(((meta.aspect_ratio_information & 0x0F) << 4) | (meta.frame_rate_code & 0x0F));
+    out.push(meta.color_primaries);
+    out.push(meta.transfer_characteristic);
+    out.push(meta.matrix_coefficients);
     out.push(alpha_channel_type & 0x0F); // reserved(4) + alpha_channel_type(4)
     out.push(0); // reserved (high 8 of the 14)
                  // last byte: 6 reserved bits + load_luma(1) + load_chroma(1)
@@ -619,5 +751,139 @@ mod tests {
         assert_eq!(compute_slice_sizes(1, 3), vec![1]);
         // log2=0 → all 1s
         assert_eq!(compute_slice_sizes(5, 0), vec![1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn frame_rate_code_named_rates_match_spec_table_4() {
+        use oxideav_core::Rational;
+        // RDD 36 §6.2 / Table 4 — every named rate must map to its code.
+        let cases: &[(Rational, u8)] = &[
+            (Rational::new(24_000, 1001), 1),
+            (Rational::new(24, 1), 2),
+            (Rational::new(25, 1), 3),
+            (Rational::new(30_000, 1001), 4),
+            (Rational::new(30, 1), 5),
+            (Rational::new(50, 1), 6),
+            (Rational::new(60_000, 1001), 7),
+            (Rational::new(60, 1), 8),
+            (Rational::new(100, 1), 9),
+            (Rational::new(120_000, 1001), 10),
+            (Rational::new(120, 1), 11),
+        ];
+        for &(r, expected) in cases {
+            let got = frame_rate_code_from_rational(r);
+            assert_eq!(
+                got, expected,
+                "rate {}/{} must map to {expected}",
+                r.num, r.den
+            );
+        }
+    }
+
+    #[test]
+    fn frame_rate_code_unnormalised_fractions_match() {
+        use oxideav_core::Rational;
+        // 60/2 == 30 → code 5; 50000/1000 == 50 → code 6.
+        assert_eq!(frame_rate_code_from_rational(Rational::new(60, 2)), 5);
+        assert_eq!(
+            frame_rate_code_from_rational(Rational::new(50_000, 1000)),
+            6
+        );
+        // Doubling the 1.001 fraction: 48000/1001 != 24000/1001 (not the same rate).
+        assert_eq!(
+            frame_rate_code_from_rational(Rational::new(48_000, 1001)),
+            0
+        );
+    }
+
+    #[test]
+    fn frame_rate_code_unknown_rates_map_to_zero() {
+        use oxideav_core::Rational;
+        // 48 fps, 90 fps, 0/0, negative — all "unknown".
+        assert_eq!(frame_rate_code_from_rational(Rational::new(48, 1)), 0);
+        assert_eq!(frame_rate_code_from_rational(Rational::new(90, 1)), 0);
+        assert_eq!(frame_rate_code_from_rational(Rational::new(0, 0)), 0);
+        assert_eq!(frame_rate_code_from_rational(Rational::new(-30, 1)), 0);
+    }
+
+    #[test]
+    fn frame_meta_is_unknown_helpers() {
+        assert!(FrameMeta::default().is_unknown());
+        assert!(FrameMeta::unknown().is_unknown());
+        let m = FrameMeta {
+            frame_rate_code: 5,
+            ..FrameMeta::default()
+        };
+        assert!(!m.is_unknown());
+    }
+
+    #[test]
+    fn frame_with_meta_roundtrips_all_fields() {
+        // Pack a non-trivial FrameMeta into a frame header and verify
+        // the parser pulls every byte back out unchanged.
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let meta = FrameMeta {
+            aspect_ratio_information: 3, // 16:9 per Table 3
+            frame_rate_code: 4,          // 30/1.001 per Table 4
+            color_primaries: 9,          // BT.2020 (H.273)
+            transfer_characteristic: 16, // SMPTE ST 2084 (H.273)
+            matrix_coefficients: 9,      // BT.2020 non-constant luminance
+        };
+        let mut buf = Vec::new();
+        write_frame_with_meta(
+            &mut buf,
+            0,
+            1920,
+            1080,
+            ChromaFormat::Y422,
+            0,
+            &luma,
+            &chroma,
+            false,
+            false,
+            0,
+            meta,
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(fh.aspect_ratio_information, meta.aspect_ratio_information);
+        assert_eq!(fh.frame_rate_code, meta.frame_rate_code);
+        assert_eq!(fh.color_primaries, meta.color_primaries);
+        assert_eq!(fh.transfer_characteristic, meta.transfer_characteristic);
+        assert_eq!(fh.matrix_coefficients, meta.matrix_coefficients);
+    }
+
+    #[test]
+    fn frame_with_alpha_back_compat_zeros_meta() {
+        // The legacy `write_frame_with_alpha` shim must leave every
+        // metadata field at 0 (preserving the byte-exact behaviour the
+        // pre-FrameMeta callers depended on).
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let mut buf = Vec::new();
+        write_frame_with_alpha(
+            &mut buf,
+            0,
+            64,
+            64,
+            ChromaFormat::Y444,
+            0,
+            &luma,
+            &chroma,
+            false,
+            false,
+            2, // 16-bit alpha
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(fh.aspect_ratio_information, 0);
+        assert_eq!(fh.frame_rate_code, 0);
+        assert_eq!(fh.color_primaries, 0);
+        assert_eq!(fh.transfer_characteristic, 0);
+        assert_eq!(fh.matrix_coefficients, 0);
+        assert_eq!(fh.alpha_channel_type, 2);
     }
 }

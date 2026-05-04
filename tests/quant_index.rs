@@ -111,11 +111,8 @@ fn round_trip(packet_bytes: &[u8], width: u32, height: u32) -> VideoFrame {
     let mut reg = CodecRegistry::new();
     oxideav_prores::register(&mut reg);
     let mut dec = reg.make_decoder(&params).expect("make_decoder");
-    let mut pkt = oxideav_core::Packet::new(
-        0,
-        oxideav_core::TimeBase::new(1, 30),
-        packet_bytes.to_vec(),
-    );
+    let mut pkt =
+        oxideav_core::Packet::new(0, oxideav_core::TimeBase::new(1, 30), packet_bytes.to_vec());
     pkt.flags.keyframe = true;
     dec.send_packet(&pkt).expect("send_packet");
     let frame = dec.receive_frame().expect("receive_frame");
@@ -203,11 +200,9 @@ fn quant_index_overrides_profile_default_on_proxy() {
         .receive_packet()
         .expect("receive_packet default");
 
-    let mut enc_override = make_encoder_with_config(
-        &params,
-        EncoderConfig::default().with_quantization_index(2),
-    )
-    .expect("make_encoder override");
+    let mut enc_override =
+        make_encoder_with_config(&params, EncoderConfig::default().with_quantization_index(2))
+            .expect("make_encoder override");
     enc_override
         .send_frame(&Frame::Video(src.clone()))
         .expect("send_frame override");
@@ -248,8 +243,10 @@ fn quant_index_zero_rejected() {
 #[test]
 fn quant_index_225_rejected() {
     let params = make_params(64, 48, None);
-    let res =
-        make_encoder_with_config(&params, EncoderConfig::default().with_quantization_index(225));
+    let res = make_encoder_with_config(
+        &params,
+        EncoderConfig::default().with_quantization_index(225),
+    );
     assert!(
         res.is_err(),
         "EncoderConfig with quantization_index=225 must be rejected (RDD 36 §7.3 range is 1..=224)"
