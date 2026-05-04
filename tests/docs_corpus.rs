@@ -1,7 +1,7 @@
 //! Integration tests against the docs/video/prores/ fixture corpus.
 //!
 //! Each fixture under `../../docs/video/prores/fixtures/<name>/` ships an
-//! `input.mov` (or `input.mxf`) carrying one or two ProRes elementary
+//! `input.mov` (or `input.mxf`) carrying one or more ProRes elementary
 //! frames, plus an `expected.yuv.sha256` (and sometimes the actual
 //! `expected.yuv` bytes) that pin the FFmpeg/prores_ks reference
 //! reconstruction. A `notes.md` describes the bitstream feature focus and
@@ -21,7 +21,9 @@
 //!    notes pin (yuv422p10le for the 422 profiles; yuv444p12le for 4444
 //!    / 4444 XQ; alpha lands as a 4th plane).
 //! 4. When the fixture ships `expected.yuv`, compares the decoded YUV
-//!    against the reference plane-by-plane. Otherwise (the larger
+//!    against the reference plane-by-plane (for as many frames as the
+//!    reference covers — the corpus may ship a reference for the prefix
+//!    only to keep the on-disk size budget). Otherwise (the larger
 //!    1080p/720p fixtures keep only the SHA-256 to stay under the corpus
 //!    size budget), the test still drives the decoder and reports
 //!    plane sizes / errors but skips the pixel comparison.
@@ -208,7 +210,6 @@ struct CorpusCase {
     container: Container,
     width: usize,
     height: usize,
-    n_frames: usize,
     bit_depth: BitDepth,
     chroma: ChromaFormat,
     /// Number of expected output planes (3 for plain YUV, 4 when alpha
@@ -294,33 +295,37 @@ fn decode_fixture(case: &CorpusCase) -> Option<DecodeReport> {
             0
         };
 
-    if let Some(ref yuv) = yuv_ref {
-        // If the reference exists at all, its size must match
-        // n_frames * frame_bytes — assertable independent of the
-        // decoder's correctness.
-        assert_eq!(
-            yuv.len(),
-            case.n_frames * frame_bytes,
-            "fixture {} expected.yuv size mismatch (have {} bytes, expected {} = {} frames * {} \
-             [{}x{} {:?}, {}-bit, {} planes])",
-            case.name,
-            yuv.len(),
-            case.n_frames * frame_bytes,
-            case.n_frames,
-            frame_bytes,
-            case.width,
-            case.height,
-            case.chroma,
-            case.bit_depth.bits(),
-            case.planes,
-        );
-    }
+    // The reference's frame count is whatever fits cleanly into its
+    // byte length. The corpus may ship a reference covering fewer
+    // frames than the container holds (size budget) — we score the
+    // intersection: every container frame for which there's a
+    // matching block of expected.yuv pixels.
+    let ref_frames = match &yuv_ref {
+        Some(yuv) => {
+            assert!(
+                yuv.len() % frame_bytes == 0,
+                "fixture {} expected.yuv size {} is not a whole multiple of frame_bytes {} \
+                 [{}x{} {:?}, {}-bit, {} planes]",
+                case.name,
+                yuv.len(),
+                frame_bytes,
+                case.width,
+                case.height,
+                case.chroma,
+                case.bit_depth.bits(),
+                case.planes,
+            );
+            yuv.len() / frame_bytes
+        }
+        None => 0,
+    };
 
-    let mut per_frame: Vec<Result<FrameDiff, String>> = Vec::with_capacity(case.n_frames);
+    let mut per_frame: Vec<Result<FrameDiff, String>> = Vec::with_capacity(frames.len());
     let mut fatal: Option<String> = None;
 
-    let n_to_score = case.n_frames.min(frames.len());
-    for (i, frame_bytes_pkt) in frames.iter().enumerate().take(n_to_score) {
+    // Score every container frame; pixel-compare against expected.yuv
+    // only for the prefix the reference actually covers.
+    for (i, frame_bytes_pkt) in frames.iter().enumerate() {
         let requested = Some((case.bit_depth, case.chroma));
         let decoded = match decode_packet_with_depth(frame_bytes_pkt, Some(i as i64), requested) {
             Ok(vf) => vf,
@@ -334,12 +339,17 @@ fn decode_fixture(case: &CorpusCase) -> Option<DecodeReport> {
             }
         };
 
-        // If reference YUV is unavailable, just record success (so the
-        // report shows decoder didn't crash) and move on.
+        // If reference YUV is unavailable OR doesn't cover this frame
+        // index (the corpus may ship a reference for the prefix only),
+        // record success and move on.
         let Some(ref yuv) = yuv_ref else {
             per_frame.push(Ok(FrameDiff::default()));
             continue;
         };
+        if i >= ref_frames {
+            per_frame.push(Ok(FrameDiff::default()));
+            continue;
+        }
 
         let ref_off = i * frame_bytes;
         let ref_slice = &yuv[ref_off..ref_off + frame_bytes];
@@ -534,9 +544,9 @@ fn evaluate(case: &CorpusCase) {
 // instrumented ffmpeg pass — useful for diffing against our own
 // trace output if/when divergence localisation is needed.
 
-/// Smallest practical SQ fixture: 320x240 apcn, 2 frames at
-/// yuv422p10le. expected.yuv is kept (~300 KB) so a byte-level
-/// comparison runs cheaply.
+/// Smallest practical SQ fixture: 320x240 apcn at yuv422p10le.
+/// expected.yuv is kept (~300 KB / frame) so a byte-level comparison
+/// runs cheaply.
 #[test]
 fn corpus_tiny_320x240_sq() {
     evaluate(&CorpusCase {
@@ -544,7 +554,6 @@ fn corpus_tiny_320x240_sq() {
         container: Container::Mov,
         width: 320,
         height: 240,
-        n_frames: 2,
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
@@ -562,7 +571,6 @@ fn corpus_mxf_container() {
         container: Container::Mxf,
         width: 320,
         height: 240,
-        n_frames: 2,
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
@@ -580,7 +588,6 @@ fn corpus_proxy_1280x720() {
         container: Container::Mov,
         width: 1280,
         height: 720,
-        n_frames: 2,
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
@@ -596,7 +603,6 @@ fn corpus_lt_1280x720() {
         container: Container::Mov,
         width: 1280,
         height: 720,
-        n_frames: 2,
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
@@ -613,7 +619,6 @@ fn corpus_sq_1920x1080() {
         container: Container::Mov,
         width: 1920,
         height: 1080,
-        n_frames: 2,
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
@@ -630,7 +635,6 @@ fn corpus_hq_1920x1080() {
         container: Container::Mov,
         width: 1920,
         height: 1080,
-        n_frames: 2,
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
@@ -648,7 +652,6 @@ fn corpus_4444_1920x1080() {
         container: Container::Mov,
         width: 1920,
         height: 1080,
-        n_frames: 2,
         bit_depth: BitDepth::Twelve,
         chroma: ChromaFormat::Y444,
         planes: 3,
@@ -667,7 +670,6 @@ fn corpus_4444_with_alpha() {
         container: Container::Mov,
         width: 1920,
         height: 1080,
-        n_frames: 2,
         bit_depth: BitDepth::Twelve,
         chroma: ChromaFormat::Y444,
         planes: 4,
@@ -685,7 +687,6 @@ fn corpus_4444xq_1920x1080() {
         container: Container::Mov,
         width: 1920,
         height: 1080,
-        n_frames: 2,
         bit_depth: BitDepth::Twelve,
         chroma: ChromaFormat::Y444,
         planes: 3,
@@ -702,7 +703,6 @@ fn corpus_interlaced_tff() {
         container: Container::Mov,
         width: 1920,
         height: 1080,
-        n_frames: 2,
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
@@ -720,7 +720,6 @@ fn corpus_pal_1080i50() {
         container: Container::Mov,
         width: 1920,
         height: 1080,
-        n_frames: 2,
         bit_depth: BitDepth::Ten,
         chroma: ChromaFormat::Y422,
         planes: 3,
