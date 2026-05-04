@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-prores/compare/v0.0.6...v0.0.7) - 2026-05-04
+
+### Other
+
+- decoder + encoder: alpha plane reads/writes full padded MB-row height
+- write frame_rate_code + descriptive metadata into header
+- expose quantization_index on EncoderConfig
+- derive frame count from data, drop hard-coded n_frames
+
 ### Fixed
 
 - Alpha decode against streams whose picture height is not a multiple
