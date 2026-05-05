@@ -71,7 +71,7 @@ pub mod quant;
 pub mod slice;
 
 use oxideav_core::{CodecCapabilities, CodecId, CodecTag, PixelFormat};
-use oxideav_core::{CodecInfo, CodecRegistry};
+use oxideav_core::{CodecInfo, CodecRegistry, RuntimeContext};
 
 /// Public codec id.
 pub const CODEC_ID_STR: &str = "prores";
@@ -124,7 +124,7 @@ pub fn profile_for_fourcc(fourcc: &[u8; 4]) -> Option<frame::Profile> {
 
 /// Register the ProRes decoder + encoder for all six profiles
 /// (422 Proxy/LT/Standard/HQ and 4444 / 4444 XQ).
-pub fn register(reg: &mut CodecRegistry) {
+pub fn register_codecs(reg: &mut CodecRegistry) {
     let caps = CodecCapabilities::video("prores_sw")
         .with_lossy(true)
         .with_intra_only(true)
@@ -148,6 +148,16 @@ pub fn register(reg: &mut CodecRegistry) {
                 CodecTag::fourcc(b"AP4X"),
             ]),
     );
+}
+
+/// Unified registration entry point: install the ProRes codec
+/// factories into the codec sub-registry of a [`RuntimeContext`].
+///
+/// This is the preferred entry point for new code — it matches the
+/// convention every sibling crate now follows. Direct callers that need
+/// only the codec sub-registry can keep using [`register_codecs`].
+pub fn register(ctx: &mut RuntimeContext) {
+    register_codecs(&mut ctx.codecs);
 }
 
 #[cfg(test)]
@@ -222,7 +232,7 @@ mod tests {
         enc_params.pixel_format = Some(PixelFormat::Yuv422P);
 
         let mut reg = oxideav_core::CodecRegistry::new();
-        register(&mut reg);
+        register_codecs(&mut reg);
         let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
         encoder
             .send_frame(&Frame::Video(original.clone()))
@@ -255,9 +265,17 @@ mod tests {
     #[test]
     fn decoder_registered() {
         let mut reg = oxideav_core::CodecRegistry::new();
-        register(&mut reg);
+        register_codecs(&mut reg);
         assert!(reg.has_decoder(&CodecId::new(CODEC_ID_STR)));
         assert!(reg.has_encoder(&CodecId::new(CODEC_ID_STR)));
+    }
+
+    #[test]
+    fn register_via_runtime_context_installs_codec_factory() {
+        let mut ctx = oxideav_core::RuntimeContext::new();
+        register(&mut ctx);
+        assert!(ctx.codecs.has_decoder(&CodecId::new(CODEC_ID_STR)));
+        assert!(ctx.codecs.has_encoder(&CodecId::new(CODEC_ID_STR)));
     }
 
     #[test]
@@ -316,7 +334,7 @@ mod tests {
         use oxideav_core::stream::{CodecResolver, ProbeContext};
         use oxideav_core::CodecTag;
         let mut reg = oxideav_core::CodecRegistry::new();
-        register(&mut reg);
+        register_codecs(&mut reg);
         for fc in PRORES_FOURCCS {
             let tag = CodecTag::fourcc(fc);
             let ctx = ProbeContext::new(&tag);
@@ -367,7 +385,7 @@ mod tests {
         enc_params.pixel_format = Some(PixelFormat::Yuv444P);
 
         let mut reg = oxideav_core::CodecRegistry::new();
-        register(&mut reg);
+        register_codecs(&mut reg);
         let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
         encoder
             .send_frame(&Frame::Video(original.clone()))

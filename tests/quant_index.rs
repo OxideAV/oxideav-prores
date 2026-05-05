@@ -109,7 +109,7 @@ fn encode_with_qi(width: u32, height: u32, qi: Option<u8>, src: &VideoFrame) -> 
 fn round_trip(packet_bytes: &[u8], width: u32, height: u32) -> VideoFrame {
     let params = make_params(width, height, None);
     let mut reg = CodecRegistry::new();
-    oxideav_prores::register(&mut reg);
+    oxideav_prores::register_codecs(&mut reg);
     let mut dec = reg.make_decoder(&params).expect("make_decoder");
     let mut pkt =
         oxideav_core::Packet::new(0, oxideav_core::TimeBase::new(1, 30), packet_bytes.to_vec());

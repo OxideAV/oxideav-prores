@@ -113,7 +113,7 @@ fn roundtrip(source: &Source, bit_rate: Option<u64>, expected_fourcc: &[u8; 4], 
     enc_params.bit_rate = bit_rate;
 
     let mut reg = CodecRegistry::new();
-    oxideav_prores::register(&mut reg);
+    oxideav_prores::register_codecs(&mut reg);
 
     let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
     encoder
@@ -308,7 +308,7 @@ fn roundtrip_10bit(
     enc_params.bit_rate = bit_rate;
 
     let mut reg = CodecRegistry::new();
-    oxideav_prores::register(&mut reg);
+    oxideav_prores::register_codecs(&mut reg);
 
     let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
     encoder
@@ -377,7 +377,7 @@ fn roundtrip_422_10bit_dynamic_range() {
     enc_params.height = Some(src.height);
     enc_params.pixel_format = Some(PixelFormat::Yuv422P10Le);
     let mut reg = CodecRegistry::new();
-    oxideav_prores::register(&mut reg);
+    oxideav_prores::register_codecs(&mut reg);
     let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
     encoder
         .send_frame(&Frame::Video(src.frame.clone()))
@@ -487,7 +487,7 @@ fn roundtrip_4444_12bit() {
     enc_params.frame_rate = Some(Rational::new(30, 1));
 
     let mut reg = CodecRegistry::new();
-    oxideav_prores::register(&mut reg);
+    oxideav_prores::register_codecs(&mut reg);
 
     let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
     encoder

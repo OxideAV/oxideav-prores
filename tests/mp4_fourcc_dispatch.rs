@@ -171,7 +171,7 @@ fn ffmpeg_generated_fourccs_map_to_prores() {
         // Dynamic registry path: after `register`, the FourCC must
         // resolve through the tag registry.
         let mut reg = CodecRegistry::new();
-        oxideav_prores::register(&mut reg);
+        oxideav_prores::register_codecs(&mut reg);
         let tag = CodecTag::fourcc(&fc);
         let ctx = ProbeContext::new(&tag);
         let id = reg.resolve_tag(&ctx).expect("registry resolve_tag");

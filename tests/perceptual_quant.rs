@@ -124,7 +124,7 @@ fn round_trip_packet(packet: &[u8], width: u32, height: u32) -> VideoFrame {
     params.pixel_format = Some(PixelFormat::Yuv422P);
 
     let mut reg = CodecRegistry::new();
-    oxideav_prores::register(&mut reg);
+    oxideav_prores::register_codecs(&mut reg);
     let mut dec = reg.make_decoder(&params).expect("make_decoder");
     let mut pkt = oxideav_core::Packet::new(0, oxideav_core::TimeBase::new(1, 30), packet.to_vec());
     pkt.flags.keyframe = true;
