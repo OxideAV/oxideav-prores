@@ -107,6 +107,27 @@ The valid range is `1..=224` (rejected at encoder construction
 otherwise). The override applies to every slice in every encoded frame
 and roundtrips through any RDD 36 decoder.
 
+### Two-pass per-frame rate control
+
+Set `CodecParameters::bit_rate` + `frame_rate` and call
+`EncoderConfig::with_rate_control()` to enable per-frame binary-search
+rate control. The encoder performs up to `RATE_CTRL_MAX_PASSES` (10)
+trial encodes per frame, adjusting `quantization_index` to hit the
+per-frame byte target derived from `bit_rate / fps` within
+`RATE_CTRL_TOLERANCE` (±5 %). When the target is outside the
+achievable range for the resolution the encoder returns the best
+candidate (finest quality for targets above the maximum, coarsest for
+targets below the minimum) — it never emits a broken stream.
+
+```rust
+use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+
+// Hit the nominal 422 HQ bitrate (220 Mbit/s at 29.97 fps) within ±5%.
+let cfg = EncoderConfig::default().with_rate_control();
+let enc = make_encoder_with_config(&params, cfg)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ### Configurable quantisation matrices (RDD 36 §5.3.4 + §6.3.7 + §7.3)
 
 The encoder defaults to the spec's flat all-4s quantisation matrix

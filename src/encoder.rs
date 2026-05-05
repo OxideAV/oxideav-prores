@@ -45,6 +45,9 @@ pub struct EncoderConfig {
     /// 2 / 1` for Proxy / LT / Standard / HQ / 4444 / 4444 XQ. Set this
     /// when the caller wants a different point on the rate/quality
     /// curve without re-mapping the profile selection.
+    ///
+    /// When `rate_control` is `true` this field is the *starting point*
+    /// for the binary search; `None` uses the profile default as seed.
     pub quantization_index: Option<u8>,
     /// Descriptive metadata fields written into the RDD 36 frame header
     /// (`aspect_ratio_information`, `frame_rate_code`,
@@ -54,7 +57,31 @@ pub struct EncoderConfig {
     /// `CodecParameters::frame_rate` and leave the rest at 0
     /// ("unknown"); `Some(meta)` overrides everything verbatim.
     pub meta: Option<FrameMeta>,
+    /// Enable two-pass per-frame rate control.
+    ///
+    /// When `true` and the encoder was constructed with a
+    /// `CodecParameters::bit_rate` and `CodecParameters::frame_rate`,
+    /// each call to `send_frame` performs a binary search over
+    /// `quantization_index` (up to [`RATE_CTRL_MAX_PASSES`] trial
+    /// encodes) to hit the per-frame byte target derived from the
+    /// nominal bit-rate within [`RATE_CTRL_TOLERANCE`] (5 %). The
+    /// search starts from the profile default qi (or the explicit
+    /// `quantization_index` if set) and respects the full 1..=224
+    /// range.
+    ///
+    /// The overhead is bounded: at most `RATE_CTRL_MAX_PASSES` full
+    /// encodes per frame. For constant-content sequences the search
+    /// typically converges in 2-3 passes. Set `false` (the default)
+    /// to preserve the original single-pass behaviour.
+    pub rate_control: bool,
 }
+
+/// Maximum number of trial encodes per frame when rate control is active.
+/// Covers the full qi range (1..=224) in log2(224) ≈ 8 steps.
+pub const RATE_CTRL_MAX_PASSES: usize = 10;
+
+/// Fractional tolerance for the rate-control target (0.05 = ±5 %).
+pub const RATE_CTRL_TOLERANCE: f64 = 0.05;
 
 impl EncoderConfig {
     /// Construct a config that emits the flat all-4s matrices and
@@ -94,6 +121,14 @@ impl EncoderConfig {
     /// setting the [`Self::meta`] field directly.
     pub fn with_meta(mut self, meta: FrameMeta) -> Self {
         self.meta = Some(meta);
+        self
+    }
+
+    /// Enable two-pass per-frame rate control (see [`Self::rate_control`]).
+    /// Requires `CodecParameters::bit_rate` and `frame_rate` to be set at
+    /// encoder construction; silently degrades to single-pass otherwise.
+    pub fn with_rate_control(mut self) -> Self {
+        self.rate_control = true;
         self
     }
 }
@@ -207,6 +242,24 @@ pub fn make_encoder_with_config(
         ..FrameMeta::default()
     });
 
+    // Compute per-frame byte target for rate control. We need both
+    // bit_rate and frame_rate; either missing → rate control disabled.
+    let target_bytes = if config.rate_control {
+        if let (Some(br), Some(fr)) = (params.bit_rate, params.frame_rate) {
+            if fr.num > 0 && fr.den > 0 {
+                // bytes_per_frame = (bit_rate / 8) * (den / num)
+                let bits_per_frame = (br as u64 * fr.den as u64).saturating_div(fr.num as u64);
+                (bits_per_frame / 8) as usize
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
     Ok(Box::new(ProResEncoder {
         output_params,
         width,
@@ -220,6 +273,7 @@ pub fn make_encoder_with_config(
         time_base: params
             .frame_rate
             .map_or(TimeBase::new(1, 90_000), |r| TimeBase::new(r.den, r.num)),
+        target_bytes,
         pending: VecDeque::new(),
         eof: false,
     }))
@@ -236,6 +290,8 @@ struct ProResEncoder {
     meta: FrameMeta,
     config: EncoderConfig,
     time_base: TimeBase,
+    /// Target bytes per frame for rate control, or 0 when disabled.
+    target_bytes: usize,
     pending: VecDeque<Packet>,
     eof: bool,
 }
@@ -252,19 +308,34 @@ impl Encoder for ProResEncoder {
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         match frame {
             Frame::Video(v) => {
-                let data = encode_frame_full(
-                    v,
-                    self.width,
-                    self.height,
-                    self.chroma,
-                    self.bit_depth,
-                    self.profile,
-                    self.quant_index,
-                    None,
-                    0,
-                    self.config.quant_matrices,
-                    self.meta,
-                )?;
+                let data = if self.target_bytes > 0 {
+                    encode_frame_with_rate_control(
+                        v,
+                        self.width,
+                        self.height,
+                        self.chroma,
+                        self.bit_depth,
+                        self.profile,
+                        self.quant_index,
+                        self.config.quant_matrices,
+                        self.meta,
+                        self.target_bytes,
+                    )?
+                } else {
+                    encode_frame_full(
+                        v,
+                        self.width,
+                        self.height,
+                        self.chroma,
+                        self.bit_depth,
+                        self.profile,
+                        self.quant_index,
+                        None,
+                        0,
+                        self.config.quant_matrices,
+                        self.meta,
+                    )?
+                };
                 let mut pkt = Packet::new(0, self.time_base, data);
                 pkt.pts = v.pts;
                 pkt.dts = v.pts;
@@ -465,6 +536,90 @@ pub fn encode_frame_interlaced(
         None,
         FrameMeta::default(),
     )
+}
+
+/// Two-pass per-frame rate control: binary-search `quantization_index` to
+/// hit `target_bytes` within [`RATE_CTRL_TOLERANCE`] (±5 %).
+///
+/// Strategy:
+/// 1. Encode once at `seed_qi` (the profile default or caller's qi).
+/// 2. If the size is already within tolerance, return immediately.
+/// 3. Binary-search the qi range [1, 224], converging in at most
+///    [`RATE_CTRL_MAX_PASSES`] further trials.
+///
+/// Invariant: larger qi → coarser quantisation → smaller frame.
+/// So `lo` is the qi that produced the largest recent frame and `hi`
+/// is the qi that produced the smallest recent frame. We pick midpoints
+/// until the target is hit or the range collapses.
+#[allow(clippy::too_many_arguments)]
+fn encode_frame_with_rate_control(
+    frame: &VideoFrame,
+    img_w: u32,
+    img_h: u32,
+    chroma: ChromaFormat,
+    bit_depth: BitDepth,
+    profile: Profile,
+    seed_qi: u8,
+    qmats: Option<QuantMatrices>,
+    meta: FrameMeta,
+    target_bytes: usize,
+) -> Result<Vec<u8>> {
+    let tol_lo = (target_bytes as f64 * (1.0 - RATE_CTRL_TOLERANCE)) as usize;
+    let tol_hi = (target_bytes as f64 * (1.0 + RATE_CTRL_TOLERANCE)) as usize;
+
+    // First encode at seed qi.
+    let seed = encode_frame_full(
+        frame, img_w, img_h, chroma, bit_depth, profile, seed_qi, None, 0, qmats, meta,
+    )?;
+    if seed.len() >= tol_lo && seed.len() <= tol_hi {
+        return Ok(seed);
+    }
+
+    // Decide search direction.
+    // If seed is too large (above target+tol) we need higher qi (coarser).
+    // If seed is too small (below target-tol) we need lower qi (finer).
+    let (mut lo, mut hi): (u8, u8) = if seed.len() > tol_hi {
+        // Too large → need coarser quantisation → higher qi
+        (seed_qi, 224)
+    } else {
+        // Too small → need finer quantisation → lower qi
+        (1, seed_qi)
+    };
+
+    let mut best = seed;
+
+    for _ in 0..RATE_CTRL_MAX_PASSES {
+        if lo >= hi {
+            break;
+        }
+        let mid = lo + (hi - lo) / 2;
+        let candidate = encode_frame_full(
+            frame, img_w, img_h, chroma, bit_depth, profile, mid, None, 0, qmats, meta,
+        )?;
+        let sz = candidate.len();
+        if sz >= tol_lo && sz <= tol_hi {
+            return Ok(candidate);
+        }
+        // Track the closest candidate by absolute distance to target.
+        let best_dist = (best.len() as i64 - target_bytes as i64).unsigned_abs();
+        let cand_dist = (sz as i64 - target_bytes as i64).unsigned_abs();
+        if cand_dist < best_dist {
+            best = candidate;
+        }
+        if sz > tol_hi {
+            // Frame too large → raise qi (coarser)
+            lo = mid + 1;
+        } else {
+            // Frame too small → lower qi (finer)
+            // Safe because mid >= lo >= 1; if mid == 1 the loop exits.
+            if mid == 0 {
+                break;
+            }
+            hi = mid - 1;
+        }
+    }
+    // Return the best candidate found (closest to target).
+    Ok(best)
 }
 
 /// Internal entrypoint shared by progressive and interlaced encodes.

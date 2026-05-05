@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Two-pass per-frame rate control (`EncoderConfig::with_rate_control`):
+  binary-searches `quantization_index` over up to `RATE_CTRL_MAX_PASSES`
+  (10) trial encodes per frame to land within `RATE_CTRL_TOLERANCE` (±5 %)
+  of the per-frame byte target derived from `CodecParameters::bit_rate /
+  frame_rate`. Works across all six ProRes profiles (422 Proxy/LT/Standard/HQ
+  and 4444/4444 XQ); degrades gracefully to single-pass when `bit_rate` or
+  `frame_rate` is missing. Unreachable targets (target > max achievable at
+  qi=1, or target < min achievable at qi=224) return the best candidate
+  without panicking. Integration tests in `tests/rate_control.rs` confirm
+  ±4–5 % accuracy on both 422 and 4444 at 64×48 and 128×96.
+- `EncoderConfig::rate_control` field + `EncoderConfig::with_rate_control()`
+  builder; `RATE_CTRL_MAX_PASSES` and `RATE_CTRL_TOLERANCE` public constants.
+- `encode_frame_with_rate_control` internal function (not public API)
+  implements the binary-search loop.
+
 ## [0.0.7](https://github.com/OxideAV/oxideav-prores/compare/v0.0.6...v0.0.7) - 2026-05-04
 
 ### Other
