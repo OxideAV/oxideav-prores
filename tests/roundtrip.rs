@@ -115,7 +115,7 @@ fn roundtrip(source: &Source, bit_rate: Option<u64>, expected_fourcc: &[u8; 4], 
     let mut reg = CodecRegistry::new();
     oxideav_prores::register_codecs(&mut reg);
 
-    let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
+    let mut encoder = reg.first_encoder(&enc_params).expect("make_encoder");
     encoder
         .send_frame(&Frame::Video(source.frame.clone()))
         .expect("send_frame");
@@ -142,7 +142,7 @@ fn roundtrip(source: &Source, bit_rate: Option<u64>, expected_fourcc: &[u8; 4], 
     let (fh, _) = oxideav_prores::frame::parse_frame(&pkt.data).expect("parse_frame");
     assert_eq!(fh.chroma_format, chroma);
 
-    let mut decoder = reg.make_decoder(&enc_params).expect("make_decoder");
+    let mut decoder = reg.first_decoder(&enc_params).expect("make_decoder");
     decoder.send_packet(&pkt).expect("send_packet");
     let frame = decoder.receive_frame().expect("receive_frame");
     let decoded = match frame {
@@ -310,7 +310,7 @@ fn roundtrip_10bit(
     let mut reg = CodecRegistry::new();
     oxideav_prores::register_codecs(&mut reg);
 
-    let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
+    let mut encoder = reg.first_encoder(&enc_params).expect("make_encoder");
     encoder
         .send_frame(&Frame::Video(source.frame.clone()))
         .expect("send_frame");
@@ -326,7 +326,7 @@ fn roundtrip_10bit(
     let (fh, _) = oxideav_prores::frame::parse_frame(&pkt.data).expect("parse_frame");
     assert_eq!(fh.chroma_format, chroma);
 
-    let mut decoder = reg.make_decoder(&enc_params).expect("make_decoder");
+    let mut decoder = reg.first_decoder(&enc_params).expect("make_decoder");
     decoder.send_packet(&pkt).expect("send_packet");
     let frame = decoder.receive_frame().expect("receive_frame");
     let decoded = match frame {
@@ -378,12 +378,12 @@ fn roundtrip_422_10bit_dynamic_range() {
     enc_params.pixel_format = Some(PixelFormat::Yuv422P10Le);
     let mut reg = CodecRegistry::new();
     oxideav_prores::register_codecs(&mut reg);
-    let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
+    let mut encoder = reg.first_encoder(&enc_params).expect("make_encoder");
     encoder
         .send_frame(&Frame::Video(src.frame.clone()))
         .expect("send_frame");
     let pkt = encoder.receive_packet().expect("receive_packet");
-    let mut decoder = reg.make_decoder(&enc_params).expect("make_decoder");
+    let mut decoder = reg.first_decoder(&enc_params).expect("make_decoder");
     decoder.send_packet(&pkt).expect("send_packet");
     let frame = decoder.receive_frame().expect("receive_frame");
     let decoded = match frame {
@@ -489,12 +489,12 @@ fn roundtrip_4444_12bit() {
     let mut reg = CodecRegistry::new();
     oxideav_prores::register_codecs(&mut reg);
 
-    let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
+    let mut encoder = reg.first_encoder(&enc_params).expect("make_encoder");
     encoder
         .send_frame(&Frame::Video(src.frame.clone()))
         .expect("send_frame");
     let pkt = encoder.receive_packet().expect("receive_packet");
-    let mut decoder = reg.make_decoder(&enc_params).expect("make_decoder");
+    let mut decoder = reg.first_decoder(&enc_params).expect("make_decoder");
     decoder.send_packet(&pkt).expect("send_packet");
     let frame = decoder.receive_frame().expect("receive_frame");
     let decoded = match frame {

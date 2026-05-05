@@ -235,14 +235,14 @@ mod tests {
 
         let mut reg = oxideav_core::CodecRegistry::new();
         register_codecs(&mut reg);
-        let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
+        let mut encoder = reg.first_encoder(&enc_params).expect("make_encoder");
         encoder
             .send_frame(&Frame::Video(original.clone()))
             .expect("send_frame");
         let pkt = encoder.receive_packet().expect("receive_packet");
 
         let dec_params = enc_params.clone();
-        let mut decoder = reg.make_decoder(&dec_params).expect("make_decoder");
+        let mut decoder = reg.first_decoder(&dec_params).expect("make_decoder");
         decoder.send_packet(&pkt).expect("send_packet");
         let frame = decoder.receive_frame().expect("receive_frame");
         let decoded = match frame {
@@ -388,14 +388,14 @@ mod tests {
 
         let mut reg = oxideav_core::CodecRegistry::new();
         register_codecs(&mut reg);
-        let mut encoder = reg.make_encoder(&enc_params).expect("make_encoder");
+        let mut encoder = reg.first_encoder(&enc_params).expect("make_encoder");
         encoder
             .send_frame(&Frame::Video(original.clone()))
             .expect("send_frame");
         let pkt = encoder.receive_packet().expect("receive_packet");
 
         let dec_params = enc_params.clone();
-        let mut decoder = reg.make_decoder(&dec_params).expect("make_decoder");
+        let mut decoder = reg.first_decoder(&dec_params).expect("make_decoder");
         decoder.send_packet(&pkt).expect("send_packet");
         let frame = decoder.receive_frame().expect("receive_frame");
         let decoded = match frame {
