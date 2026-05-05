@@ -15,3 +15,7 @@ categories = ["multimedia::encoding", "multimedia::video"]
 
 [dependencies]
 oxideav-core = "0.1"
+# Distributed-slice auto-registration into `oxideav_core::REGISTRARS`
+# via the `oxideav_core::register!` macro. Tiny crate, no transitive
+# deps; works on every target including wasm.
+linkme = "0.3"

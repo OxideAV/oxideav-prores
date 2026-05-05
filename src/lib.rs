@@ -160,6 +160,8 @@ pub fn register(ctx: &mut RuntimeContext) {
     register_codecs(&mut ctx.codecs);
 }
 
+oxideav_core::register!("prores", register);
+
 #[cfg(test)]
 mod tests {
     use super::*;
