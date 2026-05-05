@@ -248,7 +248,7 @@ pub fn make_encoder_with_config(
         if let (Some(br), Some(fr)) = (params.bit_rate, params.frame_rate) {
             if fr.num > 0 && fr.den > 0 {
                 // bytes_per_frame = (bit_rate / 8) * (den / num)
-                let bits_per_frame = (br as u64 * fr.den as u64).saturating_div(fr.num as u64);
+                let bits_per_frame = (br * fr.den as u64).saturating_div(fr.num as u64);
                 (bits_per_frame / 8) as usize
             } else {
                 0
