@@ -5,9 +5,7 @@ ProRes video profiles (422 Proxy / LT / Standard / HQ and 4444 /
 4444 XQ). 8-bit, 10-bit, and 12-bit Y'CbCr; lossless alpha plane on
 the 4444 / 4444 XQ profiles.
 
-Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace)
-framework but usable standalone. No C libraries, no FFI wrappers, no
-`*-sys` crates.
+Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework but usable standalone. Implemented from the spec (no C codec libraries linked or wrapped, no `*-sys` crates).
 
 ## Status
 
