@@ -105,6 +105,31 @@ The valid range is `1..=224` (rejected at encoder construction
 otherwise). The override applies to every slice in every encoded frame
 and roundtrips through any RDD 36 decoder.
 
+### Explicit profile selection
+
+By default the encoder maps `CodecParameters::bit_rate` to one of the
+six profiles via [`encoder::pick_profile`] (see the table below).
+Override the heuristic with [`encoder::EncoderConfig::with_profile`] when
+the caller wants a specific profile that the bitrate hint would not
+pick — e.g. **4444 XQ at low bitrates** (the heuristic only selects XQ
+above 400 Mbit/s), or any 4:2:2 profile with no `bit_rate` hint at all.
+
+```rust
+use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+use oxideav_prores::frame::Profile;
+
+// Force 4444 XQ for a 4:4:4 stream regardless of bit_rate hint.
+let cfg = EncoderConfig::for_profile(Profile::Prores4444Xq);
+let enc = make_encoder_with_config(&params, cfg)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The override's [`frame::Profile::chroma_format`] must match the
+requested `PixelFormat` (HQ/SD/LT/Proxy ↔ 4:2:2; 4444/4444 XQ ↔ 4:4:4) —
+mismatches return `Error::invalid` at encoder construction. The bitstream
+syntax itself only carries `chroma_format` per RDD 36 §5.1.1; the profile
+choice influences only the encoder's default `quantization_index`.
+
 ### Two-pass per-frame rate control
 
 Set `CodecParameters::bit_rate` + `frame_rate` and call

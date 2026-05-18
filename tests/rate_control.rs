@@ -319,6 +319,114 @@ fn rate_ctrl_disabled_decodes_cleanly() {
     }
 }
 
+/// Rate control across an 8-frame sequence with slowly-evolving content
+/// (different RNG seed per frame) must produce per-frame sizes whose
+/// **average** lands within `RATE_CTRL_TOLERANCE` of the per-frame target.
+///
+/// Individual frames may miss the tolerance band because the binary
+/// search is per-frame (no inter-frame state) and very-low-entropy or
+/// very-high-entropy frames may pin against qi=1 / qi=224. The averaged
+/// behaviour is what a downstream container or transport ABR layer
+/// observes — that's what we assert on.
+#[test]
+fn rate_ctrl_multi_frame_sequence_average_hits_target() {
+    let width = 128u32;
+    let height = 96u32;
+    let n_frames = 8usize;
+
+    // Probe achievable bracket once on the first frame.
+    let probe = synth_422_seeded(width, height, 1);
+    let (large, small) = probe_bracket(
+        &probe,
+        width,
+        height,
+        ChromaFormat::Y422,
+        Profile::Standard,
+        2,
+        16,
+    );
+    let target_per_frame = ((large as f64 * small as f64).sqrt()) as usize;
+    let fps_num: i64 = 30;
+    let fps_den: i64 = 1;
+    let bit_rate = (target_per_frame as u64 * 8 * fps_num as u64) / fps_den as u64;
+
+    let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+    params.media_type = MediaType::Video;
+    params.width = Some(width);
+    params.height = Some(height);
+    params.pixel_format = Some(PixelFormat::Yuv422P);
+    params.bit_rate = Some(bit_rate);
+    params.frame_rate = Some(Rational::new(fps_num, fps_den));
+
+    let cfg = EncoderConfig::default().with_rate_control();
+    let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder");
+
+    let mut sizes: Vec<usize> = Vec::with_capacity(n_frames);
+    for i in 0..n_frames {
+        let f = synth_422_seeded(width, height, (i as u32) + 2);
+        enc.send_frame(&Frame::Video(f)).expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+        sizes.push(pkt.data.len());
+    }
+    let sum: usize = sizes.iter().sum();
+    let mean = sum as f64 / n_frames as f64;
+    let err_pct = 100.0 * (mean - target_per_frame as f64) / target_per_frame as f64;
+    eprintln!(
+        "rate_ctrl sequence ({n_frames} frames) sizes={sizes:?} mean={mean:.0} B \
+         target={target_per_frame} B (err {err_pct:+.2}%)",
+    );
+    // The per-frame tolerance is 5%; the averaged tolerance is more
+    // forgiving since per-frame errors should average down — assert 5%
+    // anyway (a stronger guarantee).
+    assert!(
+        (err_pct.abs()) <= RATE_CTRL_TOLERANCE * 100.0,
+        "rate-ctrl sequence average miss: mean={mean:.0} B target={target_per_frame} B \
+         err={err_pct:+.2}% (tol ±{:.1}%)",
+        RATE_CTRL_TOLERANCE * 100.0,
+    );
+}
+
+/// Variant of `synth_422` parameterised on the RNG seed so each frame in
+/// the multi-frame test has different per-pixel detail.
+fn synth_422_seeded(width: u32, height: u32, seed: u32) -> VideoFrame {
+    let w = width as usize;
+    let h = height as usize;
+    let cw = w / 2;
+    let mut y = vec![0u8; w * h];
+    let mut cb = vec![0u8; cw * h];
+    let mut cr = vec![0u8; cw * h];
+    let mut rng: u32 = 0xDEAD_BEEF ^ seed.wrapping_mul(2654435761);
+    let mut next = || -> u8 {
+        rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+        (rng >> 24) as u8
+    };
+    for j in 0..h {
+        let base = (j * 200 / h) as u8;
+        for i in 0..w {
+            let n = next();
+            y[j * w + i] = base.wrapping_add(n / 4);
+        }
+        for i in 0..cw {
+            cb[j * cw + i] = 128u8.wrapping_add(next() / 8);
+            cr[j * cw + i] = 128u8.wrapping_add(next() / 8);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane { stride: w, data: y },
+            VideoPlane {
+                stride: cw,
+                data: cb,
+            },
+            VideoPlane {
+                stride: cw,
+                data: cr,
+            },
+        ],
+    }
+}
+
 /// Rate control at an unreachable target (target > max achievable
 /// frame size at qi=1) must not panic and must return a valid
 /// (decodable) frame.

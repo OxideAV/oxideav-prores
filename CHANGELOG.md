@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Explicit encoder profile override via
+  `encoder::EncoderConfig::with_profile(profile)` /
+  `encoder::EncoderConfig::for_profile(profile)`. When set, the supplied
+  [`frame::Profile`] is honoured verbatim — the `bit_rate` →
+  profile heuristic in `pick_profile` is bypassed. Lets callers pin a
+  specific profile that the heuristic would not select, e.g.
+  **4444 XQ at bit rates below 400 Mbit/s** (where the heuristic
+  defaults to 4444) or any 4:2:2 profile without a `bit_rate` hint.
+  The override's `chroma_format` must match the requested
+  `PixelFormat`; mismatches return `Error::invalid` at encoder
+  construction. Bitstream is unaffected — RDD 36 §5.1.1 carries only
+  `chroma_format`, not a profile — so the override only changes the
+  default `quantization_index` (per
+  `Profile::default_quant_index`). New integration tests in
+  `tests/profile_selection.rs` (6 cases): Proxy<HQ size
+  monotonicity, 4444<XQ size monotonicity, XQ override at low
+  bit_rate, chroma-mismatch rejection, qi-override interplay
+  (byte-equal bitstream when qi is pinned), and all-six-profiles
+  decode-clean sanity.
+- Multi-frame rate-control sequence regression
+  `tests/rate_control.rs::rate_ctrl_multi_frame_sequence_average_hits_target`
+  — encodes 8 frames of evolving synthetic content through the rate
+  controller and asserts the per-frame size **average** lands within
+  `RATE_CTRL_TOLERANCE` (±5 %) of the per-frame target. Covers the
+  downstream-container view of the rate controller (where individual
+  frames may transiently miss tolerance but the long-run average is
+  what matters for CBR muxing).
+
 ## [0.0.8](https://github.com/OxideAV/oxideav-prores/compare/v0.0.7...v0.0.8) - 2026-05-06
 
 ### Other

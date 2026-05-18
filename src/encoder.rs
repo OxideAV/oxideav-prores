@@ -74,6 +74,22 @@ pub struct EncoderConfig {
     /// typically converges in 2-3 passes. Set `false` (the default)
     /// to preserve the original single-pass behaviour.
     pub rate_control: bool,
+    /// Explicit profile override (RDD 36 §4 — Proxy / LT / Standard / HQ
+    /// for 4:2:2; 4444 / 4444 XQ for 4:4:4).
+    ///
+    /// When `None` (default) the encoder calls [`pick_profile`] to map
+    /// `CodecParameters::bit_rate` to one of the six profiles. When
+    /// `Some(p)`, the caller's choice is honoured verbatim — useful when
+    /// the caller wants a specific profile that the `bit_rate` heuristic
+    /// would not pick (e.g. `Profile::Prores4444Xq` for a 4:4:4 stream
+    /// with `bit_rate < 400 Mbit/s`, or `Profile::Hq` for a 4:2:2 stream
+    /// with no `bit_rate` hint at all).
+    ///
+    /// The override's `chroma_format` must match the requested
+    /// `PixelFormat` (HQ/SD/LT/Proxy ↔ 4:2:2; 4444/4444 XQ ↔ 4:4:4) —
+    /// validated at encoder construction; mismatch returns
+    /// `Error::invalid`.
+    pub profile: Option<Profile>,
 }
 
 /// Maximum number of trial encodes per frame when rate control is active.
@@ -96,6 +112,21 @@ impl EncoderConfig {
     pub fn perceptual() -> Self {
         Self {
             quant_matrices: Some(QuantMatrices::perceptual()),
+            ..Self::default()
+        }
+    }
+
+    /// Construct a config that pins the encoder to the supplied
+    /// [`Profile`]. The override is honoured verbatim (the `bit_rate`
+    /// heuristic in [`pick_profile`] is bypassed). All other fields take
+    /// their defaults; chain with `with_quant_matrices` /
+    /// `with_quantization_index` / `with_rate_control` / `with_meta` to
+    /// configure them.
+    ///
+    /// Equivalent to `EncoderConfig::default().with_profile(profile)`.
+    pub fn for_profile(profile: Profile) -> Self {
+        Self {
+            profile: Some(profile),
             ..Self::default()
         }
     }
@@ -129,6 +160,18 @@ impl EncoderConfig {
     /// encoder construction; silently degrades to single-pass otherwise.
     pub fn with_rate_control(mut self) -> Self {
         self.rate_control = true;
+        self
+    }
+
+    /// Explicit profile override (see [`Self::profile`]). Bypasses the
+    /// `bit_rate` → profile heuristic of [`pick_profile`].
+    ///
+    /// The profile's [`Profile::chroma_format`] must match the
+    /// `PixelFormat` passed in `CodecParameters` (4:2:2 profiles ↔
+    /// `Yuv422P*`; 4:4:4 profiles ↔ `Yuv444P*`); a mismatch is rejected
+    /// at encoder construction.
+    pub fn with_profile(mut self, profile: Profile) -> Self {
+        self.profile = Some(profile);
         self
     }
 }
@@ -220,7 +263,19 @@ pub fn make_encoder_with_config(
             )));
         }
     };
-    let profile = pick_profile(chroma, params.bit_rate);
+    let profile = if let Some(p) = config.profile {
+        if p.chroma_format() != chroma {
+            return Err(Error::invalid(format!(
+                "prores encoder: EncoderConfig::profile {p:?} (chroma_format = \
+                 {:?}) does not match requested pixel_format {pix:?} (chroma_format \
+                 = {chroma:?})",
+                p.chroma_format(),
+            )));
+        }
+        p
+    } else {
+        pick_profile(chroma, params.bit_rate)
+    };
 
     let mut output_params = params.clone();
     output_params.media_type = MediaType::Video;
