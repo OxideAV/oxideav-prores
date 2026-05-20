@@ -181,6 +181,24 @@ let enc = make_encoder_with_config(&params, EncoderConfig::perceptual())?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### Bitstream version compatibility (RDD 36 §6.4)
+
+The decoder enforces every "decoder shall refuse" clause attached to
+the frame-header syntax elements:
+
+| Spec clause | Constraint enforced |
+|-------------|---------------------|
+| §6.1.1 `bitstream_version` | Reject any value > 1 — only versions 0 and 1 are specified. |
+| §6.4 v0 stream rules       | A `bitstream_version = 0` stream must have `chroma_format = 2` (4:2:2) AND `alpha_channel_type = 0`. Any v0 stream carrying 4:4:4 chroma or any alpha is malformed and rejected. |
+| §6.1.1 Table 2 `interlace_mode` | Value 3 is reserved — rejected. |
+| §6.1.1 qmat entries | Every entry of `luma_quantization_matrix` / `chroma_quantization_matrix` must lie in `2..=63` — out-of-range entries are rejected at parse time. |
+
+The encoder picks the lowest legal `bitstream_version` per the spec's
+own recommendation ("encoders should use the lowest bitstream version
+appropriate for the frame being encoded"): 4:2:2 no-alpha streams emit
+v0 for maximum legacy-decoder reach; any other combination emits v1.
+See `tests/spec_validation.rs` (15 cases) for round-trip coverage.
+
 ### Interlaced (RDD 36 §5.1, §6.2, §7.5.3)
 
 A frame's `interlace_mode` (0 = progressive, 1 = top-field-first,

@@ -196,11 +196,18 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
     if (frame_header_size as usize) < 20 || (frame_header_size as usize) > data.len() {
         return Err(Error::invalid("prores: bad frame_header_size"));
     }
+    // RDD 36 §6.1.1: the reserved byte at offset 2 is "set to 0" by
+    // encoders and decoders shall ignore it (in particular shall NOT
+    // expect zero) — read but do not validate.
     let _reserved = data[2];
     let bitstream_version = data[3];
+    // RDD 36 §6.1.1 / §6.4: "A decoder shall abort if it encounters a
+    // bitstream with an unsupported bitstream_version value." The spec
+    // currently describes versions 0 and 1; anything else is unsupported.
     if bitstream_version > 1 {
         return Err(Error::unsupported(format!(
-            "prores: unsupported bitstream_version {bitstream_version}"
+            "prores: unsupported bitstream_version {bitstream_version} \
+             (RDD 36 specifies versions 0 and 1)"
         )));
     }
     let _enc_id = &data[4..8];
@@ -211,6 +218,15 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
     let chroma_code = (b12 >> 6) & 0x3;
     let interlace_mode = (b12 >> 2) & 0x3;
     let chroma_format = ChromaFormat::from_code(chroma_code)?;
+    // RDD 36 §6.1.1 Table 2: interlace_mode == 3 is reserved. The two
+    // reserved bits framing the u2 field can never spill into the read
+    // (mask `& 0x3` above) but the value 3 itself must be rejected as
+    // a "decoder shall refuse" case per the table.
+    if interlace_mode == 3 {
+        return Err(Error::invalid(
+            "prores: interlace_mode 3 is reserved (RDD 36 §6.1.1 Table 2)",
+        ));
+    }
     // byte 13: aspect_ratio_information (u4) + frame_rate_code (u4)
     let b13 = data[13];
     let aspect_ratio_information = (b13 >> 4) & 0xF;
@@ -221,6 +237,25 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
     // byte 17: reserved u4 + alpha_channel_type u4
     let b17 = data[17];
     let alpha_channel_type = b17 & 0xF;
+    // RDD 36 §6.4 (also §6.1.1 alpha_channel_type semantics): if
+    // bitstream_version == 0 then chroma_format MUST be 2 (4:2:2) and
+    // alpha_channel_type MUST be 0. Version-0 streams predate the
+    // 4:4:4 and alpha extensions and a conforming decoder must refuse
+    // any version-0 stream that carries them.
+    if bitstream_version == 0 {
+        if chroma_format != ChromaFormat::Y422 {
+            return Err(Error::invalid(format!(
+                "prores: bitstream_version 0 requires chroma_format=2 (4:2:2), got code {chroma_code} \
+                 (RDD 36 §6.4)"
+            )));
+        }
+        if alpha_channel_type != 0 {
+            return Err(Error::invalid(format!(
+                "prores: bitstream_version 0 requires alpha_channel_type=0, got {alpha_channel_type} \
+                 (RDD 36 §6.4)"
+            )));
+        }
+    }
     // bytes 18..20: 14 reserved + load_luma + load_chroma (the last two bits)
     let b19 = data[19];
     let load_luma = (b19 >> 1) & 1;
@@ -235,6 +270,17 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
         }
         luma_qmat.copy_from_slice(&data[cursor..cursor + 64]);
         cursor += 64;
+        // RDD 36 §6.1.1 (luma_quantization_matrix): "Each entry of the
+        // matrix will be in the range 2, 3, …, 63." A custom matrix
+        // outside that range cannot be inverse-quantized per §7.3 (the
+        // qScale * weight product would be 0 or > 32256), so a
+        // conforming decoder must refuse it.
+        if let Some(&bad) = luma_qmat.iter().find(|&&w| !(2..=63).contains(&w)) {
+            return Err(Error::invalid(format!(
+                "prores: luma_quantization_matrix entry {bad} out of range 2..=63 \
+                 (RDD 36 §6.1.1)"
+            )));
+        }
     }
     if load_chroma == 1 {
         if data.len() < cursor + 64 {
@@ -242,9 +288,19 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
         }
         chroma_qmat.copy_from_slice(&data[cursor..cursor + 64]);
         cursor += 64;
+        // RDD 36 §6.1.1 (chroma_quantization_matrix): same 2..=63
+        // range constraint.
+        if let Some(&bad) = chroma_qmat.iter().find(|&&w| !(2..=63).contains(&w)) {
+            return Err(Error::invalid(format!(
+                "prores: chroma_quantization_matrix entry {bad} out of range 2..=63 \
+                 (RDD 36 §6.1.1)"
+            )));
+        }
     } else if load_luma == 1 {
-        // Per §7.3: when load_chroma=0 but load_luma=1, chroma uses
-        // the loaded luma matrix.
+        // Per §6.1.1 load_chroma_quantization_matrix: "If 0, the luma
+        // matrix shall be used (i.e., the specified custom luma
+        // quantization matrix if load_luma_quantization_matrix is 1 or
+        // the default matrix otherwise)."
         chroma_qmat = luma_qmat;
     }
     // Skip up to frame_header_size, allowing trailing reserved bytes.
@@ -462,6 +518,28 @@ pub fn write_frame_with_meta(
     meta: FrameMeta,
 ) {
     debug_assert!(alpha_channel_type <= 2);
+    // RDD 36 §6.1.1 Table 2: interlace_mode == 3 is reserved. Refuse to
+    // emit it from the writer side too (the decoder enforces the same
+    // constraint when parsing).
+    debug_assert!(
+        interlace_mode <= 2,
+        "prores: interlace_mode {interlace_mode} is reserved (RDD 36 §6.1.1 Table 2)"
+    );
+    // RDD 36 §6.1.1 (luma/chroma_quantization_matrix): "Each entry of
+    // the matrix will be in the range 2, 3, …, 63." Refuse to emit an
+    // out-of-range custom matrix.
+    if load_luma {
+        debug_assert!(
+            luma_qmat.iter().all(|&w| (2..=63).contains(&w)),
+            "prores: luma_qmat entry out of range 2..=63 (RDD 36 §6.1.1)"
+        );
+    }
+    if load_chroma {
+        debug_assert!(
+            chroma_qmat.iter().all(|&w| (2..=63).contains(&w)),
+            "prores: chroma_qmat entry out of range 2..=63 (RDD 36 §6.1.1)"
+        );
+    }
     // frame_size + magic
     out.extend_from_slice(&total_frame_size.to_be_bytes());
     out.extend_from_slice(FRAME_IDENTIFIER);
@@ -469,6 +547,11 @@ pub fn write_frame_with_meta(
     let fh_size: u16 = 20 + if load_luma { 64 } else { 0 } + if load_chroma { 64 } else { 0 };
     out.extend_from_slice(&fh_size.to_be_bytes());
     out.push(0); // reserved
+                 // RDD 36 §6.4: bitstream_version 0 requires chroma_format == 4:2:2
+                 // AND alpha_channel_type == 0. Pick the lowest legal version so
+                 // downstream legacy decoders accept the maximum number of streams
+                 // (the spec also recommends this: "encoders should use the lowest
+                 // bitstream version appropriate for the frame being encoded").
     let bitstream_version: u8 = if alpha_channel_type != 0 {
         1
     } else {
@@ -690,11 +773,14 @@ mod tests {
 
     #[test]
     fn frame_roundtrip_444_with_qmats() {
+        // RDD 36 §6.1.1: every entry must be in 2..=63. Pick two
+        // distinct patterns that both span most of the legal range so
+        // the roundtrip exercises non-default matrices.
         let mut luma = [0u8; 64];
         let mut chroma = [0u8; 64];
         for i in 0..64 {
-            luma[i] = (i + 4) as u8;
-            chroma[i] = (i + 8) as u8;
+            luma[i] = 2 + (i as u8 % 62); // 2..=63
+            chroma[i] = 2 + ((i as u8 + 31) % 62); // shifted permutation
         }
         let mut buf = Vec::new();
         write_frame(

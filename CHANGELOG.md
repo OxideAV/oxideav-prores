@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder enforcement of RDD 36 §6.4 bitstream-version compatibility
+  rules + the qmat / interlace_mode "decoder shall refuse" clauses in
+  §6.1.1. `frame::parse_frame_header` now rejects:
+  * `bitstream_version > 1` (was already rejected; error message
+    extended with the spec reference and version-range hint),
+  * a `bitstream_version == 0` stream that carries `chroma_format = 3`
+    (4:4:4) — v0 is restricted to 4:2:2 per §6.4,
+  * a `bitstream_version == 0` stream that carries any non-zero
+    `alpha_channel_type` — v0 forbids encoded alpha per §6.4,
+  * `interlace_mode == 3` (RDD 36 §6.1.1 Table 2 marks the value
+    reserved),
+  * any `luma_quantization_matrix` / `chroma_quantization_matrix` entry
+    outside `2..=63` (RDD 36 §6.1.1: "Each entry of the matrix will be
+    in the range 2, 3, …, 63"). A custom matrix that violates the
+    range cannot be inverse-quantized per §7.3 (the qScale * weight
+    product would be 0 or exceed 32256), so a conforming decoder must
+    refuse it.
+  Mirror `debug_assert!` guards in `frame::write_frame_with_meta`
+  prevent the encoder from synthesising any of the same illegal
+  combinations. New integration tests in `tests/spec_validation.rs`
+  (15 cases) cover every accept + reject combination plus
+  v0/v1-aware self-roundtrip through `write_frame` /
+  `write_frame_with_alpha`.
 - Explicit encoder profile override via
   `encoder::EncoderConfig::with_profile(profile)` /
   `encoder::EncoderConfig::for_profile(profile)`. When set, the supplied
