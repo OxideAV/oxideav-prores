@@ -101,6 +101,66 @@ fn synthetic_field_distinct(width: u32, height: u32) -> VideoFrame {
     }
 }
 
+/// Build a synthetic field-distinct 4:2:2 **10-bit** frame. Same
+/// field-distinct structure as [`synthetic_field_distinct`] but the
+/// samples are genuine 10-bit values (`0..=1023`) packed little-endian,
+/// so the cross-decode exercises the HBD `read_sample` path
+/// (RDD 36 §7.5.1: `v = s / 2^(b-9) - 256` for `b = 10`) combined with
+/// the interlaced field-pair split (§7.5.3) — not an 8-bit value merely
+/// shifted into 10-bit storage. `stride` is in **bytes** (2 per sample).
+fn synthetic_field_distinct_10(width: u32, height: u32) -> VideoFrame {
+    let w = width as usize;
+    let h = height as usize;
+    let cw = w / 2;
+    // 10-bit SMPTE-legal-ish luma window (≈64..940) so the bright/dim
+    // field bias survives ffmpeg's full-range clamp on decode.
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; cw * h * 2];
+    let mut cr = vec![0u8; cw * h * 2];
+    let put = |buf: &mut [u8], idx: usize, v: u16| {
+        let off = idx * 2;
+        buf[off] = (v & 0xFF) as u8;
+        buf[off + 1] = (v >> 8) as u8;
+    };
+    for j in 0..h {
+        for i in 0..w {
+            // Field-distinct brightness bias scaled into 10-bit, plus an
+            // in-row diagonal gradient + per-row phase so the AC
+            // coefficients are non-zero across most blocks.
+            let base: i32 = if j % 2 == 0 { 640 } else { 384 };
+            let grad = ((i + j) as u16 % 192) as i32;
+            let phase = ((i.wrapping_mul(7) ^ j.wrapping_mul(13)) % 96) as i32;
+            let v = (base + grad + phase - 48).clamp(64, 940) as u16;
+            put(&mut y, j * w + i, v);
+        }
+        for i in 0..cw {
+            let cbv = (512 + ((i as i32 - cw as i32 / 2) * 8 + (j as i32 % 7) * 4).clamp(-192, 192))
+                .clamp(64, 960) as u16;
+            let crv = (512 + ((j as i32 - h as i32 / 2) * 4 + (i as i32 % 5) * 8).clamp(-192, 192))
+                .clamp(64, 960) as u16;
+            put(&mut cb, j * cw + i, cbv);
+            put(&mut cr, j * cw + i, crv);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: cr,
+            },
+        ],
+    }
+}
+
 /// Ask ffmpeg to produce a 1-frame interlaced ProRes MOV at the given
 /// dimensions / profile / top-field-first. The resulting file is used
 /// as a *template* — we will overwrite its `mdat` payload with our own
@@ -271,6 +331,16 @@ fn psnr_10bit(a: &[u8], b: &[u8]) -> f64 {
 }
 
 fn cross_decode_interlaced(profile: Profile, width: u32, height: u32, interlace_mode: u8) {
+    cross_decode_interlaced_depth(profile, width, height, interlace_mode, BitDepth::Eight);
+}
+
+fn cross_decode_interlaced_depth(
+    profile: Profile,
+    width: u32,
+    height: u32,
+    interlace_mode: u8,
+    bit_depth: BitDepth,
+) {
     if !have_ffmpeg() {
         eprintln!("ffmpeg missing — skipping cross-decode test");
         return;
@@ -294,14 +364,22 @@ fn cross_decode_interlaced(profile: Profile, width: u32, height: u32, interlace_
     }
     let template = std::fs::read(&template_path).expect("read template");
 
-    // Encode the same dimensions via our interlaced encoder.
-    let src = synthetic_field_distinct(width, height);
+    // Encode the same dimensions via our interlaced encoder. The 10-bit
+    // path builds a genuine 10-bit source (LE u16 samples) so the HBD
+    // field-pair packing — `read_sample`'s `BitDepth::Ten` branch
+    // combined with the §7.5.3 field deinterleave — is what gets
+    // validated, not an 8-bit value zero-padded into 10-bit storage.
+    let src = match bit_depth {
+        BitDepth::Eight => synthetic_field_distinct(width, height),
+        BitDepth::Ten => synthetic_field_distinct_10(width, height),
+        BitDepth::Twelve => unreachable!("12-bit not exercised here"),
+    };
     let pkt = encode_frame_interlaced(
         &src,
         width,
         height,
         ChromaFormat::Y422,
-        BitDepth::Eight,
+        bit_depth,
         profile,
         2, // qi = 2 → highest quality at HQ defaults
         None,
@@ -362,13 +440,20 @@ fn cross_decode_interlaced(profile: Profile, width: u32, height: u32, interlace_
     );
     let decoded_y = &decoded[..y_bytes_10];
 
-    // Upshift our 8-bit source to 10-bit for an apples-to-apples PSNR
-    // comparison against ffmpeg's 10-bit decoded output.
-    let src_y_10 = upshift_8_to_10_le(&src.planes[0].data);
+    // Build the 10-bit reference luma plane. For the 8-bit source we
+    // upshift each sample << 2; the 10-bit source is already 10-bit LE
+    // so we compare it directly (apples-to-apples against ffmpeg's
+    // yuv422p10le decode output).
+    let src_y_10 = match bit_depth {
+        BitDepth::Eight => upshift_8_to_10_le(&src.planes[0].data),
+        BitDepth::Ten => src.planes[0].data.clone(),
+        BitDepth::Twelve => unreachable!("12-bit not exercised here"),
+    };
     let psnr = psnr_10bit(&src_y_10, decoded_y);
     eprintln!(
-        "cross-decode interlaced (profile={profile_flag}, im={interlace_mode}, {width}x{height}): \
-         packet={} bytes, luma PSNR={psnr:.2} dB",
+        "cross-decode interlaced (profile={profile_flag}, im={interlace_mode}, {width}x{height}, \
+         {}-bit): packet={} bytes, luma PSNR={psnr:.2} dB",
+        bit_depth.bits(),
         pkt.len()
     );
     // 30 dB at qi=2 is comfortably above the visual-quality knee for
@@ -432,4 +517,36 @@ fn cross_decode_apch_interlaced_larger() {
     // 128x96 — twice the macroblock grid; verifies the per-field
     // half-height picture path at a non-trivial resolution.
     cross_decode_interlaced(Profile::Hq, 128, 96, 1);
+}
+
+// ───────────── 10-bit interlaced (HBD field-pair packing) ─────────────
+//
+// These exercise `encode_frame_interlaced` with `BitDepth::Ten`: the
+// genuine-10-bit `read_sample` path (RDD 36 §7.5.1 level shift for
+// b = 10) feeding the two-field §7.5.3 deinterleave. ffmpeg's
+// `prores_ks` decoder must reconstruct the field-pair to ≥ 30 dB luma
+// PSNR against the 10-bit source, and the bright-even / dim-odd field
+// bias must survive (catches a swapped TFF/BFF field-pair tag in the
+// HBD path specifically). The 8-bit cases above don't cover the
+// `BitDepth::Ten` sample-read branch.
+
+#[test]
+fn cross_decode_apch_interlaced_10bit_tff() {
+    cross_decode_interlaced_depth(Profile::Hq, 64, 48, 1, BitDepth::Ten);
+}
+
+#[test]
+fn cross_decode_apch_interlaced_10bit_bff() {
+    cross_decode_interlaced_depth(Profile::Hq, 64, 48, 2, BitDepth::Ten);
+}
+
+#[test]
+fn cross_decode_apcn_interlaced_10bit_tff() {
+    cross_decode_interlaced_depth(Profile::Standard, 64, 48, 1, BitDepth::Ten);
+}
+
+#[test]
+fn cross_decode_apch_interlaced_10bit_larger() {
+    // 128x96 10-bit — twice the macroblock grid in the HBD field path.
+    cross_decode_interlaced_depth(Profile::Hq, 128, 96, 1, BitDepth::Ten);
 }

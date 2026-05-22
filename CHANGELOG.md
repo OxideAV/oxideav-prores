@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ffmpeg cross-decode acceptance for the **10-bit interlaced** encode
+  path (HBD field-pair packing). `tests/ffmpeg_cross_decode.rs` gains 4
+  cases (apch TFF/BFF, apcn TFF, apch at 128×96) that encode a genuine
+  10-bit (LE u16, SMPTE-legal `64..940` luma window) field-distinct
+  4:2:2 source via `encode_frame_interlaced(... BitDepth::Ten ...)`,
+  wrap the `icpf` packet in the same template-MOV scaffold the 8-bit
+  cases use, and ask ffmpeg's `prores_ks` decoder to reconstruct the
+  field-pair to raw `yuv422p10le`. This exercises `read_sample`'s
+  `BitDepth::Ten` branch (RDD 36 §7.5.1 level shift `v = s / 2^(b-9) −
+  256` for `b = 10`) combined with the §7.5.3 two-field deinterleave —
+  the existing 8-bit cases don't cover the HBD sample-read path.
+  Measured luma PSNR: 64.47 dB on the 64×48 fixtures and 64.40 dB at
+  128×96 (vs. 64.17/64.18 dB for the 8-bit cases) — comfortably above
+  the 30 dB acceptance bar. Each case re-checks the requested
+  `interlace_mode` + `picture_count == 2` and the bright-even / dim-odd
+  field bias (defends against a swapped TFF/BFF field-pair tag in the
+  HBD path specifically). Tests skip gracefully when `ffmpeg` is
+  missing. The shared driver `cross_decode_interlaced` is now a thin
+  wrapper over a depth-parameterised `cross_decode_interlaced_depth`.
 - ffmpeg cross-decode acceptance test for the interlaced encode path.
   `tests/ffmpeg_cross_decode.rs` (5 cases: apch TFF, apch BFF, apcn
   TFF, apcn BFF, apch at 128×96) encodes a synthetic field-distinct

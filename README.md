@@ -211,10 +211,15 @@ temporal order; the decoder reverses the deinterleave. Each field
 picture uses the interlaced block scan (§7.2 Figure 5) instead of the
 progressive Figure 4. See [`encoder::encode_frame_interlaced`].
 
-Streams produced by `encode_frame_interlaced` for apcn / apch (TFF and
-BFF, 64×48 and 128×96 cases) cross-decode through ffmpeg's
-`prores_ks` decoder at ≥ 64 dB luma PSNR — see
-`tests/ffmpeg_cross_decode.rs` for the black-box acceptance harness.
+Streams produced by `encode_frame_interlaced` for apcn / apch cross-decode
+through ffmpeg's `prores_ks` decoder at ≥ 64 dB luma PSNR — both 8-bit
+(TFF and BFF, 64×48 and 128×96) and **genuine 10-bit** field-pair
+packing (TFF/BFF at 64×48, TFF at 128×96; 64.40-64.47 dB). The 10-bit
+cases drive a true 10-bit LE source through `read_sample`'s
+`BitDepth::Ten` branch (RDD 36 §7.5.1 level shift for `b = 10`) feeding
+the §7.5.3 two-field deinterleave — not an 8-bit value padded into
+10-bit storage. See `tests/ffmpeg_cross_decode.rs` for the black-box
+acceptance harness.
 
 ## Usage
 
