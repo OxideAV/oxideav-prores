@@ -211,6 +211,11 @@ temporal order; the decoder reverses the deinterleave. Each field
 picture uses the interlaced block scan (§7.2 Figure 5) instead of the
 progressive Figure 4. See [`encoder::encode_frame_interlaced`].
 
+Streams produced by `encode_frame_interlaced` for apcn / apch (TFF and
+BFF, 64×48 and 128×96 cases) cross-decode through ffmpeg's
+`prores_ks` decoder at ≥ 64 dB luma PSNR — see
+`tests/ffmpeg_cross_decode.rs` for the black-box acceptance harness.
+
 ## Usage
 
 ```toml

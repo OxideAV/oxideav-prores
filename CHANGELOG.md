@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ffmpeg cross-decode acceptance test for the interlaced encode path.
+  `tests/ffmpeg_cross_decode.rs` (5 cases: apch TFF, apch BFF, apcn
+  TFF, apcn BFF, apch at 128×96) encodes a synthetic field-distinct
+  4:2:2 frame via `encode_frame_interlaced`, wraps the resulting
+  `icpf`-prefixed packet in a minimal QuickTime MOV (substituting our
+  payload into an ffmpeg-generated template MOV: `mdat` size, embedded
+  `frame_size`, and `stsz` sample-size are patched; `stco` first-chunk
+  offset remains correct because the patched `mdat` keeps its file
+  offset), then asks ffmpeg's `prores_ks` decoder to decode the
+  resulting container to raw 10-bit YUV. Measured luma PSNR: 64.17 dB
+  on the 64×48 fixtures and 64.18 dB at 128×96 — well above the
+  30 dB acceptance bar. Each case additionally verifies that the
+  encoded frame header reports the requested `interlace_mode` and
+  `picture_count == 2`, and that the decoded even-row luma sum is
+  greater than the odd-row luma sum (defends against a swapped
+  TFF/BFF field-pair tag). Tests skip gracefully when `ffmpeg` is
+  missing.
 - Decoder enforcement of RDD 36 §6.4 bitstream-version compatibility
   rules + the qmat / interlace_mode "decoder shall refuse" clauses in
   §6.1.1. `frame::parse_frame_header` now rejects:
