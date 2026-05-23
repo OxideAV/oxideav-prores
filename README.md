@@ -234,6 +234,15 @@ ffmpeg's 16→12-bit alpha resample; the bitstream alpha is lossless per
 §7.1.2). See `tests/ffmpeg_cross_decode.rs` for the black-box
 acceptance harness.
 
+The symmetric **progressive 4444 + alpha** forward path
+(`encode_frame_with_alpha`, single picture, `interlace_mode == 0`)
+cross-decodes through `prores_ks` at 64.77-64.81 dB luma PSNR (ap4h at
+64×48 and 128×96, ap4x at 64×48). It drives the same 4:4:4 + genuine
+12-bit + 16-bit-alpha-entropy paths as the interlaced cases but
+exercises the §7.2 Figure 4 **progressive** block scan instead of the
+§7.5.3 field-pair deinterleave; the decoded alpha gradient again
+round-trips with sub-LSB mean-abs-error (≈0.17).
+
 ## Usage
 
 ```toml

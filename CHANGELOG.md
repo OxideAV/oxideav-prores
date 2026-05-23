@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ffmpeg cross-decode acceptance for the **progressive 4444 + alpha**
+  encode path (ap4h / ap4x single picture). `tests/ffmpeg_cross_decode.rs`
+  gains 3 cases (ap4h at 64×48 and 128×96, ap4x at 64×48) that encode a
+  genuine **12-bit 4:4:4** source carrying a **16-bit alpha** gradient via
+  `encode_frame_with_alpha(... ChromaFormat::Y444, BitDepth::Twelve,
+  Some(AlphaChannelType::Sixteen))`, substitute the resulting `icpf` packet
+  into a progressive (no `+ildct` / `-top`) alpha-aware template MOV
+  (generated with `format=yuva444p12le`), and ask ffmpeg's `prores_ks`
+  decoder to reconstruct it to raw `yuva444p12le`. This is the symmetric
+  *progressive* counterpart of the interlaced 4444 + alpha cases: it
+  drives the same four hard paths the encoder owns — 4:4:4 full-resolution
+  chroma, the `read_sample` `BitDepth::Twelve` branch (RDD 36 §7.5.1 level
+  shift `v = s / 2^(b-9) − 256` for `b = 12`, ffmpeg's native ap4h/ap4x
+  depth), the §5.3.3 / §7.1.2 / Table 14 16-bit-alpha entropy coder
+  (per-slice scanned-alpha blob at the padded MB-row height per §7.5.2) —
+  but exercises the §7.2 Figure 4 **progressive** block scan (single
+  picture, `interlace_mode == 0`, `picture_count() == 1`) instead of the
+  §7.5.3 two-field deinterleave. Measured luma PSNR: 64.77 dB on the 64×48
+  fixtures and 64.81 dB at 128×96 — comfortably above the 30 dB acceptance
+  bar. Each case re-checks `interlace_mode == 0`, `picture_count == 1`, and
+  `alpha_channel_type == 2`; verifies the decoded alpha gradient comes
+  through with a non-trivial range and sub-LSB mean-abs-error (≈0.17, the
+  residual of ffmpeg's 16→12-bit alpha resample — the bitstream alpha is
+  lossless per §7.1.2); and checks a left-dark / right-bright luma-ramp
+  bias (defends against a transposed / mis-scanned progressive picture in
+  the 4:4:4 + alpha path specifically). Tests skip gracefully when
+  `ffmpeg` is missing.
 - ffmpeg cross-decode acceptance for the **interlaced 4444 + alpha**
   encode path (ap4h / ap4x field-pair packing with a per-pixel alpha
   plane). `tests/ffmpeg_cross_decode.rs` gains 4 cases (ap4h TFF/BFF at

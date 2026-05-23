@@ -34,7 +34,7 @@ use oxideav_core::frame::VideoPlane;
 use oxideav_core::VideoFrame;
 use oxideav_prores::alpha::AlphaChannelType;
 use oxideav_prores::decoder::BitDepth;
-use oxideav_prores::encoder::encode_frame_interlaced;
+use oxideav_prores::encoder::{encode_frame_interlaced, encode_frame_with_alpha};
 use oxideav_prores::frame::{ChromaFormat, Profile};
 
 fn have_ffmpeg() -> bool {
@@ -904,4 +904,317 @@ fn cross_decode_ap4x_interlaced_alpha_tff() {
     // 4444 XQ shares the bitstream structure with 4444; this confirms the
     // field-pair + alpha path against the highest-quality profile too.
     cross_decode_interlaced_4444_alpha(Profile::Prores4444Xq, 64, 48, 1);
+}
+
+// ─────────── progressive 4444 + alpha (ap4h / ap4x single picture) ───────────
+//
+// The interlaced 4444+alpha cases above drive the §7.5.3 two-field
+// deinterleave; this section covers the *progressive* counterpart — a
+// single picture (interlace_mode = 0, `picture_count() == 1`) using the
+// §7.2 Figure 4 progressive block scan instead of Figure 5. It is the
+// symmetric forward (our-encoder → ffmpeg-decoder) acceptance for the
+// crate's flagship progressive path, exercising at once:
+//   * 4:4:4 chroma (ChromaFormat::Y444 — full-resolution Cb/Cr blocks),
+//   * genuine 12-bit Y'CbCr samples (RDD 36 §7.5.1 level shift for
+//     b = 12, `read_sample`'s `BitDepth::Twelve` branch) — ffmpeg's
+//     ap4h/ap4x is internally 12-bit, so this matches its native depth,
+//   * a per-pixel **16-bit alpha** plane coded losslessly per RDD 36
+//     §5.3.3 + §7.1.2 (raster-scan run/diff VLC, Table 14) at the tail
+//     of every slice, emitted for the full padded MB-row height (§7.5.2),
+//   * the §7.2 Figure 4 *progressive* DCT-block scan (one picture, not a
+//     field pair) — the path `encode_frame_with_alpha` takes when
+//     `interlace_mode == 0`.
+//
+// ffmpeg's `prores_ks` decoder must reconstruct the single picture to
+// ≥ 30 dB luma PSNR against the 12-bit source AND recover the alpha
+// gradient. A regression in the progressive block scan or a dropped
+// alpha blob both surface as failures.
+
+/// Build a synthetic **progressive** 4:4:4 12-bit frame with a per-pixel
+/// 16-bit alpha gradient. Unlike the interlaced generator there is no
+/// even/odd field-brightness bias (a single picture has no field
+/// structure); instead a smooth 2-D luma/chroma gradient + per-pixel
+/// phase keeps AC coefficients non-zero across most blocks, and the
+/// alpha sweeps the full 16-bit range diagonally so the alpha entropy
+/// coder's run + difference codewords (Table 14) are exercised. Y/Cb/Cr
+/// strides are in **bytes** (2 per 12-bit sample); alpha is 16-bit LE.
+fn synthetic_progressive_444_alpha_12(width: u32, height: u32) -> VideoFrame {
+    let w = width as usize;
+    let h = height as usize;
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; w * h * 2];
+    let mut cr = vec![0u8; w * h * 2];
+    let mut a = vec![0u8; w * h * 2];
+    let put = |buf: &mut [u8], idx: usize, v: u16| {
+        let off = idx * 2;
+        buf[off] = (v & 0xFF) as u8;
+        buf[off + 1] = (v >> 8) as u8;
+    };
+    for j in 0..h {
+        for i in 0..w {
+            // Smooth 2-D luma ramp (left-dark → right-bright) inside a
+            // 12-bit SMPTE-legal-ish window (≈256..3760), plus a per-pixel
+            // phase so AC coefficients are non-zero across most blocks.
+            let ramp = (i * 3000 / w.max(1)) as i32;
+            let phase = ((i.wrapping_mul(7) ^ j.wrapping_mul(13)) % 384) as i32;
+            let v = (400 + ramp + phase - 192).clamp(256, 3760) as u16;
+            put(&mut y, j * w + i, v);
+            // Full-resolution 4:4:4 chroma modulation.
+            let cbv = (2048
+                + ((i as i32 - w as i32 / 2) * 16 + (j as i32 % 7) * 8).clamp(-768, 768))
+            .clamp(256, 3840) as u16;
+            let crv = (2048
+                + ((j as i32 - h as i32 / 2) * 16 + (i as i32 % 5) * 8).clamp(-768, 768))
+            .clamp(256, 3840) as u16;
+            put(&mut cb, j * w + i, cbv);
+            put(&mut cr, j * w + i, crv);
+            // 16-bit alpha diagonal gradient: 0 at (0,0) → ~65535 at the
+            // far corner. `.max(1)` avoids a degenerate all-zero corner.
+            let av = (((i + j) * 65535 / (w + h)) as u16).max(1);
+            put(&mut a, j * w + i, av);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cr,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: a,
+            },
+        ],
+    }
+}
+
+/// Ask ffmpeg to produce a 1-frame **progressive** ProRes 4444/4444 XQ
+/// MOV **with an alpha plane** (`yuva444p12le`). Used as a template
+/// scaffold whose `mdat` payload we overwrite with our own encoder
+/// output. No `+ildct` / `-top` flags — a plain progressive container so
+/// the substituted packet lands in a progressive, alpha-aware scaffold.
+fn ffmpeg_make_template_mov_444_alpha_progressive(
+    profile_flag: u8,
+    width: u32,
+    height: u32,
+    out_path: &std::path::Path,
+) -> bool {
+    let input = format!("testsrc=size={width}x{height}:rate=25:duration=1,format=yuva444p12le");
+    Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &input,
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            &profile_flag.to_string(),
+            "-pix_fmt",
+            "yuva444p12le",
+            "-frames:v",
+            "1",
+            out_path.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn cross_decode_progressive_4444_alpha(profile: Profile, width: u32, height: u32) {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping 4444+alpha progressive cross-decode");
+        return;
+    }
+    assert!(
+        matches!(profile, Profile::Prores4444 | Profile::Prores4444Xq),
+        "this driver is for the 4444 / 4444 XQ profiles only"
+    );
+    let tmp = tempdir().expect("tempdir");
+    let profile_flag: u8 = match profile {
+        Profile::Prores4444 => 4,
+        Profile::Prores4444Xq => 5,
+        _ => unreachable!("non-4444 profile in 4444 driver"),
+    };
+    let template_path = tmp.join(format!("template_ap_p{profile_flag}_{width}x{height}.mov"));
+    if !ffmpeg_make_template_mov_444_alpha_progressive(profile_flag, width, height, &template_path)
+    {
+        eprintln!(
+            "progressive 4444+alpha template MOV unavailable — skipping (profile={profile_flag})"
+        );
+        return;
+    }
+    let template = std::fs::read(&template_path).expect("read template");
+
+    // Encode the same dimensions via our PROGRESSIVE 4444+alpha encoder at
+    // genuine 12-bit 4:4:4 with a 16-bit alpha plane. This drives:
+    //   * `read_sample`'s `BitDepth::Twelve` branch (§7.5.1 level shift),
+    //   * the §7.1.2 / Table 14 16-bit-alpha entropy coder (per-slice
+    //     scanned-alpha blob at the padded MB-row height, §7.5.2),
+    //   * the §7.2 Figure 4 *progressive* block scan (single picture).
+    let src = synthetic_progressive_444_alpha_12(width, height);
+    let pkt = encode_frame_with_alpha(
+        &src,
+        width,
+        height,
+        ChromaFormat::Y444,
+        BitDepth::Twelve,
+        profile,
+        2, // qi = 2 → finest at 4444 defaults
+        Some(AlphaChannelType::Sixteen),
+    )
+    .expect("encode_frame_with_alpha 4444+alpha progressive");
+
+    // Sanity: the encoded frame header reports progressive (interlace_mode
+    // 0 ⇒ 1 picture) AND a non-zero alpha_channel_type.
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt).expect("parse our packet");
+    assert_eq!(fh.interlace_mode, 0, "progressive frame interlace_mode");
+    assert_eq!(
+        fh.picture_count(),
+        1,
+        "progressive frame must carry exactly 1 picture"
+    );
+    assert_eq!(
+        fh.alpha_channel_type, 2,
+        "4444+alpha frame must report alpha_channel_type=2 (16-bit)"
+    );
+
+    let patched = patch_mov_with_packet(&template, &pkt);
+    let patched_path = tmp.join(format!("patched_ap_p{profile_flag}_{width}x{height}.mov"));
+    std::fs::write(&patched_path, &patched).expect("write patched");
+
+    // Decode via ffmpeg to raw 12-bit YUVA (4 planes: Y, Cb, Cr, A).
+    let decoded_path = tmp.join("decoded_ap.yuv");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            patched_path.to_str().unwrap(),
+            "-pix_fmt",
+            "yuva444p12le",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            decoded_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode");
+    assert!(
+        status.success(),
+        "ffmpeg failed to decode our progressive 4444+alpha packet (profile={profile_flag})"
+    );
+    let decoded = std::fs::read(&decoded_path).expect("read decoded");
+    let plane_bytes = (width as usize) * (height as usize) * 2;
+    assert!(
+        decoded.len() >= plane_bytes * 4,
+        "ffmpeg produced {} bytes, expected at least {} for 4 12-bit planes",
+        decoded.len(),
+        plane_bytes * 4
+    );
+    let decoded_y = &decoded[..plane_bytes];
+    let decoded_a = &decoded[plane_bytes * 3..plane_bytes * 4];
+
+    // Luma PSNR against the 12-bit source.
+    let psnr = psnr_12bit(&src.planes[0].data, decoded_y);
+    // Alpha is lossless per §7.1.2, but ffmpeg's ap4h/ap4x is internally
+    // 12-bit so our 16-bit source alpha is resampled on decode. Compare
+    // against the 12-bit-rounded source alpha (`round(s16 * 4095 /
+    // 65535)`) and require the mean absolute error to stay sub-LSB.
+    let n = plane_bytes / 2;
+    let mut a_abs_err = 0u64;
+    let mut a_min = u16::MAX;
+    let mut a_max = 0u16;
+    for i in 0..n {
+        let s16 = u16::from_le_bytes([src.planes[3].data[i * 2], src.planes[3].data[i * 2 + 1]]);
+        let s12 = ((s16 as u32 * 4095 + 32767) / 65535) as u16;
+        let d = u16::from_le_bytes([decoded_a[i * 2], decoded_a[i * 2 + 1]]);
+        a_min = a_min.min(d);
+        a_max = a_max.max(d);
+        a_abs_err += (d as i64 - s12 as i64).unsigned_abs();
+    }
+    let a_mae = a_abs_err as f64 / n as f64;
+    eprintln!(
+        "cross-decode progressive 4444+alpha (profile={profile_flag}, {width}x{height}, \
+         12-bit): packet={} bytes, luma PSNR={psnr:.2} dB, alpha range={a_min}..{a_max}, \
+         alpha MAE={a_mae:.4}",
+        pkt.len()
+    );
+    assert!(
+        psnr >= 30.0,
+        "4444+alpha progressive cross-decode PSNR {psnr:.2} dB under 30 dB bar"
+    );
+    // The alpha gradient must come through with a non-trivial range — a
+    // dropped / mis-offset alpha blob collapses it to a constant.
+    assert!(
+        a_max - a_min > 2048,
+        "decoded alpha range {a_min}..{a_max} is trivial — alpha blob lost?"
+    );
+    // Lossless-modulo-resample: mean abs error must be sub-LSB. A broken
+    // alpha entropy decode would be tens-to-hundreds of levels off.
+    assert!(
+        a_mae < 1.0,
+        "decoded alpha mean-abs-error {a_mae:.4} too high — alpha entropy decode wrong?"
+    );
+
+    // Left vs right luma sum check — the progressive source ramps
+    // left-dark → right-bright, so a transposed / mis-scanned picture
+    // (block-scan regression) shows up as a collapsed left/right bias.
+    let mut left_sum = 0u64;
+    let mut right_sum = 0u64;
+    let w = width as usize;
+    let half = w / 2;
+    for j in 0..(height as usize) {
+        let row_start = j * w * 2;
+        for i in 0..w {
+            let v = u16::from_le_bytes([
+                decoded_y[row_start + i * 2],
+                decoded_y[row_start + i * 2 + 1],
+            ]) as u64;
+            if i < half {
+                left_sum += v;
+            } else {
+                right_sum += v;
+            }
+        }
+    }
+    assert!(
+        right_sum > left_sum,
+        "progressive 4444+alpha cross-decode: right-half sum {right_sum} not > left-half sum \
+         {left_sum} (luma ramp lost — block-scan regression in our encoder?)"
+    );
+}
+
+#[test]
+fn cross_decode_ap4h_progressive_alpha() {
+    cross_decode_progressive_4444_alpha(Profile::Prores4444, 64, 48);
+}
+
+#[test]
+fn cross_decode_ap4h_progressive_alpha_larger() {
+    // 128x96 — twice the macroblock grid in the 4:4:4 + alpha progressive path.
+    cross_decode_progressive_4444_alpha(Profile::Prores4444, 128, 96);
+}
+
+#[test]
+fn cross_decode_ap4x_progressive_alpha() {
+    // 4444 XQ shares the bitstream structure with 4444; confirms the
+    // progressive 4:4:4 + alpha path against the highest-quality profile too.
+    cross_decode_progressive_4444_alpha(Profile::Prores4444Xq, 64, 48);
 }
