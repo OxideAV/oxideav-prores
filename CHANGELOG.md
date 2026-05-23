@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ffmpeg cross-decode acceptance for the **interlaced 4444 + alpha**
+  encode path (ap4h / ap4x field-pair packing with a per-pixel alpha
+  plane). `tests/ffmpeg_cross_decode.rs` gains 4 cases (ap4h TFF/BFF at
+  64×48, ap4h TFF at 128×96, ap4x TFF at 64×48) that encode a genuine
+  **12-bit 4:4:4** field-distinct source carrying a **16-bit alpha**
+  gradient via `encode_frame_interlaced(... ChromaFormat::Y444,
+  BitDepth::Twelve, Some(AlphaChannelType::Sixteen), interlace_mode)`,
+  substitute the `icpf` packet into the same template-MOV scaffold the
+  4:2:2 cases use (here generated with `format=yuva444p12le` so the
+  container is alpha-aware), and ask ffmpeg's `prores_ks` decoder to
+  reconstruct the field-pair to raw `yuva444p12le`. This is the first
+  cross-decode case combining all four of the hardest paths the encoder
+  owns at once: 4:4:4 full-resolution chroma, the `read_sample`
+  `BitDepth::Twelve` branch (RDD 36 §7.5.1 level shift `v = s / 2^(b-9)
+  − 256` for `b = 12` — ffmpeg's ap4h/ap4x is internally 12-bit so this
+  matches the decoder's native depth), the §5.3.3 / §7.1.2 / Table 14
+  16-bit-alpha entropy coder (per-slice scanned-alpha blob emitted for
+  the full padded MB-row height per §7.5.2), and the §7.5.3 two-field
+  deinterleave. Measured luma PSNR: 65.26 dB on the 64×48 fixtures and
+  65.24 dB at 128×96 — comfortably above the 30 dB acceptance bar. Each
+  case re-checks the requested `interlace_mode`, `picture_count == 2`,
+  and `alpha_channel_type == 2`; verifies the decoded alpha gradient
+  comes through with a non-trivial range and sub-LSB mean-abs-error
+  (≈0.17, the residual of ffmpeg's 16→12-bit alpha resample — the
+  bitstream alpha is lossless per §7.1.2); and checks the bright-even /
+  dim-odd field bias (defends against a swapped TFF/BFF tag or a
+  dropped alpha blob in the 4:4:4 + alpha + field path specifically).
+  Tests skip gracefully when `ffmpeg` is missing.
 - ffmpeg cross-decode acceptance for the **10-bit interlaced** encode
   path (HBD field-pair packing). `tests/ffmpeg_cross_decode.rs` gains 4
   cases (apch TFF/BFF, apcn TFF, apch at 128×96) that encode a genuine

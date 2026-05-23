@@ -218,7 +218,20 @@ packing (TFF/BFF at 64×48, TFF at 128×96; 64.40-64.47 dB). The 10-bit
 cases drive a true 10-bit LE source through `read_sample`'s
 `BitDepth::Ten` branch (RDD 36 §7.5.1 level shift for `b = 10`) feeding
 the §7.5.3 two-field deinterleave — not an 8-bit value padded into
-10-bit storage. See `tests/ffmpeg_cross_decode.rs` for the black-box
+10-bit storage.
+
+The **interlaced 4444 + alpha** path (ap4h / ap4x field-pair packing
+with a per-pixel alpha plane) also cross-decodes through `prores_ks` at
+65.24-65.26 dB luma PSNR (ap4h TFF/BFF at 64×48, ap4h TFF at 128×96,
+ap4x TFF at 64×48). These cases combine the four hardest paths the
+encoder owns at once — 4:4:4 full-resolution chroma, the genuine 12-bit
+`read_sample` branch (RDD 36 §7.5.1 for `b = 12`, matching ffmpeg's
+native ap4h/ap4x depth), the §5.3.3 / §7.1.2 / Table 14 16-bit-alpha
+entropy coder (per-slice scanned-alpha blob at the padded MB-row height
+per §7.5.2), and the §7.5.3 two-field deinterleave. The decoded alpha
+gradient round-trips with sub-LSB mean-abs-error (the residual of
+ffmpeg's 16→12-bit alpha resample; the bitstream alpha is lossless per
+§7.1.2). See `tests/ffmpeg_cross_decode.rs` for the black-box
 acceptance harness.
 
 ## Usage
