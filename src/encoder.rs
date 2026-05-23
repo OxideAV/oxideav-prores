@@ -90,6 +90,22 @@ pub struct EncoderConfig {
     /// validated at encoder construction; mismatch returns
     /// `Error::invalid`.
     pub profile: Option<Profile>,
+    /// RDD 36 §6.1.1 `interlace_mode` for every frame the encoder emits.
+    ///
+    /// * `0` (default) — progressive: one `picture()` per frame.
+    /// * `1` — interlaced, top-field-first: two `picture()`s per frame,
+    ///   the first carrying the top field (source rows 0, 2, 4, …).
+    /// * `2` — interlaced, bottom-field-first: two `picture()`s per
+    ///   frame, the first carrying the bottom field (source rows
+    ///   1, 3, 5, …).
+    ///
+    /// When non-zero, each `send_frame` splits the input `VideoFrame`
+    /// into two field pictures per RDD 36 §6.2 (top
+    /// `picture_vertical_size = (vertical_size + 1) / 2`, bottom
+    /// `= vertical_size / 2`) and emits them in temporal order, each
+    /// coded with the §7.2 Figure 5 interlaced block scan. Value `3` is
+    /// reserved by Table 2 and rejected at encoder construction.
+    pub interlace_mode: u8,
 }
 
 /// Maximum number of trial encodes per frame when rate control is active.
@@ -174,6 +190,19 @@ impl EncoderConfig {
         self.profile = Some(profile);
         self
     }
+
+    /// Request interlaced output (RDD 36 §6.1.1 `interlace_mode`): `1`
+    /// for top-field-first, `2` for bottom-field-first. The default
+    /// (`0`) emits progressive frames. Value `3` is reserved (Table 2)
+    /// and rejected at encoder construction.
+    ///
+    /// When set, every `send_frame` splits the source `VideoFrame` into
+    /// two field pictures per §6.2 / §7.5.3 and emits them in temporal
+    /// order — see [`Self::interlace_mode`].
+    pub fn with_interlace_mode(mut self, interlace_mode: u8) -> Self {
+        self.interlace_mode = interlace_mode;
+        self
+    }
 }
 
 /// Default `quantization_index` used for 422 Standard. Lower = higher quality.
@@ -240,6 +269,16 @@ pub fn make_encoder_with_config(
                  (must be 1..=224 per RDD 36 §7.3 / Table 15)",
             ));
         }
+    }
+    // RDD 36 §6.1.1 Table 2: interlace_mode is a 2-bit field; 0 =
+    // progressive, 1 = TFF, 2 = BFF, 3 = reserved. Refuse 3 (and any
+    // value that would not fit the field) at construction.
+    if config.interlace_mode > 2 {
+        return Err(Error::invalid(
+            "prores encoder: EncoderConfig::interlace_mode must be 0 (progressive), \
+             1 (top-field-first) or 2 (bottom-field-first) — value 3 is reserved \
+             (RDD 36 §6.1.1 Table 2)",
+        ));
     }
     let width = params
         .width
@@ -315,6 +354,8 @@ pub fn make_encoder_with_config(
         0
     };
 
+    let interlace_mode = config.interlace_mode;
+
     Ok(Box::new(ProResEncoder {
         output_params,
         width,
@@ -324,6 +365,7 @@ pub fn make_encoder_with_config(
         profile,
         quant_index,
         meta,
+        interlace_mode,
         config,
         time_base: params
             .frame_rate
@@ -343,6 +385,10 @@ struct ProResEncoder {
     profile: Profile,
     quant_index: u8,
     meta: FrameMeta,
+    /// RDD 36 §6.1.1 interlace_mode applied to every emitted frame
+    /// (0 = progressive, 1 = TFF, 2 = BFF). Mirrors
+    /// [`EncoderConfig::interlace_mode`].
+    interlace_mode: u8,
     config: EncoderConfig,
     time_base: TimeBase,
     /// Target bytes per frame for rate control, or 0 when disabled.
@@ -375,6 +421,7 @@ impl Encoder for ProResEncoder {
                         self.config.quant_matrices,
                         self.meta,
                         self.target_bytes,
+                        self.interlace_mode,
                     )?
                 } else {
                     encode_frame_full(
@@ -386,7 +433,7 @@ impl Encoder for ProResEncoder {
                         self.profile,
                         self.quant_index,
                         None,
-                        0,
+                        self.interlace_mode,
                         self.config.quant_matrices,
                         self.meta,
                     )?
@@ -618,13 +665,24 @@ fn encode_frame_with_rate_control(
     qmats: Option<QuantMatrices>,
     meta: FrameMeta,
     target_bytes: usize,
+    interlace_mode: u8,
 ) -> Result<Vec<u8>> {
     let tol_lo = (target_bytes as f64 * (1.0 - RATE_CTRL_TOLERANCE)) as usize;
     let tol_hi = (target_bytes as f64 * (1.0 + RATE_CTRL_TOLERANCE)) as usize;
 
     // First encode at seed qi.
     let seed = encode_frame_full(
-        frame, img_w, img_h, chroma, bit_depth, profile, seed_qi, None, 0, qmats, meta,
+        frame,
+        img_w,
+        img_h,
+        chroma,
+        bit_depth,
+        profile,
+        seed_qi,
+        None,
+        interlace_mode,
+        qmats,
+        meta,
     )?;
     if seed.len() >= tol_lo && seed.len() <= tol_hi {
         return Ok(seed);
@@ -649,7 +707,17 @@ fn encode_frame_with_rate_control(
         }
         let mid = lo + (hi - lo) / 2;
         let candidate = encode_frame_full(
-            frame, img_w, img_h, chroma, bit_depth, profile, mid, None, 0, qmats, meta,
+            frame,
+            img_w,
+            img_h,
+            chroma,
+            bit_depth,
+            profile,
+            mid,
+            None,
+            interlace_mode,
+            qmats,
+            meta,
         )?;
         let sz = candidate.len();
         if sz >= tol_lo && sz <= tol_hi {
@@ -1103,4 +1171,178 @@ fn encode_block(
         };
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decoder::decode_packet;
+    use crate::frame::parse_frame;
+    use oxideav_core::frame::VideoPlane;
+    use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat};
+
+    /// 4:2:2 source whose even rows are bright and odd rows are dim, so
+    /// a swapped TFF/BFF field assignment is detectable after a
+    /// roundtrip. A small in-row gradient keeps the AC coefficients
+    /// non-zero across blocks.
+    fn field_distinct_422(width: u32, height: u32) -> VideoFrame {
+        let w = width as usize;
+        let h = height as usize;
+        let cw = w / 2;
+        let mut y = vec![0u8; w * h];
+        let cb = vec![128u8; cw * h];
+        let cr = vec![128u8; cw * h];
+        for j in 0..h {
+            for i in 0..w {
+                let base: i32 = if j % 2 == 0 { 170 } else { 90 };
+                let grad = ((i + j) % 32) as i32;
+                y[j * w + i] = (base + grad - 8).clamp(16, 235) as u8;
+            }
+        }
+        VideoFrame {
+            pts: Some(0),
+            planes: vec![
+                VideoPlane { stride: w, data: y },
+                VideoPlane {
+                    stride: cw,
+                    data: cb,
+                },
+                VideoPlane {
+                    stride: cw,
+                    data: cr,
+                },
+            ],
+        }
+    }
+
+    fn enc_params(width: u32, height: u32) -> CodecParameters {
+        let mut p = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
+        p.media_type = MediaType::Video;
+        p.width = Some(width);
+        p.height = Some(height);
+        p.pixel_format = Some(PixelFormat::Yuv422P);
+        p
+    }
+
+    #[test]
+    fn config_interlace_mode_default_is_progressive() {
+        assert_eq!(EncoderConfig::default().interlace_mode, 0);
+        assert_eq!(
+            EncoderConfig::default()
+                .with_interlace_mode(1)
+                .interlace_mode,
+            1
+        );
+        assert_eq!(
+            EncoderConfig::default()
+                .with_interlace_mode(2)
+                .interlace_mode,
+            2
+        );
+    }
+
+    #[test]
+    fn config_interlace_mode_3_rejected_at_construction() {
+        // RDD 36 §6.1.1 Table 2: interlace_mode 3 is reserved.
+        let params = enc_params(64, 48);
+        let cfg = EncoderConfig::default().with_interlace_mode(3);
+        let msg = match make_encoder_with_config(&params, cfg) {
+            Ok(_) => panic!("interlace_mode 3 must be rejected (RDD 36 Table 2 reserved)"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(
+            msg.contains("interlace_mode"),
+            "error must name interlace_mode, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn send_frame_progressive_default_emits_one_picture() {
+        // Default config (interlace_mode == 0) must still emit a single
+        // progressive picture through the public Encoder path.
+        let params = enc_params(64, 48);
+        let mut enc = make_encoder(&params).expect("make_encoder");
+        enc.send_frame(&Frame::Video(field_distinct_422(64, 48)))
+            .expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+        let (fh, _) = parse_frame(&pkt.data).expect("parse frame");
+        assert_eq!(fh.interlace_mode, 0);
+        assert_eq!(fh.picture_count(), 1);
+    }
+
+    /// Drive the high-level Encoder (`make_encoder_with_config` +
+    /// `send_frame`) with interlace_mode 1 (TFF) and 2 (BFF) and confirm
+    /// the emitted frame header carries the requested mode, two pictures,
+    /// and self-roundtrips through the decoder with field order intact.
+    fn send_frame_interlaced_roundtrips(interlace_mode: u8) {
+        let (w, h) = (64u32, 48u32);
+        let src = field_distinct_422(w, h);
+        let params = enc_params(w, h);
+        let cfg = EncoderConfig::default().with_interlace_mode(interlace_mode);
+        let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder_with_config");
+        enc.send_frame(&Frame::Video(src.clone()))
+            .expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+
+        // Frame header must report the requested interlace_mode + two
+        // pictures (one per field) per RDD 36 §5.1.
+        let (fh, _) = parse_frame(&pkt.data).expect("parse frame");
+        assert_eq!(fh.interlace_mode, interlace_mode, "header interlace_mode");
+        assert_eq!(fh.picture_count(), 2, "interlaced frame carries 2 pictures");
+
+        // Self-roundtrip: decode and confirm the even/odd brightness bias
+        // survives (i.e. the encoder placed each source row into the
+        // correct field and the decoder reinterleaved it correctly).
+        let decoded = decode_packet(&pkt.data, Some(0)).expect("decode_packet");
+        let dy = &decoded.planes[0].data;
+        let stride = decoded.planes[0].stride;
+        let mut even_sum = 0u64;
+        let mut odd_sum = 0u64;
+        for j in 0..(h as usize) {
+            let mut row = 0u64;
+            for i in 0..(w as usize) {
+                row += dy[j * stride + i] as u64;
+            }
+            if j % 2 == 0 {
+                even_sum += row;
+            } else {
+                odd_sum += row;
+            }
+        }
+        assert!(
+            even_sum > odd_sum,
+            "interlace_mode {interlace_mode}: even-row sum {even_sum} not > odd-row sum \
+             {odd_sum} (field assignment swapped?)"
+        );
+    }
+
+    #[test]
+    fn send_frame_interlaced_tff_roundtrips() {
+        send_frame_interlaced_roundtrips(1);
+    }
+
+    #[test]
+    fn send_frame_interlaced_bff_roundtrips() {
+        send_frame_interlaced_roundtrips(2);
+    }
+
+    #[test]
+    fn send_frame_interlaced_with_rate_control_keeps_field_order() {
+        // Interlaced + rate control: the rate-control path must also
+        // honour interlace_mode (two pictures, field order preserved).
+        let (w, h) = (64u32, 48u32);
+        let src = field_distinct_422(w, h);
+        let mut params = enc_params(w, h);
+        params.bit_rate = Some(50_000_000);
+        params.frame_rate = Some(oxideav_core::Rational::new(25, 1));
+        let cfg = EncoderConfig::default()
+            .with_interlace_mode(1)
+            .with_rate_control();
+        let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder_with_config");
+        enc.send_frame(&Frame::Video(src)).expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+        let (fh, _) = parse_frame(&pkt.data).expect("parse frame");
+        assert_eq!(fh.interlace_mode, 1);
+        assert_eq!(fh.picture_count(), 2);
+    }
 }

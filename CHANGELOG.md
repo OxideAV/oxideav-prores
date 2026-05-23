@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Interlaced encode through the high-level `Encoder` trait.**
+  `EncoderConfig` gains an `interlace_mode` field + builder
+  `with_interlace_mode(m)` (RDD 36 §6.1.1: 0 = progressive,
+  1 = top-field-first, 2 = bottom-field-first; value 3 is reserved by
+  Table 2 and rejected at `make_encoder_with_config` construction). The
+  mode threads through `make_encoder_with_config` → `ProResEncoder` →
+  `send_frame`, so a registry-built encoder now emits interlaced ProRes
+  (two `picture()`s per frame, fields split per §6.2 /§7.5.3 and emitted
+  in temporal order) instead of always progressive. The two-pass
+  rate-control path honours `interlace_mode` too (each trial encode
+  splits into the requested field pair). Previously interlaced output
+  was only reachable via the free function `encode_frame_interlaced`;
+  callers that only touch the `Encoder` trait could not produce
+  interlaced streams. `tests/ffmpeg_cross_decode.rs` gains 4 cases
+  (apch TFF/BFF and apcn TFF at 64×48, apch TFF at 128×96) that build
+  the encoder via `make_encoder_with_config(... with_interlace_mode(m))`,
+  drive `send_frame`/`receive_packet`, wrap the `icpf` packet in the
+  template-MOV scaffold, and confirm ffmpeg's `prores_ks` decodes the
+  field pair at ≥ 58 dB luma PSNR (58.94-64.18 dB) with the even/odd
+  field-bias check verifying TFF/BFF field order round-trips through the
+  public path. Six new `encoder.rs` unit tests cover the config default
+  (progressive), the reserved-`3` rejection, a progressive `send_frame`
+  single-picture check, self-roundtrip field-order preservation for both
+  TFF and BFF, and interlaced + rate-control interaction. A latent
+  `tempdir()` collision (two `tempdir()` calls in the same nanosecond
+  sharing a directory and clobbering each other's ffmpeg decode output
+  under parallel test threads) is fixed with a per-process atomic
+  sequence suffix plus per-case decode-output filenames.
 - ffmpeg cross-decode acceptance for the **progressive 4444 + alpha**
   encode path (ap4h / ap4x single picture). `tests/ffmpeg_cross_decode.rs`
   gains 3 cases (ap4h at 64×48 and 128×96, ap4x at 64×48) that encode a

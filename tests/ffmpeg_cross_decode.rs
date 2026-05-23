@@ -31,10 +31,12 @@
 use std::process::Command;
 
 use oxideav_core::frame::VideoPlane;
-use oxideav_core::VideoFrame;
+use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, VideoFrame};
 use oxideav_prores::alpha::AlphaChannelType;
 use oxideav_prores::decoder::BitDepth;
-use oxideav_prores::encoder::{encode_frame_interlaced, encode_frame_with_alpha};
+use oxideav_prores::encoder::{
+    encode_frame_interlaced, encode_frame_with_alpha, make_encoder_with_config, EncoderConfig,
+};
 use oxideav_prores::frame::{ChromaFormat, Profile};
 
 fn have_ffmpeg() -> bool {
@@ -46,13 +48,20 @@ fn have_ffmpeg() -> bool {
 }
 
 fn tempdir() -> Option<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let base = std::env::temp_dir();
     let pid = std::process::id();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    let p = base.join(format!("oxideav-prores-cross-{pid}-{ts}"));
+    // A monotonic per-process sequence number guarantees two concurrent
+    // callers never share a directory even if their nanosecond clocks
+    // read identically (which would otherwise let them clobber each
+    // other's ffmpeg decode output).
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let p = base.join(format!("oxideav-prores-cross-{pid}-{ts}-{seq}"));
     std::fs::create_dir_all(&p).ok()?;
     Some(p)
 }
@@ -1217,4 +1226,180 @@ fn cross_decode_ap4x_progressive_alpha() {
     // 4444 XQ shares the bitstream structure with 4444; confirms the
     // progressive 4:4:4 + alpha path against the highest-quality profile too.
     cross_decode_progressive_4444_alpha(Profile::Prores4444Xq, 64, 48);
+}
+
+// ─────────── interlaced via the public Encoder trait (send_frame) ───────────
+//
+// The cases above drive the free function `encode_frame_interlaced`
+// directly. These exercise the high-level `Encoder` path instead:
+// `make_encoder_with_config(... EncoderConfig::with_interlace_mode(m))`
+// followed by `send_frame` / `receive_packet`. That is the path a
+// registry-built encoder takes, so this confirms a caller who only ever
+// touches the `Encoder` trait can produce interlaced ProRes that ffmpeg
+// accepts — and that the field order round-trips for both TFF and BFF.
+
+fn cross_decode_interlaced_via_encoder(
+    profile: Profile,
+    width: u32,
+    height: u32,
+    interlace_mode: u8,
+) {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping cross-decode-via-encoder test");
+        return;
+    }
+    let tmp = tempdir().expect("tempdir");
+    let tff = interlace_mode == 1;
+    let profile_flag: u8 = match profile {
+        Profile::Proxy => 0,
+        Profile::Lt => 1,
+        Profile::Standard => 2,
+        Profile::Hq => 3,
+        Profile::Prores4444 => 4,
+        Profile::Prores4444Xq => 5,
+    };
+    let template_path = tmp.join(format!(
+        "tmpl_enc_p{profile_flag}_{width}x{height}_im{interlace_mode}.mov"
+    ));
+    if !ffmpeg_make_template_mov(profile_flag, width, height, tff, &template_path) {
+        eprintln!("template MOV unavailable — skipping (profile={profile_flag})");
+        return;
+    }
+    let template = std::fs::read(&template_path).expect("read template");
+
+    // Build a high-level encoder and drive it through send_frame. The
+    // explicit profile pins qi (HQ default qi=2) and the interlace_mode
+    // requests the two-field split; pixel_format Yuv422P selects the
+    // 8-bit path. This is the registry-equivalent construction path.
+    let src = synthetic_field_distinct(width, height);
+    let mut params = CodecParameters::video(CodecId::new("prores"));
+    params.media_type = MediaType::Video;
+    params.width = Some(width);
+    params.height = Some(height);
+    params.pixel_format = Some(PixelFormat::Yuv422P);
+    let cfg = EncoderConfig::default()
+        .with_profile(profile)
+        .with_interlace_mode(interlace_mode);
+    let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder_with_config");
+    enc.send_frame(&Frame::Video(src.clone()))
+        .expect("send_frame");
+    let pkt = enc.receive_packet().expect("receive_packet");
+
+    // The frame header must report the requested interlace_mode + two
+    // pictures — proving the EncoderConfig threaded through to the
+    // emitted bitstream.
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt.data).expect("parse our packet");
+    assert_eq!(
+        fh.interlace_mode, interlace_mode,
+        "send_frame encoder's interlace_mode"
+    );
+    assert_eq!(
+        fh.picture_count(),
+        2,
+        "interlaced frame must carry 2 pictures"
+    );
+
+    let patched = patch_mov_with_packet(&template, &pkt.data);
+    let patched_path = tmp.join(format!(
+        "patched_enc_p{profile_flag}_{width}x{height}_im{interlace_mode}.mov"
+    ));
+    std::fs::write(&patched_path, &patched).expect("write patched");
+
+    // Per-case output name so concurrently-running cases never collide
+    // on a shared decode target (two `tempdir()` calls could in
+    // principle land in the same nanosecond-named directory).
+    let decoded_path = tmp.join(format!(
+        "decoded_enc_p{profile_flag}_{width}x{height}_im{interlace_mode}.yuv"
+    ));
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            patched_path.to_str().unwrap(),
+            "-pix_fmt",
+            "yuv422p10le",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            decoded_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode");
+    assert!(
+        status.success(),
+        "ffmpeg failed to decode our send_frame interlaced packet \
+         (profile={profile_flag}, im={interlace_mode})"
+    );
+    let decoded = std::fs::read(&decoded_path).expect("read decoded");
+    let y_bytes_10 = (width as usize) * (height as usize) * 2;
+    assert!(
+        decoded.len() >= y_bytes_10,
+        "ffmpeg produced {} bytes, expected at least {y_bytes_10} for luma",
+        decoded.len()
+    );
+    let decoded_y = &decoded[..y_bytes_10];
+
+    let src_y_10 = upshift_8_to_10_le(&src.planes[0].data);
+    let psnr = psnr_10bit(&src_y_10, decoded_y);
+    eprintln!(
+        "cross-decode interlaced via Encoder (profile={profile_flag}, im={interlace_mode}, \
+         {width}x{height}): packet={} bytes, luma PSNR={psnr:.2} dB",
+        pkt.data.len()
+    );
+    assert!(
+        psnr >= 30.0,
+        "send_frame interlaced cross-decode PSNR {psnr:.2} dB under 30 dB bar"
+    );
+
+    // Even-row vs odd-row luma — defends against a TFF/BFF mis-tag where
+    // ffmpeg interleaves the fields the wrong way.
+    let mut even_sum = 0u64;
+    let mut odd_sum = 0u64;
+    let w = width as usize;
+    for j in 0..(height as usize) {
+        let row_start = j * w * 2;
+        let mut row_sum = 0u64;
+        for i in 0..w {
+            let v = u16::from_le_bytes([
+                decoded_y[row_start + i * 2],
+                decoded_y[row_start + i * 2 + 1],
+            ]);
+            row_sum += v as u64;
+        }
+        if j % 2 == 0 {
+            even_sum += row_sum;
+        } else {
+            odd_sum += row_sum;
+        }
+    }
+    assert!(
+        even_sum > odd_sum,
+        "send_frame interlaced cross-decode: even-row sum {even_sum} not > odd-row sum \
+         {odd_sum} (TFF/BFF field assignment swapped in the EncoderConfig path?)"
+    );
+}
+
+#[test]
+fn cross_decode_encoder_apch_interlaced_tff() {
+    cross_decode_interlaced_via_encoder(Profile::Hq, 64, 48, 1);
+}
+
+#[test]
+fn cross_decode_encoder_apch_interlaced_bff() {
+    cross_decode_interlaced_via_encoder(Profile::Hq, 64, 48, 2);
+}
+
+#[test]
+fn cross_decode_encoder_apcn_interlaced_tff() {
+    cross_decode_interlaced_via_encoder(Profile::Standard, 64, 48, 1);
+}
+
+#[test]
+fn cross_decode_encoder_apch_interlaced_larger() {
+    // 128x96 — twice the macroblock grid through the public send_frame path.
+    cross_decode_interlaced_via_encoder(Profile::Hq, 128, 96, 1);
 }

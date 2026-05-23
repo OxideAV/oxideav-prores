@@ -209,7 +209,24 @@ rows 1, 3, 5, …. The encoder splits the source into two field pictures
 (each at `(height + 1) / 2` or `height / 2` rows) and emits them in
 temporal order; the decoder reverses the deinterleave. Each field
 picture uses the interlaced block scan (§7.2 Figure 5) instead of the
-progressive Figure 4. See [`encoder::encode_frame_interlaced`].
+progressive Figure 4.
+
+Interlaced output is reachable two ways: the free function
+[`encoder::encode_frame_interlaced`], or — for callers that only touch
+the high-level `Encoder` trait — [`encoder::EncoderConfig::with_interlace_mode`],
+which threads the mode through `make_encoder_with_config` → `send_frame`
+so a registry-built encoder emits interlaced ProRes (and respects the
+mode under two-pass rate control). Value `3` is reserved (Table 2) and
+rejected at encoder construction.
+
+```rust
+use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+
+// Top-field-first interlaced output through the Encoder trait.
+let cfg = EncoderConfig::default().with_interlace_mode(1);
+let enc = make_encoder_with_config(&params, cfg)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 Streams produced by `encode_frame_interlaced` for apcn / apch cross-decode
 through ffmpeg's `prores_ks` decoder at ≥ 64 dB luma PSNR — both 8-bit
@@ -218,7 +235,12 @@ packing (TFF/BFF at 64×48, TFF at 128×96; 64.40-64.47 dB). The 10-bit
 cases drive a true 10-bit LE source through `read_sample`'s
 `BitDepth::Ten` branch (RDD 36 §7.5.1 level shift for `b = 10`) feeding
 the §7.5.3 two-field deinterleave — not an 8-bit value padded into
-10-bit storage.
+10-bit storage. The **high-level `Encoder` path** is covered too: streams
+emitted by `make_encoder_with_config(... with_interlace_mode(m))` +
+`send_frame` cross-decode through `prores_ks` at ≥ 58 dB luma PSNR
+(apch TFF/BFF and apcn TFF at 64×48, apch TFF at 128×96), with the
+even/odd field-bias check confirming TFF and BFF field order survives
+the round-trip.
 
 The **interlaced 4444 + alpha** path (ap4h / ap4x field-pair packing
 with a per-pixel alpha plane) also cross-decodes through `prores_ks` at
