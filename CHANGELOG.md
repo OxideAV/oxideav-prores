@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **In-tree interlaced 4:2:2 10-bit decode regression fixture with
+  per-field PSNR scoring.** A small synthetic interlaced apcn fixture
+  (128×128, 2 frames, TFF, 10-bit `yuv422p10le`, `interlace_mode = 1`)
+  is staged under `docs/video/prores/fixtures/interlaced-tff-128x128-apcn/`
+  alongside its `prores_ks` reference `expected.yuv` (≈128 KB). A new
+  test in `tests/docs_corpus.rs` —
+  `corpus_interlaced_tff_128x128_apcn_per_field_psnr` — extracts both
+  field rows from the decoded luma plane (top = rows 0, 2, 4, …;
+  bottom = rows 1, 3, 5, … per RDD 36 §7.5.3) and scores PSNR for
+  EACH field independently against the matching rows of `expected.yuv`,
+  asserting a 40 dB floor per field. Measured 78.19 / 79.42 dB (frame 0
+  top / bottom) and 77.84 / 78.69 dB (frame 1), well above the floor.
+  This catches two failure modes that the existing whole-frame PSNR
+  tests in `tests/ffmpeg_interop.rs` cannot — picture-order swap and
+  silent second-picture skip — and, because both the .mov and the
+  reference YUV are committed, runs even when ffmpeg is not installed
+  on the CI host.
+
 - **ProRes RAW (`aprn` / `aprh`) is now detected and refused cleanly**
   instead of being mis-routed through the RDD 36 frame parser. ProRes
   RAW is a separate Apple format that wraps single-plane Bayer/CFA

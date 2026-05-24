@@ -250,6 +250,18 @@ let enc = make_encoder_with_config(&params, cfg)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+Decoder side: a small synthetic interlaced apcn 10-bit `yuv422p10le`
+fixture (128×128, 2 frames, TFF) ships in-tree at
+`docs/video/prores/fixtures/interlaced-tff-128x128-apcn/` alongside its
+`prores_ks` reference YUV. The test
+`tests/docs_corpus.rs::corpus_interlaced_tff_128x128_apcn_per_field_psnr`
+splits the decoded luma plane into its top-field rows {0, 2, 4, …} and
+bottom-field rows {1, 3, 5, …} per §7.5.3 and scores PSNR for EACH
+field independently — both fields must clear 40 dB. Measured **78.19 /
+79.42 dB** (frame 0 top / bottom) and **77.84 / 78.69 dB** (frame 1),
+catching picture-order swap and silent second-picture skip that
+whole-frame aggregate PSNR does not.
+
 Streams produced by `encode_frame_interlaced` for apcn / apch cross-decode
 through ffmpeg's `prores_ks` decoder at ≥ 64 dB luma PSNR — both 8-bit
 (TFF and BFF, 64×48 and 128×96) and **genuine 10-bit** field-pair

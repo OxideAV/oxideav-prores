@@ -862,3 +862,158 @@ fn corpus_proresraw_not_supported() {
         "error must name ProRes RAW, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-field PSNR — interlaced TFF (RDD 36 §5.1, §6.2, §7.5.3)
+// ---------------------------------------------------------------------------
+//
+// The other corpus_* tests score the full luma plane in aggregate; this
+// test reverses RDD 36 §7.5.3's two-field deinterleave on the OUTPUT
+// side (split decoded luma rows {0, 2, 4, …} and {1, 3, 5, …} into a
+// "top" and "bottom" group) and scores PSNR for EACH field
+// independently. The two failure modes this catches that whole-frame
+// PSNR cannot are:
+//
+// 1. Picture-order swap (interlace_mode=1 but the decoder treats the
+//    first picture as the bottom field). Whole-frame PSNR drops only
+//    by ~the field-to-field difference; per-field PSNR collapses to
+//    near-zero for both fields because they each compare against the
+//    wrong reference rows.
+// 2. Second-picture skip (decoder reads only the first picture header
+//    and leaves the other field zero-filled). Whole-frame PSNR drops
+//    by ~3 dB; the un-decoded field's per-field PSNR collapses
+//    completely while the other field stays near reference.
+//
+// The fixture ships its OWN `expected.yuv` so this test runs without
+// ffmpeg on the CI host — distinct from `tests/ffmpeg_interop.rs` which
+// regenerates a synthetic fixture on every run and skips when ffmpeg
+// is missing.
+
+/// PSNR of a single luma field (every other row at `field_offset` in
+/// `{0, 1}`) computed against the matching rows of the reference YUV.
+/// All inputs are 10-bit `yuv422p10le` planes — two LE bytes per sample.
+fn field_psnr_10bit_y(
+    decoded_y: &[u8],
+    ref_y: &[u8],
+    width: usize,
+    height: usize,
+    field_offset: usize,
+) -> f64 {
+    let stride = width * 2; // bytes per row, 10-bit LE-packed
+    assert_eq!(decoded_y.len(), stride * height);
+    assert_eq!(ref_y.len(), stride * height);
+    let mut sse = 0.0f64;
+    let mut n = 0usize;
+    let mut row = field_offset;
+    while row < height {
+        let row_off = row * stride;
+        for x in 0..width {
+            let i = row_off + x * 2;
+            let v_dec = u16::from_le_bytes([decoded_y[i], decoded_y[i + 1]]) as i32;
+            let v_ref = u16::from_le_bytes([ref_y[i], ref_y[i + 1]]) as i32;
+            let d = (v_dec - v_ref) as f64;
+            sse += d * d;
+            n += 1;
+        }
+        row += 2;
+    }
+    if n == 0 || sse == 0.0 {
+        return 120.0;
+    }
+    let mse = sse / n as f64;
+    10.0 * (1023f64 * 1023f64 / mse).log10()
+}
+
+/// Interlaced TFF 128x128 apcn (10-bit). Both top and bottom fields
+/// must reconstruct to at least 40 dB PSNR against the ffmpeg
+/// `prores_ks` reference YUV bundled in-tree alongside the .mov.
+#[test]
+fn corpus_interlaced_tff_128x128_apcn_per_field_psnr() {
+    let dir = fixture_dir("interlaced-tff-128x128-apcn");
+    let mov_path = dir.join("input.mov");
+    let yuv_path = dir.join("expected.yuv");
+    let container = match fs::read(&mov_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "skip per-field PSNR test: missing {} ({e}). docs/ corpus is in \
+                 the workspace umbrella repo; the standalone crate checkout has no fixtures.",
+                mov_path.display()
+            );
+            return;
+        }
+    };
+    let ref_yuv = match fs::read(&yuv_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "skip per-field PSNR test: missing {} ({e})",
+                yuv_path.display()
+            );
+            return;
+        }
+    };
+
+    let frames = extract_prores_frames(&container);
+    assert!(
+        !frames.is_empty(),
+        "no `icpf` frames in {} ({} bytes)",
+        mov_path.display(),
+        container.len()
+    );
+
+    let width = 128usize;
+    let height = 128usize;
+    // yuv422p10le frame size: Y (width*height*2) + 2 * Cb/Cr (width/2*height*2).
+    let y_bytes = width * height * 2;
+    let c_bytes = (width / 2) * height * 2;
+    let frame_bytes = y_bytes + 2 * c_bytes;
+    assert_eq!(
+        ref_yuv.len() % frame_bytes,
+        0,
+        "expected.yuv size {} is not a whole multiple of frame_bytes {}",
+        ref_yuv.len(),
+        frame_bytes
+    );
+    let ref_frames = ref_yuv.len() / frame_bytes;
+    let n = frames.len().min(ref_frames);
+    assert!(
+        n >= 1,
+        "fixture must carry at least 1 frame with a matching reference"
+    );
+
+    let min_field_psnr_db = 40.0f64;
+    for (i, frame_pkt) in frames.iter().enumerate().take(n) {
+        let decoded = decode_packet_with_depth(
+            frame_pkt,
+            Some(i as i64),
+            Some((BitDepth::Ten, ChromaFormat::Y422)),
+        )
+        .unwrap_or_else(|e| panic!("frame {i}: decode_packet_with_depth: {e:?}"));
+        assert_eq!(decoded.planes.len(), 3, "frame {i}: must produce 3 planes");
+        let our_y = &decoded.planes[0].data;
+        assert_eq!(our_y.len(), y_bytes, "frame {i}: luma plane byte length");
+        let ref_off = i * frame_bytes;
+        let ref_y = &ref_yuv[ref_off..ref_off + y_bytes];
+
+        let psnr_top = field_psnr_10bit_y(our_y, ref_y, width, height, 0);
+        let psnr_bot = field_psnr_10bit_y(our_y, ref_y, width, height, 1);
+        eprintln!(
+            "interlaced-tff-128x128-apcn frame {i}: top-field PSNR {:.2} dB, \
+             bottom-field PSNR {:.2} dB",
+            psnr_top, psnr_bot
+        );
+        assert!(
+            psnr_top >= min_field_psnr_db,
+            "frame {i} top-field PSNR {:.2} dB under {} dB acceptance",
+            psnr_top,
+            min_field_psnr_db
+        );
+        assert!(
+            psnr_bot >= min_field_psnr_db,
+            "frame {i} bottom-field PSNR {:.2} dB under {} dB acceptance",
+            psnr_bot,
+            min_field_psnr_db
+        );
+    }
+}
