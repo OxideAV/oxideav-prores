@@ -90,6 +90,37 @@ pub const CODEC_ID_STR: &str = "prores";
 /// | ap4x   | Apple ProRes 4444 XQ                        |
 pub const PRORES_FOURCCS: [&[u8; 4]; 6] = [b"apco", b"apcs", b"apcn", b"apch", b"ap4h", b"ap4x"];
 
+/// MP4 / MOV `VisualSampleEntry` FourCCs that identify an Apple
+/// **ProRes RAW** bitstream. ProRes RAW is a *separate* Apple format
+/// that wraps single-plane Bayer/CFA sensor data; it is NOT one of the
+/// six RDD 36 YUV/RGB profiles this crate decodes, uses an incompatible
+/// sample structure, and is documented only in Apple's proprietary
+/// ProRes RAW white paper. These FourCCs deliberately resolve to
+/// neither a [`CodecId`] nor a [`frame::Profile`] here —
+/// [`is_prores_raw_fourcc`] lets a caller tell "ProRes RAW, which we
+/// don't decode" apart from "not ProRes at all".
+///
+/// | fourcc | profile          |
+/// |--------|------------------|
+/// | aprn   | Apple ProRes RAW |
+/// | aprh   | Apple ProRes RAW HQ |
+pub const PRORES_RAW_FOURCCS: [&[u8; 4]; 2] = [b"aprn", b"aprh"];
+
+/// Returns `true` if `fourcc` (case-insensitive) is an Apple ProRes RAW
+/// `VisualSampleEntry` FourCC (`aprn` / `aprh`).
+///
+/// ProRes RAW is out of scope for this crate (see [`PRORES_RAW_FOURCCS`]).
+/// A demuxer/dispatcher that sees a ProRes RAW track should surface a
+/// clear unsupported-format error rather than route it to the standard
+/// ProRes decoder, whose bitstream layout is incompatible.
+pub fn is_prores_raw_fourcc(fourcc: &[u8; 4]) -> bool {
+    let mut upper = [0u8; 4];
+    for i in 0..4 {
+        upper[i] = fourcc[i].to_ascii_uppercase();
+    }
+    matches!(&upper, b"APRN" | b"APRH")
+}
+
 /// Returns `Some(CodecId::new("prores"))` if `fourcc` (case-insensitive)
 /// is one of the six ProRes MP4/MOV `VisualSampleEntry` FourCCs.
 pub fn codec_id_for_fourcc(fourcc: &[u8; 4]) -> Option<CodecId> {
@@ -310,6 +341,67 @@ mod tests {
         assert_eq!(codec_id_for_fourcc(b"mp4v"), None);
         assert_eq!(codec_id_for_fourcc(b"alac"), None);
         assert_eq!(codec_id_for_fourcc(b"av01"), None);
+    }
+
+    #[test]
+    fn prores_raw_fourcc_does_not_resolve_to_standard_prores() {
+        // ProRes RAW is out of scope: aprn/aprh must NOT map to the
+        // standard prores codec id or any of the six RDD 36 profiles,
+        // so a dispatcher never routes a RAW sample to this decoder.
+        for fc in PRORES_RAW_FOURCCS {
+            assert_eq!(codec_id_for_fourcc(fc), None, "raw fourcc {fc:?}");
+            assert_eq!(profile_for_fourcc(fc), None, "raw fourcc {fc:?}");
+        }
+    }
+
+    #[test]
+    fn is_prores_raw_fourcc_detects_aprn_aprh_case_insensitive() {
+        for fc in PRORES_RAW_FOURCCS {
+            assert!(is_prores_raw_fourcc(fc), "lower {fc:?}");
+            let mut up = *fc;
+            up.make_ascii_uppercase();
+            assert!(is_prores_raw_fourcc(&up), "upper {up:?}");
+        }
+        assert!(is_prores_raw_fourcc(b"ApRh"));
+        // Standard ProRes FourCCs are not ProRes RAW.
+        for fc in PRORES_FOURCCS {
+            assert!(!is_prores_raw_fourcc(fc), "standard {fc:?}");
+        }
+        // Unrelated FourCCs are not ProRes RAW.
+        assert!(!is_prores_raw_fourcc(b"avc1"));
+        assert!(!is_prores_raw_fourcc(b"av01"));
+        // A near-miss that shares the `apr` prefix but is not a defined
+        // ProRes RAW tag must not be misclassified.
+        assert!(!is_prores_raw_fourcc(b"aprx"));
+    }
+
+    #[test]
+    fn decode_packet_rejects_prores_raw_marker_with_unsupported() {
+        // A sample whose in-stream marker is `aprh` (ProRes RAW) must
+        // produce a clear Unsupported error, distinct from the generic
+        // "magic mismatch" Invalid error for non-ProRes bytes.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&16u32.to_be_bytes()); // frame_size
+        raw.extend_from_slice(b"aprh"); // ProRes RAW in-stream marker
+        raw.extend_from_slice(&[0u8; 8]); // padding to frame_size
+        let err = decoder::decode_packet(&raw, None).expect_err("must reject ProRes RAW");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ProRes RAW"),
+            "error should name ProRes RAW, got: {msg}"
+        );
+
+        // Bytes that are neither ProRes nor ProRes RAW still get the
+        // generic magic-mismatch error (and must not mention ProRes RAW).
+        let mut other = Vec::new();
+        other.extend_from_slice(&16u32.to_be_bytes());
+        other.extend_from_slice(b"junk");
+        other.extend_from_slice(&[0u8; 8]);
+        let err2 = decoder::decode_packet(&other, None).expect_err("must reject non-ProRes");
+        assert!(
+            !err2.to_string().contains("ProRes RAW"),
+            "non-ProRes bytes should not be reported as ProRes RAW"
+        );
     }
 
     #[test]

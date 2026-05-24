@@ -36,8 +36,10 @@
 //!   output against ffmpeg's fixed-point IDCT — every fixture therefore
 //!   starts as ReportOnly. As individual fixtures are confirmed
 //!   bit-exact by the maintainer they may be promoted.
-//! * `Tier::Ignored` — disabled with #[ignore]; for fixtures the
-//!   in-tree codec scope explicitly excludes (e.g. ProRes RAW).
+//! * Out-of-scope formats — fixtures the in-tree codec explicitly
+//!   excludes (e.g. ProRes RAW) — are covered by a live negative test
+//!   that asserts the decoder *refuses* them with a clear `Unsupported`
+//!   error rather than mis-decoding (`corpus_proresraw_not_supported`).
 //!
 //! All fixtures start as ReportOnly per the workspace policy in
 //! `feedback_no_external_libs.md`: NO external decoder source (ffmpeg,
@@ -807,13 +809,46 @@ fn corpus_pal_1080i50() {
 /// NOT cover — see `notes.md` in the fixture dir for the full
 /// rationale (different sample structure, separate Apple white paper,
 /// not SMPTE-registered, no fully-working open encoder). The fixture
-/// dir intentionally ships only `notes.md`; this test exists so the
-/// matrix above stays complete.
+/// dir intentionally ships only `notes.md`.
+///
+/// `notes.md` § "What a downstream decoder should do" pins the
+/// contract: *detect ProRes RAW by MOV codec_tag `aprn` / `aprh` (and
+/// the in-stream marker `aprh`) and surface a clear `Unsupported`
+/// error rather than attempting to dispatch to the standard ProRes
+/// decoder, whose bitstream layout is incompatible.* This test asserts
+/// every clause of that contract directly, so it is a live test rather
+/// than an `#[ignore]` stub.
 #[test]
-#[ignore = "ProRes RAW is out of scope (different bitstream from RDD 36 profiles); \
-            see docs/video/prores/fixtures/proresraw-not-supported/notes.md"]
 fn corpus_proresraw_not_supported() {
+    use oxideav_prores::{
+        codec_id_for_fourcc, is_prores_raw_fourcc, profile_for_fourcc, PRORES_RAW_FOURCCS,
+    };
+
+    // The notes.md rationale ships in the fixture dir; confirm it is
+    // present so the corpus matrix stays complete.
     let dir = fixture_dir("proresraw-not-supported");
-    let notes_path = dir.join("notes.md");
-    let _ = fs::read(&notes_path);
+    let notes = fs::read(dir.join("notes.md")).expect("proresraw notes.md present");
+    assert!(!notes.is_empty(), "proresraw notes.md should not be empty");
+
+    // Clause 1: detect ProRes RAW by codec_tag aprn / aprh.
+    for fc in PRORES_RAW_FOURCCS {
+        assert!(is_prores_raw_fourcc(fc), "{fc:?} should be ProRes RAW");
+        // Clause 1b: must NOT dispatch to the standard ProRes decoder —
+        // these FourCCs resolve to neither a CodecId nor a Profile.
+        assert_eq!(codec_id_for_fourcc(fc), None, "{fc:?} must not resolve");
+        assert_eq!(profile_for_fourcc(fc), None, "{fc:?} must not map");
+    }
+
+    // Clause 2: an in-stream sample carrying the `aprh` marker (at the
+    // `icpf` offset) yields a clear Unsupported error naming ProRes RAW.
+    let mut sample = Vec::new();
+    sample.extend_from_slice(&16u32.to_be_bytes()); // frame_size
+    sample.extend_from_slice(b"aprh"); // ProRes RAW in-stream marker
+    sample.extend_from_slice(&[0u8; 8]); // padding to frame_size
+    let err = decode_packet_with_depth(&sample, None, Some((BitDepth::Eight, ChromaFormat::Y422)))
+        .expect_err("ProRes RAW sample must be refused, not decoded");
+    assert!(
+        err.to_string().contains("ProRes RAW"),
+        "error must name ProRes RAW, got: {err}"
+    );
 }

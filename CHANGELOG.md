@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ProRes RAW (`aprn` / `aprh`) is now detected and refused cleanly**
+  instead of being mis-routed through the RDD 36 frame parser. ProRes
+  RAW is a separate Apple format that wraps single-plane Bayer/CFA
+  sensor data — it is outside the scope of SMPTE RDD 36 and uses an
+  incompatible sample structure. Two new public items make the
+  out-of-scope status explicit at the dispatch layer:
+  `PRORES_RAW_FOURCCS` (the `aprn` / `aprh` `VisualSampleEntry`
+  FourCCs) and `is_prores_raw_fourcc(&[u8; 4]) -> bool`
+  (case-insensitive). These FourCCs deliberately resolve to neither a
+  `CodecId` nor a `frame::Profile`, so a demuxer/dispatcher can
+  distinguish "ProRes RAW, which we don't decode" from "not ProRes at
+  all" and surface a precise error. At the bitstream layer
+  `frame::parse_frame` (and therefore `decoder::decode_packet`) now
+  recognises the in-stream ProRes RAW marker `aprh`
+  (`frame::PRORES_RAW_FRAME_IDENTIFIER`) at the `icpf` offset and
+  returns a specific `Unsupported` error naming ProRes RAW, rather than
+  the generic "magic mismatch" `Invalid` error used for arbitrary
+  non-ProRes bytes. Six new unit tests cover the FourCC predicate
+  (case-insensitivity, the `apr`-prefix near-miss `aprx`, and that the
+  six standard FourCCs are *not* classified as RAW), the
+  no-resolution-to-standard-prores guarantee, and the two-layer reject
+  (`decode_packet` + `parse_frame`) with the negative case asserting
+  non-ProRes bytes are not mislabelled as ProRes RAW. Behaviour matches
+  the corpus guidance in
+  `docs/video/prores/fixtures/proresraw-not-supported/notes.md`
+  ("detect ProRes RAW by MOV codec_tag `aprn`, `aprh` … and surface a
+  clear `Unsupported` error rather than attempting to dispatch to the
+  standard ProRes decoder").
 - **Interlaced encode through the high-level `Encoder` trait.**
   `EncoderConfig` gains an `interlace_mode` field + builder
   `with_interlace_mode(m)` (RDD 36 §6.1.1: 0 = progressive,

@@ -199,6 +199,28 @@ appropriate for the frame being encoded"): 4:2:2 no-alpha streams emit
 v0 for maximum legacy-decoder reach; any other combination emits v1.
 See `tests/spec_validation.rs` (15 cases) for round-trip coverage.
 
+### ProRes RAW is detected and refused, never mis-decoded
+
+Apple **ProRes RAW** (`aprn` / `aprh`) is a *separate* format that
+wraps single-plane Bayer/CFA sensor data; it is outside the scope of
+SMPTE RDD 36 (which covers only the six YUV/RGB profiles) and uses an
+incompatible sample structure. This crate refuses ProRes RAW cleanly
+at two layers rather than mis-routing it through the RDD 36 parser:
+
+- **FourCC level.** [`is_prores_raw_fourcc`] recognises `aprn` / `aprh`
+  (case-insensitive); [`PRORES_RAW_FOURCCS`] lists them. They
+  deliberately resolve to neither a `CodecId` nor a `frame::Profile`,
+  so a demuxer/dispatcher can tell "ProRes RAW, unsupported" apart from
+  "not ProRes at all" and surface a precise error to the user.
+- **In-stream level.** A sample carrying the ProRes RAW marker `aprh`
+  at the `icpf` offset (just after the 4-byte `frame_size`) yields a
+  specific `Unsupported` error naming ProRes RAW — distinct from the
+  generic "magic mismatch" returned for arbitrary non-ProRes bytes.
+
+Decoding ProRes RAW would require Apple's proprietary bitstream
+documentation (the staged `Apple_ProRes_RAW_2023.pdf` is a marketing
+white paper with no syntax) and is not implemented.
+
 ### Interlaced (RDD 36 §5.1, §6.2, §7.5.3)
 
 A frame's `interlace_mode` (0 = progressive, 1 = top-field-first,

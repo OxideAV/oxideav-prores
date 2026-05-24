@@ -52,6 +52,19 @@ use oxideav_core::{Error, Result};
 /// 'icpf' magic, big-endian. Spec value: 0x69637066.
 pub const FRAME_IDENTIFIER: &[u8; 4] = b"icpf";
 
+/// In-stream frame identifier of an Apple **ProRes RAW** sample: `aprh`
+/// (at the same byte offset as `icpf` in a standard ProRes frame, i.e.
+/// immediately after the 4-byte `frame_size`). ProRes RAW is a separate
+/// Apple format that wraps single-plane Bayer/CFA sensor data — it is
+/// NOT covered by SMPTE RDD 36 (which scopes itself to the six
+/// YUV/RGB profiles), uses an incompatible sample structure, and is
+/// documented only in Apple's proprietary ProRes RAW white paper. A
+/// conforming decoder must surface a clear `Unsupported` error rather
+/// than dispatch a ProRes RAW sample to the RDD 36 frame parser, whose
+/// bitstream layout is different. See
+/// `docs/video/prores/fixtures/proresraw-not-supported/notes.md`.
+pub const PRORES_RAW_FRAME_IDENTIFIER: &[u8; 4] = b"aprh";
+
 /// 'oxav' encoder identifier — the four-character code we emit when
 /// producing ProRes frames.
 pub const ENCODER_IDENTIFIER: &[u8; 4] = b"oxav";
@@ -172,6 +185,19 @@ pub fn parse_frame(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
     }
     let frame_size = u32::from_be_bytes(data[0..4].try_into().unwrap());
     if &data[4..8] != FRAME_IDENTIFIER {
+        // ProRes RAW samples carry the `aprh` in-stream marker at the
+        // same offset. They are a distinct, RDD-36-out-of-scope format
+        // (single-plane Bayer/CFA, not YUV/RGB); surface a precise
+        // Unsupported error instead of a generic magic mismatch so the
+        // caller can tell "this is ProRes RAW, which we don't decode"
+        // apart from "this isn't a ProRes frame at all".
+        if &data[4..8] == PRORES_RAW_FRAME_IDENTIFIER {
+            return Err(Error::unsupported(
+                "prores: ProRes RAW sample ('aprh' marker) is not decodable — \
+                 ProRes RAW is a separate Apple format (single-plane Bayer/CFA \
+                 sensor data) outside the scope of SMPTE RDD 36",
+            ));
+        }
         return Err(Error::invalid("prores: frame magic mismatch (not 'icpf')"));
     }
     if (frame_size as usize) > data.len() {
@@ -740,6 +766,32 @@ pub fn compute_slice_sizes(width_in_mb: usize, log2_desired_slice_size_in_mb: u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_frame_rejects_prores_raw_marker() {
+        // frame_size=16, in-stream marker 'aprh' (ProRes RAW), padding.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&16u32.to_be_bytes());
+        buf.extend_from_slice(PRORES_RAW_FRAME_IDENTIFIER);
+        buf.extend_from_slice(&[0u8; 8]);
+        let err = parse_frame(&buf).expect_err("ProRes RAW must be rejected");
+        assert!(
+            err.to_string().contains("ProRes RAW"),
+            "error should name ProRes RAW, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_frame_generic_magic_mismatch_is_not_reported_as_raw() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&16u32.to_be_bytes());
+        buf.extend_from_slice(b"junk");
+        buf.extend_from_slice(&[0u8; 8]);
+        let err = parse_frame(&buf).expect_err("non-ProRes bytes must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("magic mismatch"), "got: {msg}");
+        assert!(!msg.contains("ProRes RAW"), "got: {msg}");
+    }
 
     #[test]
     fn frame_roundtrip_422() {
