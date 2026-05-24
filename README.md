@@ -299,6 +299,16 @@ exercises the §7.2 Figure 4 **progressive** block scan instead of the
 §7.5.3 field-pair deinterleave; the decoded alpha gradient again
 round-trips with sub-LSB mean-abs-error (≈0.17).
 
+The mainstream **progressive 4:2:2** forward path (`encode_frame_with_depth`,
+single picture, §7.2 Figure 4 scan) cross-decodes through ffmpeg's
+`prores` decoder for all four base profiles — apco / apcs / apcn / apch —
+at 62.4-64.2 dB luma PSNR across 8-, 10-, and 12-bit sources (64×48 and
+128×96). The 10-/12-bit cases drive genuine high-bit-depth `read_sample`
+input through the §7.5.1 level shift; since ffmpeg's 4:2:2 decode is
+10-bit internally, all cases compare at 10-bit (8-bit ⟵ `<< 2`, 12-bit
+⟵ `>> 2`), and a left/right luma-ramp assertion guards against a
+mis-scanned picture. See `tests/ffmpeg_cross_decode.rs`.
+
 ## Usage
 
 ```toml

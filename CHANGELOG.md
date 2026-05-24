@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Black-box ffmpeg cross-decode acceptance tests for the progressive
+  4:2:2 encoder (apco / apcs / apcn / apch).** The mainstream ProRes
+  forward path — a single progressive 4:2:2 picture
+  (`interlace_mode == 0`, §7.2 Figure 4 block scan) emitted by
+  `encode_frame_with_depth` and decoded by ffmpeg's `prores` decoder —
+  previously had no cross-decode test: it was only ever validated by
+  self-roundtrip and by the opposite direction (ffmpeg-encoded → our
+  decoder). Eleven new cases in `tests/ffmpeg_cross_decode.rs` close
+  that gap across all four base profiles and all three spec bit depths
+  (8 / 10 / 12-bit). The 10- and 12-bit cases feed a genuine
+  high-bit-depth source (LE u16 samples bounded by the depth) so
+  `read_sample`'s `BitDepth::Ten` / `BitDepth::Twelve` branches
+  (RDD 36 §7.5.1 level shift `v = s / 2^(b-9) - 256`) are exercised
+  against the reference decoder, not an 8-bit value zero-padded into
+  16-bit storage. ffmpeg's 4:2:2 decode path is 10-bit internally, so
+  all cases compare at 10-bit (8-bit source upshifted `<< 2`, 12-bit
+  source downshifted `>> 2`); a left-dark → right-bright luma ramp +
+  left/right-sum assertion guards against a transposed / mis-scanned
+  picture. Measured **62.4–64.2 dB** luma PSNR, far above the 40 dB
+  acceptance bar. Skips gracefully when ffmpeg is absent.
+
 - **In-tree interlaced 4:2:2 10-bit decode regression fixture with
   per-field PSNR scoring.** A small synthetic interlaced apcn fixture
   (128×128, 2 frames, TFF, 10-bit `yuv422p10le`, `interlace_mode = 1`)
