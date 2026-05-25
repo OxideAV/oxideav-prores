@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single machine) are recorded in the README "Performance" section.
   Run with `cargo bench --bench decode`.
 
+- **Criterion encode benchmark (`benches/encode.rs`).** Benches the
+  encode hot path across all six RDD 36 profiles (`apco`/`apcs`/`apcn`/
+  `apch` on 8-bit 4:2:2 input, `ap4h`/`ap4x` on 8-bit 4:4:4), each at
+  its default `quantization_index`, plus a 10-bit 4:2:2 Standard case
+  and an interlaced (top-field-first) Standard case (two field pictures
+  per §7.5.3). Drives the public `encode_frame_with_depth` /
+  `encode_frame_interlaced` standalone API on an in-process synthetic
+  128×96 gradient (no external fixtures). `criterion` is already a
+  `[dev-dependencies]` entry — no runtime dependency added. Baseline
+  numbers are recorded in the README "Performance" section. Run with
+  `cargo bench --bench encode`.
+
 - **Configurable macroblocks-per-slice encoder knob (RDD 36 §5.3).**
   A new `EncoderConfig::mbs_per_slice: Option<u8>` field (with
   `EncoderConfig::with_mbs_per_slice(u8)` builder, `DEFAULT_MBS_PER_SLICE`

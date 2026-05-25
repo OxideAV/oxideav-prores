@@ -427,6 +427,33 @@ Run it:
 cargo bench --bench decode -- --warm-up-time 1 --measurement-time 3
 ```
 
+A second Criterion benchmark (`benches/encode.rs`) covers the encode
+hot path across all six RDD 36 profiles on a synthetic 128×96 gradient,
+each at its default `quantization_index`, plus a 10-bit and an
+interlaced (top-field-first) case:
+
+| Case                                    | Profile / format          | median time |
+|-----------------------------------------|---------------------------|-------------|
+| `apco_422_8bit_128x96`                  | 422 Proxy, 8-bit          | ~63 µs      |
+| `apcs_422_8bit_128x96`                  | 422 LT, 8-bit             | ~62 µs      |
+| `apcn_422_8bit_128x96`                  | 422 Standard, 8-bit       | ~72 µs      |
+| `apch_422_8bit_128x96`                  | 422 HQ, 8-bit             | ~85 µs      |
+| `ap4h_444_8bit_128x96`                  | 4444, 8-bit               | ~111 µs     |
+| `ap4x_444_8bit_128x96`                  | 4444 XQ, 8-bit            | ~136 µs     |
+| `apcn_422_10bit_128x96`                 | 422 Standard, 10-bit LE   | ~80 µs      |
+| `apcn_422_8bit_interlaced_tff_128x96`   | 422 Standard, interlaced  | ~79 µs      |
+
+Encode cost climbs as the profile's default qi falls (Proxy qi 8 →
+4444 XQ qi 1): finer quantisation leaves more non-zero coefficients for
+the run/level/sign coder to emit. The 4:4:4 profiles cost ~1.5–2× their
+4:2:2 counterparts (full-width chroma planes). 10-bit tracks 8-bit
+closely; the interlaced case (two field pictures) matches the
+progressive Standard cost since total coefficient work is unchanged.
+
+```sh
+cargo bench --bench encode -- --warm-up-time 1 --measurement-time 3
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
