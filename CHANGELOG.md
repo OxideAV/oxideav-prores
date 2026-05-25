@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Criterion decode benchmark (`benches/decode.rs`).** Benches the
+  decode hot path on three representative single-frame inputs — a 4:2:2
+  8-bit Standard (`apcn`) frame, a 4:4:4 8-bit ProRes 4444 (`ap4h`)
+  frame, and a 4:2:2 10-bit frame decoded to packed-LE `Yuv422P10Le`.
+  Inputs are synthesized in-process via this crate's own encoder (no
+  external fixtures); the encode cost is paid once at setup and excluded
+  from the measured region. `criterion` is a `[dev-dependencies]` entry
+  only — no runtime dependency added. Baseline numbers (128×96 frame,
+  single machine) are recorded in the README "Performance" section.
+  Run with `cargo bench --bench decode`.
+
 - **Configurable macroblocks-per-slice encoder knob (RDD 36 §5.3).**
   A new `EncoderConfig::mbs_per_slice: Option<u8>` field (with
   `EncoderConfig::with_mbs_per_slice(u8)` builder, `DEFAULT_MBS_PER_SLICE`

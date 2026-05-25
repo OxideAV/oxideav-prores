@@ -402,6 +402,31 @@ let mut enc = reg.make_encoder(&params)?;
 - Codec: `"prores"`; accepted pixel formats `Yuv422P`, `Yuv444P`.
 - Keyframe-only (all ProRes frames are intra).
 
+## Performance
+
+A Criterion benchmark covers the decode hot path. Inputs are
+synthesized in-process via this crate's own encoder (no external
+fixtures); the encode cost is paid once at setup and excluded from the
+measured region. Each case decodes a single 128×96 frame:
+
+| Case                       | Profile / format        | median time |
+|----------------------------|-------------------------|-------------|
+| `apcn_422_8bit_128x96`     | 422 Standard, 8-bit     | ~68 µs      |
+| `ap4h_444_8bit_128x96`     | 4444, 8-bit             | ~106 µs     |
+| `apcn_422_10bit_128x96`    | 422 Standard, 10-bit LE | ~69 µs      |
+
+Numbers are a single-machine baseline (Apple Silicon, `--measurement-time
+3`); treat them as relative, not absolute. The 4:4:4 case is ~1.5× the
+4:2:2 cost as expected (full-width chroma planes carry twice the
+coefficient data). 10-bit tracks 8-bit closely since the extra work is
+output sample packing, not entropy decode.
+
+Run it:
+
+```sh
+cargo bench --bench decode -- --warm-up-time 1 --measurement-time 3
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
