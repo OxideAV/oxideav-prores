@@ -309,6 +309,22 @@ input through the §7.5.1 level shift; since ffmpeg's 4:2:2 decode is
 ⟵ `>> 2`), and a left/right luma-ramp assertion guards against a
 mis-scanned picture. See `tests/ffmpeg_cross_decode.rs`.
 
+The symmetric **progressive 4:4:4 without alpha** forward path
+(`encode_frame_with_depth` with `ChromaFormat::Y444`, single picture,
+§7.2 Figure 4 scan, `alpha_channel_type == 0`) cross-decodes through
+ffmpeg's `prores_ks` decoder for both 4444 profiles — ap4h and ap4x —
+at 64.74-64.97 dB luma PSNR across 8-, 10-, and 12-bit sources (64×48
+and 128×96). This is the mainstream no-alpha 4:4:4 path: a
+registry-built encoder asked for `PixelFormat::Yuv444P*` with no 4th
+alpha plane takes it, and it was previously only validated by
+self-roundtrip — the existing 4:4:4 ffmpeg coverage was all on the
+4444 + alpha entry point. The full-resolution 4:4:4 chroma (twice the
+chroma macroblock grid of 4:2:2) exercises the §7.2 progressive block
+scan with the deeper chroma slice payload 4:2:2 cannot reach; ffmpeg's
+ap4h/ap4x no-alpha decode is 12-bit internally, so all cases compare
+at 12-bit (8-bit ⟵ `<< 4`, 10-bit ⟵ `<< 2`, 12-bit as-is). See
+`tests/ffmpeg_cross_decode.rs`.
+
 ## Usage
 
 ```toml

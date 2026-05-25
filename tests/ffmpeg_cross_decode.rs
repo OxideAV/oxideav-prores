@@ -1783,3 +1783,380 @@ fn cross_decode_apch_progressive_12bit() {
 fn cross_decode_apch_progressive_12bit_larger() {
     cross_decode_progressive_422(Profile::Hq, 128, 96, BitDepth::Twelve);
 }
+
+// ─────────── progressive 4:4:4 (no alpha) — ap4h / ap4x ───────────
+//
+// The progressive 4:4:4 forward path WITHOUT an alpha plane. Earlier
+// cases cover progressive 4444+alpha (`encode_frame_with_alpha`,
+// `alpha_channel_type=Sixteen`) and interlaced 4444+alpha, but the
+// plain 4:4:4 progressive path — `encode_frame_with_depth` /
+// `encode_frame_with_alpha(... None)` for `ChromaFormat::Y444`,
+// `interlace_mode == 0`, single picture, no alpha blob — had no
+// cross-decode test. That path is what a registry-built encoder
+// produces when the caller asks for `PixelFormat::Yuv444P*` without
+// supplying a 4th alpha plane, so closing it covers the mainstream
+// 4:4:4 use case across all three spec bit depths (8 / 10 / 12-bit).
+//
+// The driver substitutes our packet into an ffmpeg-generated 4:4:4
+// no-alpha template MOV and asks ffmpeg's `prores_ks` decoder to
+// reconstruct it to raw `yuv444p12le` (ffmpeg's ap4h/ap4x native depth
+// for non-alpha 4:4:4 decode is 12-bit). The 8-bit source is upshifted
+// `<< 4`, the 10-bit source is upshifted `<< 2`, the 12-bit source is
+// compared as-is; the genuine high-bit-depth `read_sample` branches
+// (RDD 36 §7.5.1 level shift `v = s / 2^(b-9) − 256` for `b = 10`
+// / `b = 12`) are exercised regardless of compare depth. A
+// left-dark → right-bright luma ramp + left/right-sum assertion guards
+// against a transposed / mis-scanned 4:4:4 picture.
+
+/// Build a synthetic **progressive** 4:4:4 frame (no alpha) at the
+/// requested depth. Mirrors `synthetic_progressive_422` but the chroma
+/// planes are full-resolution (one Cb / Cr sample per luma sample,
+/// stride = `w * bytes_per`). Left-dark → right-bright luma ramp +
+/// per-pixel phase keeps AC coefficients non-zero across most blocks
+/// so a regression in the §7.2 progressive block scan or the DC/AC
+/// code tables surfaces as a PSNR cliff.
+fn synthetic_progressive_444(width: u32, height: u32, depth: BitDepth) -> VideoFrame {
+    let w = width as usize;
+    let h = height as usize;
+    let (y_lo, y_hi, c_lo, c_hi, c_mid, span): (i32, i32, i32, i32, i32, i32) = match depth {
+        BitDepth::Eight => (16, 235, 16, 240, 128, 219),
+        BitDepth::Ten => (64, 940, 64, 960, 512, 876),
+        BitDepth::Twelve => (256, 3760, 256, 3840, 2048, 3504),
+    };
+    let bytes_per = if matches!(depth, BitDepth::Eight) {
+        1
+    } else {
+        2
+    };
+    let mut y = vec![0u8; w * h * bytes_per];
+    let mut cb = vec![0u8; w * h * bytes_per];
+    let mut cr = vec![0u8; w * h * bytes_per];
+    let put = |buf: &mut [u8], idx: usize, v: i32| {
+        if bytes_per == 1 {
+            buf[idx] = v as u8;
+        } else {
+            let off = idx * 2;
+            let vu = v as u16;
+            buf[off] = (vu & 0xFF) as u8;
+            buf[off + 1] = (vu >> 8) as u8;
+        }
+    };
+    for j in 0..h {
+        for i in 0..w {
+            let ramp = (i as i32 * span) / (w.max(1) as i32);
+            let phase = ((i.wrapping_mul(7) ^ j.wrapping_mul(13)) % 64) as i32 - 32;
+            let v = (y_lo + ramp + phase * (span / 219).max(1)).clamp(y_lo, y_hi);
+            put(&mut y, j * w + i, v);
+            // Full-resolution 4:4:4 chroma (one sample per luma sample).
+            let scale = (c_hi - c_lo) / 219;
+            let cbv = (c_mid + ((i as i32 - w as i32 / 2) * 2 * scale + (j as i32 % 7) * scale))
+                .clamp(c_lo, c_hi);
+            let crv = (c_mid + ((j as i32 - h as i32 / 2) * scale + (i as i32 % 5) * 2 * scale))
+                .clamp(c_lo, c_hi);
+            put(&mut cb, j * w + i, cbv);
+            put(&mut cr, j * w + i, crv);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * bytes_per,
+                data: y,
+            },
+            VideoPlane {
+                stride: w * bytes_per,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w * bytes_per,
+                data: cr,
+            },
+        ],
+    }
+}
+
+/// Ask ffmpeg to produce a 1-frame **progressive** ProRes 4444/4444 XQ
+/// MOV without an alpha plane (`yuv444p10le` — `prores_ks`'s only
+/// supported 4:4:4 no-alpha encode pix_fmt). Used as a template
+/// scaffold whose `mdat` payload we overwrite with our own encoder
+/// output. No `+ildct` / `-top` flags — progressive container.
+fn ffmpeg_make_template_mov_444_progressive(
+    profile_flag: u8,
+    width: u32,
+    height: u32,
+    out_path: &std::path::Path,
+) -> bool {
+    let input = format!("testsrc=size={width}x{height}:rate=25:duration=1,format=yuv444p10le");
+    Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &input,
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            &profile_flag.to_string(),
+            "-pix_fmt",
+            "yuv444p10le",
+            "-frames:v",
+            "1",
+            out_path.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Compute PSNR between two equal-length 12-bit LE-packed planes,
+/// reading samples as `u16` with `peak = 4095`. Same shape as
+/// `psnr_12bit` (kept distinct to keep the 4:2:2 / 4:4:4 callers
+/// independent at edit time).
+fn psnr_12bit_444(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let n = a.len() / 2;
+    let mut mse = 0.0f64;
+    for i in 0..n {
+        let av = u16::from_le_bytes([a[i * 2], a[i * 2 + 1]]) as f64;
+        let bv = u16::from_le_bytes([b[i * 2], b[i * 2 + 1]]) as f64;
+        let d = av - bv;
+        mse += d * d;
+    }
+    mse /= n as f64;
+    if mse == 0.0 {
+        return 120.0;
+    }
+    10.0 * (4095.0_f64 * 4095.0 / mse).log10()
+}
+
+fn cross_decode_progressive_444(profile: Profile, width: u32, height: u32, depth: BitDepth) {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping progressive 4:4:4 cross-decode");
+        return;
+    }
+    assert!(
+        matches!(profile, Profile::Prores4444 | Profile::Prores4444Xq),
+        "this driver is for the 4444 / 4444 XQ profiles only"
+    );
+    let tmp = tempdir().expect("tempdir");
+    let profile_flag: u8 = match profile {
+        Profile::Prores4444 => 4,
+        Profile::Prores4444Xq => 5,
+        _ => unreachable!("non-4444 profile in 4444 driver"),
+    };
+    let template_path = tmp.join(format!(
+        "tpl_prog444_p{profile_flag}_{width}x{height}_{}.mov",
+        depth.bits()
+    ));
+    if !ffmpeg_make_template_mov_444_progressive(profile_flag, width, height, &template_path) {
+        eprintln!(
+            "progressive 4:4:4 template MOV unavailable — skipping \
+             (profile={profile_flag}, {}-bit)",
+            depth.bits()
+        );
+        return;
+    }
+    let template = std::fs::read(&template_path).expect("read template");
+
+    // Encode the same dimensions via our PROGRESSIVE 4:4:4 encoder at
+    // the requested bit depth, NO alpha. This drives:
+    //   * `read_sample`'s `BitDepth::Eight` / `Ten` / `Twelve` branch
+    //     (§7.5.1 level shift `v = s / 2^(b-9) − 256`),
+    //   * the §7.2 Figure 4 *progressive* block scan (single picture),
+    //   * `ChromaFormat::Y444` (full-resolution chroma — twice the chroma
+    //     macroblock grid of the 4:2:2 cases).
+    // qi = 2 → finest at the 4444/4444 XQ defaults.
+    let src = synthetic_progressive_444(width, height, depth);
+    let pkt = oxideav_prores::encoder::encode_frame_with_depth(
+        &src,
+        width,
+        height,
+        ChromaFormat::Y444,
+        depth,
+        profile,
+        2,
+    )
+    .expect("encode_frame_with_depth 4:4:4 progressive (no alpha)");
+
+    // Sanity: the encoded frame header reports progressive (one picture)
+    // 4:4:4 with NO alpha (alpha_channel_type=0).
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt).expect("parse our packet");
+    assert_eq!(fh.interlace_mode, 0, "progressive frame interlace_mode");
+    assert_eq!(
+        fh.picture_count(),
+        1,
+        "progressive frame must carry exactly 1 picture"
+    );
+    assert_eq!(
+        fh.alpha_channel_type, 0,
+        "4:4:4 no-alpha frame must report alpha_channel_type=0"
+    );
+    assert_eq!(
+        fh.chroma_format,
+        ChromaFormat::Y444,
+        "4:4:4 frame must report ChromaFormat::Y444"
+    );
+
+    let patched = patch_mov_with_packet(&template, &pkt);
+    let patched_path = tmp.join(format!(
+        "pat_prog444_p{profile_flag}_{width}x{height}_{}.mov",
+        depth.bits()
+    ));
+    std::fs::write(&patched_path, &patched).expect("write patched");
+
+    // Decode via ffmpeg to raw 12-bit YUV (ffmpeg's ap4h/ap4x native
+    // 4:4:4 decode depth — see `yuv444p12le` in the ffprobe of an
+    // ap4h-encoded MOV).
+    let decoded_path = tmp.join("decoded_prog444.yuv");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            patched_path.to_str().unwrap(),
+            "-pix_fmt",
+            "yuv444p12le",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            decoded_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode");
+    assert!(
+        status.success(),
+        "ffmpeg failed to decode our progressive 4:4:4 packet \
+         (profile={profile_flag}, {}-bit)",
+        depth.bits()
+    );
+    let decoded = std::fs::read(&decoded_path).expect("read decoded");
+    let plane_bytes_12 = (width as usize) * (height as usize) * 2;
+    assert!(
+        decoded.len() >= plane_bytes_12 * 3,
+        "ffmpeg produced {} bytes, expected at least {} for 3 12-bit 4:4:4 planes",
+        decoded.len(),
+        plane_bytes_12 * 3
+    );
+    let decoded_y = &decoded[..plane_bytes_12];
+
+    // Build the 12-bit reference luma plane from the source at whatever
+    // depth it was encoded: 8-bit upshift `<< 4`; 10-bit upshift `<< 2`;
+    // 12-bit as-is (ffmpeg's 4:4:4 decode is 12-bit internally).
+    let src_y_12: Vec<u8> = match depth {
+        BitDepth::Eight => {
+            let mut out = Vec::with_capacity(src.planes[0].data.len() * 2);
+            for &v in &src.planes[0].data {
+                let v12 = (v as u16) << 4;
+                out.extend_from_slice(&v12.to_le_bytes());
+            }
+            out
+        }
+        BitDepth::Ten => {
+            let mut out = Vec::with_capacity(src.planes[0].data.len());
+            for chunk in src.planes[0].data.chunks_exact(2) {
+                let v10 = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.extend_from_slice(&(v10 << 2).to_le_bytes());
+            }
+            out
+        }
+        BitDepth::Twelve => src.planes[0].data.clone(),
+    };
+    let psnr = psnr_12bit_444(&src_y_12, decoded_y);
+    eprintln!(
+        "cross-decode progressive 4:4:4 (profile={profile_flag}, {width}x{height}, {}-bit \
+         source → 12-bit compare): packet={} bytes, luma PSNR={psnr:.2} dB",
+        depth.bits(),
+        pkt.len()
+    );
+    assert!(
+        psnr >= 40.0,
+        "progressive 4:4:4 cross-decode PSNR {psnr:.2} dB under 40 dB bar \
+         (profile={profile_flag}, {}-bit)",
+        depth.bits()
+    );
+
+    // Left vs right luma-sum check — the source ramps left-dark →
+    // right-bright, so a transposed / mis-scanned picture (a §7.2 block
+    // scan regression in the 4:4:4 path specifically) collapses the
+    // left/right bias.
+    let read_y = |off: usize| -> u64 {
+        u16::from_le_bytes([decoded_y[off * 2], decoded_y[off * 2 + 1]]) as u64
+    };
+    let mut left_sum = 0u64;
+    let mut right_sum = 0u64;
+    let w = width as usize;
+    let half = w / 2;
+    for j in 0..(height as usize) {
+        for i in 0..w {
+            let v = read_y(j * w + i);
+            if i < half {
+                left_sum += v;
+            } else {
+                right_sum += v;
+            }
+        }
+    }
+    assert!(
+        right_sum > left_sum,
+        "progressive 4:4:4 cross-decode: right-half sum {right_sum} not > left-half sum \
+         {left_sum} (luma ramp lost — §7.2 block-scan regression in our 4:4:4 encoder?)"
+    );
+}
+
+// 8-bit progressive 4:4:4 (ap4h + ap4x).
+#[test]
+fn cross_decode_ap4h_progressive_8bit() {
+    cross_decode_progressive_444(Profile::Prores4444, 64, 48, BitDepth::Eight);
+}
+
+#[test]
+fn cross_decode_ap4x_progressive_8bit() {
+    cross_decode_progressive_444(Profile::Prores4444Xq, 64, 48, BitDepth::Eight);
+}
+
+#[test]
+fn cross_decode_ap4h_progressive_8bit_larger() {
+    cross_decode_progressive_444(Profile::Prores4444, 128, 96, BitDepth::Eight);
+}
+
+// 10-bit progressive 4:4:4 (genuine HBD source through the §7.5.1
+// b = 10 level shift on the 4:4:4 path).
+#[test]
+fn cross_decode_ap4h_progressive_10bit() {
+    cross_decode_progressive_444(Profile::Prores4444, 64, 48, BitDepth::Ten);
+}
+
+#[test]
+fn cross_decode_ap4x_progressive_10bit() {
+    cross_decode_progressive_444(Profile::Prores4444Xq, 64, 48, BitDepth::Ten);
+}
+
+#[test]
+fn cross_decode_ap4h_progressive_10bit_larger() {
+    cross_decode_progressive_444(Profile::Prores4444, 128, 96, BitDepth::Ten);
+}
+
+// 12-bit progressive 4:4:4 (genuine HBD source through the §7.5.1
+// b = 12 level shift — ffmpeg's ap4h/ap4x native depth).
+#[test]
+fn cross_decode_ap4h_progressive_12bit() {
+    cross_decode_progressive_444(Profile::Prores4444, 64, 48, BitDepth::Twelve);
+}
+
+#[test]
+fn cross_decode_ap4x_progressive_12bit() {
+    cross_decode_progressive_444(Profile::Prores4444Xq, 64, 48, BitDepth::Twelve);
+}
+
+#[test]
+fn cross_decode_ap4h_progressive_12bit_larger() {
+    cross_decode_progressive_444(Profile::Prores4444, 128, 96, BitDepth::Twelve);
+}

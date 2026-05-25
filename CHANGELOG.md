@@ -10,6 +10,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Black-box ffmpeg cross-decode acceptance tests for the progressive
+  4:4:4 encoder without alpha (ap4h / ap4x).** The plain 4:4:4 forward
+  path — a single progressive 4:4:4 picture (`ChromaFormat::Y444`,
+  `interlace_mode == 0`, `alpha_channel_type == 0`, §7.2 Figure 4 block
+  scan) emitted by `encode_frame_with_depth` and decoded by ffmpeg's
+  `prores_ks` decoder — previously had no cross-decode test: the
+  existing 4:4:4 coverage drove the 4444 + alpha entry point
+  (`encode_frame_with_alpha(... Some(AlphaChannelType::Sixteen))`),
+  leaving the mainstream no-alpha 4:4:4 path validated only by
+  self-roundtrip. Nine new cases in `tests/ffmpeg_cross_decode.rs`
+  close that gap across both 4444 profiles (ap4h + ap4x) and all
+  three spec bit depths (8 / 10 / 12-bit). The 10- and 12-bit cases
+  feed a genuine high-bit-depth source (LE u16 samples bounded by the
+  depth) so `read_sample`'s `BitDepth::Ten` / `BitDepth::Twelve`
+  branches (RDD 36 §7.5.1 level shift `v = s / 2^(b-9) − 256`) are
+  exercised through the 4:4:4 path against the reference decoder. The
+  4:4:4 chroma planes are emitted at full luma resolution
+  (`ChromaFormat::Y444` — twice the chroma macroblock grid of the
+  4:2:2 cases) which exercises the §7.2 progressive block scan with
+  the deeper chroma slice payload that 4:2:2 cannot reach. ffmpeg's
+  ap4h/ap4x no-alpha 4:4:4 decode path is 12-bit internally, so all
+  cases compare at 12-bit (8-bit source upshifted `<< 4`, 10-bit
+  upshifted `<< 2`, 12-bit as-is); a left-dark → right-bright luma
+  ramp + left/right-sum assertion guards against a transposed /
+  mis-scanned 4:4:4 picture. Measured **64.74-64.97 dB** luma PSNR
+  across all 9 cases (64×48 + 128×96 grids) — comfortably above the
+  40 dB acceptance bar. Each case re-checks `interlace_mode == 0`,
+  `picture_count == 1`, `alpha_channel_type == 0`, and
+  `chroma_format == ChromaFormat::Y444`. Skips gracefully when ffmpeg
+  is absent.
+
+- **Black-box ffmpeg cross-decode acceptance tests for the progressive
   4:2:2 encoder (apco / apcs / apcn / apch).** The mainstream ProRes
   forward path — a single progressive 4:2:2 picture
   (`interlace_mode == 0`, §7.2 Figure 4 block scan) emitted by
