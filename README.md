@@ -105,6 +105,38 @@ The valid range is `1..=224` (rejected at encoder construction
 otherwise). The override applies to every slice in every encoded frame
 and roundtrips through any RDD 36 decoder.
 
+### Configurable macroblocks-per-slice (RDD 36 §5.3)
+
+Every encoded picture is partitioned into slices whose width in
+macroblocks is signalled by `picture_header.log2_desired_slice_size_in_mb`
+(a 2-bit field, so the legal set is `{1, 2, 4, 8}`). The default is
+**8 MBs/slice**, matching every Apple-encoded fixture committed
+under `docs/video/prores/fixtures/`. Lowering the value subdivides
+each macroblock row into more, smaller slices — useful for finer
+error resilience (a corrupted byte taints fewer macroblocks) at the
+cost of a slightly larger packet (extra `slice_header` +
+`slice_size_table` entries amortise over fewer macroblocks).
+
+```rust
+use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+
+// Single-MB slices: maximum resilience, ~5% larger packet on a
+// 128x64 4:2:2 source (5948 B → 6247 B in the regression test).
+let cfg = EncoderConfig::default().with_mbs_per_slice(1);
+let enc = make_encoder_with_config(&params, cfg)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Valid values are `1`, `2`, `4`, `8`; anything else returns
+`Error::invalid` at encoder construction. The choice flows into
+`picture_header.log2_desired_slice_size_in_mb` so any RDD 36 decoder
+(including this crate's own) rebuilds the per-row template via
+[`frame::compute_slice_sizes`]. The default path
+(`mbs_per_slice == None`) is byte-identical to
+`with_mbs_per_slice(DEFAULT_MBS_PER_SLICE)` (8) — the knob is
+purely additive. ffmpeg's `prores_ks` exposes the same control
+through `-mbs_per_slice {1,2,4,8}`.
+
 ### Explicit profile selection
 
 By default the encoder maps `CodecParameters::bit_rate` to one of the

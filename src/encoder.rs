@@ -106,6 +106,31 @@ pub struct EncoderConfig {
     /// coded with the §7.2 Figure 5 interlaced block scan. Value `3` is
     /// reserved by Table 2 and rejected at encoder construction.
     pub interlace_mode: u8,
+    /// Desired slice width in macroblocks (RDD 36 §5.3 — must be a
+    /// power of two in `{1, 2, 4, 8}`; the spec encodes
+    /// `log2_desired_slice_size_in_mb` in two bits of the picture
+    /// header so the legal range is bounded).
+    ///
+    /// `None` (the default) uses the canonical `8`-MB-per-slice layout
+    /// that every reference encoder emits, matching the `[8, 8, …, 4?, 2?, 1?]`
+    /// per-row template the decoder rebuilds via
+    /// [`crate::frame::compute_slice_sizes`].
+    ///
+    /// Lowering this value subdivides every macroblock row into more,
+    /// smaller slices; the per-slice fixed-cost (`slice_header` + per-
+    /// component entropy coder reset + `slice_size_table` entry) is
+    /// amortised over fewer macroblocks, so the encoded packet grows
+    /// modestly. The control surface is the same knob ffmpeg's
+    /// `prores_ks` exposes through `-mbs_per_slice {1,2,4,8}` and lets
+    /// callers trade rate for finer error resilience.
+    ///
+    /// Validated at encoder construction; non-power-of-two or values
+    /// outside `{1, 2, 4, 8}` return `Error::invalid`. The bitstream
+    /// signals the choice through
+    /// `picture_header.log2_desired_slice_size_in_mb` so every RDD 36
+    /// decoder (including this crate's [`crate::decoder`]) recovers the
+    /// per-row template via the same `compute_slice_sizes` derivation.
+    pub mbs_per_slice: Option<u8>,
 }
 
 /// Maximum number of trial encodes per frame when rate control is active.
@@ -203,6 +228,38 @@ impl EncoderConfig {
         self.interlace_mode = interlace_mode;
         self
     }
+
+    /// Override the desired macroblocks-per-slice (RDD 36 §5.3 — must
+    /// be one of `1`, `2`, `4`, or `8`). The default (`None`) preserves
+    /// the historical 8-MBs-per-slice layout. See
+    /// [`Self::mbs_per_slice`] for the rate-vs-resilience tradeoff.
+    pub fn with_mbs_per_slice(mut self, mbs_per_slice: u8) -> Self {
+        self.mbs_per_slice = Some(mbs_per_slice);
+        self
+    }
+}
+
+/// Default macroblocks-per-slice — matches every reference RDD 36
+/// encoder's per-row template (`[8, 8, …, 4?, 2?, 1?]` per
+/// [`crate::frame::compute_slice_sizes`]) and the
+/// `log2_desired_slice_size_in_mb == 3` written by Apple's encoders
+/// for every fixture under `docs/video/prores/fixtures/`.
+pub const DEFAULT_MBS_PER_SLICE: u8 = 8;
+
+/// Convert a `mbs_per_slice` value (must be 1, 2, 4, or 8) to the
+/// `log2_desired_slice_size_in_mb` field stored in the picture header
+/// (0..3). Returns `Err` for any other value.
+pub fn mbs_per_slice_to_log2(mbs_per_slice: u8) -> Result<u8> {
+    match mbs_per_slice {
+        1 => Ok(0),
+        2 => Ok(1),
+        4 => Ok(2),
+        8 => Ok(3),
+        _ => Err(Error::invalid(
+            "prores encoder: mbs_per_slice must be 1, 2, 4, or 8 (RDD 36 §5.3 — \
+             log2_desired_slice_size_in_mb is a 2-bit field, so 8 MBs is the maximum)",
+        )),
+    }
 }
 
 /// Default `quantization_index` used for 422 Standard. Lower = higher quality.
@@ -224,7 +281,6 @@ fn output_capacity_cap(width: u16, height: u16, chroma: ChromaFormat) -> usize {
 }
 
 const MB_SIDE_PX: usize = 16;
-const SLICE_MB_WIDTH_LOG2: u8 = 3; // 8 MBs per slice (typical)
 
 /// Pick a profile from `bit_rate` when the caller expresses a target rate.
 ///
@@ -279,6 +335,12 @@ pub fn make_encoder_with_config(
              1 (top-field-first) or 2 (bottom-field-first) — value 3 is reserved \
              (RDD 36 §6.1.1 Table 2)",
         ));
+    }
+    // Validate mbs_per_slice up-front so callers get a clean error
+    // before any encode runs. mbs_per_slice_to_log2 rejects everything
+    // outside {1, 2, 4, 8} per RDD 36 §5.3.
+    if let Some(m) = config.mbs_per_slice {
+        mbs_per_slice_to_log2(m)?;
     }
     let width = params
         .width
@@ -355,6 +417,8 @@ pub fn make_encoder_with_config(
     };
 
     let interlace_mode = config.interlace_mode;
+    let log2_slice_mb_width =
+        mbs_per_slice_to_log2(config.mbs_per_slice.unwrap_or(DEFAULT_MBS_PER_SLICE))?;
 
     Ok(Box::new(ProResEncoder {
         output_params,
@@ -366,6 +430,7 @@ pub fn make_encoder_with_config(
         quant_index,
         meta,
         interlace_mode,
+        log2_slice_mb_width,
         config,
         time_base: params
             .frame_rate
@@ -389,6 +454,10 @@ struct ProResEncoder {
     /// (0 = progressive, 1 = TFF, 2 = BFF). Mirrors
     /// [`EncoderConfig::interlace_mode`].
     interlace_mode: u8,
+    /// `log2_desired_slice_size_in_mb` field written into every
+    /// picture_header (RDD 36 §5.2.2 / §5.3). Resolved at construction
+    /// from `config.mbs_per_slice` (default 8 → log2 == 3).
+    log2_slice_mb_width: u8,
     config: EncoderConfig,
     time_base: TimeBase,
     /// Target bytes per frame for rate control, or 0 when disabled.
@@ -422,6 +491,7 @@ impl Encoder for ProResEncoder {
                         self.meta,
                         self.target_bytes,
                         self.interlace_mode,
+                        self.log2_slice_mb_width,
                     )?
                 } else {
                     encode_frame_full(
@@ -436,6 +506,7 @@ impl Encoder for ProResEncoder {
                         self.interlace_mode,
                         self.config.quant_matrices,
                         self.meta,
+                        self.log2_slice_mb_width,
                     )?
                 };
                 let mut pkt = Packet::new(0, self.time_base, data);
@@ -561,6 +632,7 @@ pub fn encode_frame_with_qmats(
         0,
         Some(qmats),
         FrameMeta::default(),
+        3, // log2(8) — default slice width matches every reference encoder
     )
 }
 
@@ -599,6 +671,7 @@ pub fn encode_frame_with_alpha(
         0,
         None,
         FrameMeta::default(),
+        3, // log2(8) — default slice width matches every reference encoder
     )
 }
 
@@ -637,6 +710,7 @@ pub fn encode_frame_interlaced(
         interlace_mode,
         None,
         FrameMeta::default(),
+        3, // log2(8) — default slice width matches every reference encoder
     )
 }
 
@@ -666,6 +740,7 @@ fn encode_frame_with_rate_control(
     meta: FrameMeta,
     target_bytes: usize,
     interlace_mode: u8,
+    log2_slice_mb_width: u8,
 ) -> Result<Vec<u8>> {
     let tol_lo = (target_bytes as f64 * (1.0 - RATE_CTRL_TOLERANCE)) as usize;
     let tol_hi = (target_bytes as f64 * (1.0 + RATE_CTRL_TOLERANCE)) as usize;
@@ -683,6 +758,7 @@ fn encode_frame_with_rate_control(
         interlace_mode,
         qmats,
         meta,
+        log2_slice_mb_width,
     )?;
     if seed.len() >= tol_lo && seed.len() <= tol_hi {
         return Ok(seed);
@@ -718,6 +794,7 @@ fn encode_frame_with_rate_control(
             interlace_mode,
             qmats,
             meta,
+            log2_slice_mb_width,
         )?;
         let sz = candidate.len();
         if sz >= tol_lo && sz <= tol_hi {
@@ -769,7 +846,19 @@ fn encode_frame_full(
     interlace_mode: u8,
     qmats: Option<QuantMatrices>,
     meta: FrameMeta,
+    log2_slice_mb_width: u8,
 ) -> Result<Vec<u8>> {
+    // Defence-in-depth: the spec stores log2_desired_slice_size_in_mb
+    // in two bits so only 0..=3 is representable. Callers go through
+    // mbs_per_slice_to_log2 which already enforces this, but the
+    // public encode_frame_* shims pass literal `3` (default) and a
+    // typo there is a one-bit corruption — assert here.
+    if log2_slice_mb_width > 3 {
+        return Err(Error::invalid(
+            "prores encoder: log2_desired_slice_size_in_mb must be 0..=3 \
+             (RDD 36 §5.2.2 — two-bit picture-header field)",
+        ));
+    }
     let expected_planes = if alpha_channel_type.is_some() { 4 } else { 3 };
     if frame.planes.len() != expected_planes {
         return Err(Error::invalid(format!(
@@ -854,6 +943,7 @@ fn encode_frame_full(
             luma_qmat,
             chroma_qmat,
             alpha_channel_type,
+            log2_slice_mb_width,
             interlaced,
             *field,
         )?;
@@ -933,6 +1023,7 @@ fn encode_one_picture(
     luma_qmat: &[u8; 64],
     chroma_qmat: &[u8; 64],
     alpha_channel_type: Option<AlphaChannelType>,
+    log2_slice_mb_width: u8,
     interlaced: bool,
     field: FieldStride,
 ) -> Result<Vec<u8>> {
@@ -942,7 +1033,7 @@ fn encode_one_picture(
     };
     let mbs_x = frame_w.div_ceil(MB_SIDE_PX);
     let mbs_y = picture_height.div_ceil(MB_SIDE_PX);
-    let slice_sizes_template = compute_slice_sizes(mbs_x, SLICE_MB_WIDTH_LOG2);
+    let slice_sizes_template = compute_slice_sizes(mbs_x, log2_slice_mb_width);
     let slices_per_row = slice_sizes_template.len();
     let slice_count = slices_per_row * mbs_y;
     let _cb_per_mb = chroma_blocks_per_mb(chroma);
@@ -1095,7 +1186,7 @@ fn encode_one_picture(
         } else {
             0
         },
-        SLICE_MB_WIDTH_LOG2,
+        log2_slice_mb_width,
     );
     for p in &slice_payloads {
         blob.extend_from_slice(&(p.len() as u16).to_be_bytes());

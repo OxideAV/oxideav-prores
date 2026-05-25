@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Configurable macroblocks-per-slice encoder knob (RDD 36 §5.3).**
+  A new `EncoderConfig::mbs_per_slice: Option<u8>` field (with
+  `EncoderConfig::with_mbs_per_slice(u8)` builder, `DEFAULT_MBS_PER_SLICE`
+  constant, and `mbs_per_slice_to_log2(u8) -> Result<u8>` helper)
+  lets the caller pick `{1, 2, 4, 8}` MBs per slice — the full set
+  representable by the picture header's two-bit
+  `log2_desired_slice_size_in_mb` field. The default (`None`) keeps
+  the historical 8-MB layout that matches every fixture committed
+  under `docs/video/prores/fixtures/` and is byte-identical to an
+  explicit `with_mbs_per_slice(DEFAULT_MBS_PER_SLICE)` call (no
+  change to existing encoded bytes). Non-power-of-two or out-of-range
+  values (`0`, `3`, `5`, `6`, `7`, `9`, `16`, …) are rejected at
+  `make_encoder_with_config` time, not silently clamped. The choice
+  flows into `picture_header.log2_desired_slice_size_in_mb` so any
+  RDD 36 decoder (including this crate's own) rebuilds the per-row
+  template via `frame::compute_slice_sizes`. Lowering the value
+  subdivides each macroblock row into more, smaller slices for
+  finer error resilience at modest cost: a 128x64 4:2:2 synthetic
+  source grows from 5948 B (8 MBs/slice) to 6040 B (4) -> 6176 B (2)
+  -> 6247 B (1), a 5.0 % packet-size delta across the full range
+  (`tests/mbs_per_slice.rs::packet_size_monotonic_in_slice_count`).
+  ffmpeg's `prores_ks` exposes the same knob through
+  `-mbs_per_slice {1,2,4,8}`. Nine new tests in
+  `tests/mbs_per_slice.rs` cover the default value
+  (`DEFAULT_MBS_PER_SLICE == 8`), the log2-conversion helper,
+  picture-header field round-trip across all four legal values,
+  rejection of the eight illegal values, end-to-end self-roundtrip
+  with a 38 dB luma PSNR floor at every legal width, packet-size
+  monotonicity across the full `{1, 2, 4, 8}` range, byte-identity
+  of the default path vs. explicit-8, builder field round-trip, and
+  the smallest-slice configuration (`mbs_per_slice == 1` on an 8x4
+  MB picture emits 32 slices and still decodes cleanly). Follow-up:
+  cross-decode acceptance through ffmpeg's `prores_ks` decoder for
+  every value — the existing `tests/ffmpeg_cross_decode.rs` covers
+  only the default 8-MB layout.
+
 - **Black-box ffmpeg cross-decode acceptance tests for the progressive
   4:4:4 encoder without alpha (ap4h / ap4x).** The plain 4:4:4 forward
   path — a single progressive 4:4:4 picture (`ChromaFormat::Y444`,
