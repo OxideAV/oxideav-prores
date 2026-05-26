@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Parser-level `parse_frame_header` cargo-fuzz target.** A third
+  libFuzzer harness under `fuzz/fuzz_targets/parse_frame_header.rs`
+  isolates the RDD 36 §6.1.1 frame_header() parser
+  ([`frame::parse_frame_header`]) without the picture / slice /
+  coefficient work behind it. Smoke-fuzzed at ~525 K exec/s on a single
+  core (~8.4 M execs in 15 s, panic-free, corpus 32 inputs covering 90
+  edges / 114 features) — orders of magnitude faster than the existing
+  full-pipeline `decode_packet` / `decode_packet_with_depth` targets, so
+  libFuzzer saturates every §6.1.1 "shall refuse" arm in seconds rather
+  than minutes. The arms covered:
+  * `frame_header_size` truncation (`< 20`) and overrun (`> data.len()`).
+  * `bitstream_version > 1` (§6.1.1 "shall abort").
+  * Reserved `interlace_mode == 3` (§6.1.1 Table 2).
+  * §6.4 v0-stream cross-checks against `chroma_format != 4:2:2` and
+    `alpha_channel_type != 0`.
+  * `load_luma` / `load_chroma` 64-byte qmat reads (truncation + per-
+    entry `2..=63` range per §6.1.1 / §7.3).
+  * The qmat-aliasing branch `load_chroma == 0 && load_luma == 1`
+    (§6.1.1 "the luma matrix shall be used").
+  * Trailing reserved bytes inside `frame_header_size`.
+  Fuzz target is auto-discovered by the org reusable
+  `crate-fuzz.yml` workflow, so the daily 30-minute budget redivides
+  to ~10 min/target across the three harnesses.
+
 - **Daily `cargo-fuzz` decode harness (panic-free).** A new `fuzz/`
   sub-package (its own `[workspace]`, sibling to the umbrella) ships
   two libFuzzer targets that feed arbitrary attacker-controlled bytes

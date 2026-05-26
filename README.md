@@ -514,9 +514,9 @@ cargo bench --bench encode -- --warm-up-time 1 --measurement-time 3
 
 ## Fuzzing
 
-A `cargo-fuzz` harness lives under `fuzz/` with two decode-only
-panic-free targets that drive arbitrary attacker-controlled bytes
-through ProRes's public single-shot decode entry points:
+A `cargo-fuzz` harness lives under `fuzz/` with three panic-free
+targets that drive arbitrary attacker-controlled bytes through ProRes's
+public parse + decode entry points:
 
 * `decode_packet` — feeds bytes into [`decoder::decode_packet`]. Covers
   the RDD 36 §5.1 frame() outer framing, §6.1.1 frame_header() (`shall
@@ -533,13 +533,26 @@ through ProRes's public single-shot decode entry points:
   derived from the input's own first byte so libFuzzer steers mutations
   across all six (depth × chroma) combinations the registry route can
   reach.
+* `parse_frame_header` — parser-level target that isolates the §6.1.1
+  frame_header() decoder via [`frame::parse_frame_header`] without the
+  picture / slice / coefficient work behind it. Runs at ~525 K exec/s on
+  a single core (versus a few k/s for the full-pipeline targets), so
+  libFuzzer saturates every "shall refuse" arm in seconds rather than
+  minutes: `frame_header_size` truncation / overrun, `bitstream_version
+  > 1`, reserved `interlace_mode == 3`, the §6.4 v0-stream cross-check
+  against `chroma_format` and `alpha_channel_type`, the `load_luma` /
+  `load_chroma` 64-byte qmat reads (truncation + per-entry `2..=63`
+  range), and the qmat-aliasing branch (`load_chroma == 0 && load_luma
+  == 1`).
 
-Both harnesses peek at the wire-stream width / height (bytes 16..18 and
-18..20, BE u16) and bail out if `width × height` exceeds 65 536 pixels,
-so libFuzzer doesn't waste cycles on inputs that the upstream OOM cap
-would reject anyway. A daily 30-minute GitHub Actions run is scheduled
-under `.github/workflows/fuzz.yml`, splitting the budget across the two
-targets.
+The two decode harnesses peek at the wire-stream width / height
+(bytes 16..18 and 18..20, BE u16) and bail out if `width × height`
+exceeds 65 536 pixels, so libFuzzer doesn't waste cycles on inputs that
+the upstream OOM cap would reject anyway. `parse_frame_header` has no
+plane-allocation surface so it needs no pixel-count gate. A daily
+30-minute GitHub Actions run is scheduled under
+`.github/workflows/fuzz.yml`, splitting the budget across all three
+targets via auto-discovery.
 
 ```sh
 # nightly toolchain required by libfuzzer-sys

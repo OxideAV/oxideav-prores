@@ -21,11 +21,14 @@ cargo-fuzz = true
 # along that path is attacker-controlled when a third party hands us a
 # .mov / .mxf sample, and any one of them can be malformed. There is no
 # external library oracle worth pulling in (and the clean-room wall bars
-# the C references anyway), so this fuzz crate is decode-only: feed
-# arbitrary bytes to the two public single-shot decode entry points and
-# assert every call returns a `Result` rather than panicking, integer-
-# overflowing (debug), indexing out of bounds, or allocating an
-# attacker-controlled plane buffer the size of the declared width × height.
+# the C references anyway), so this fuzz crate is parse/decode-only: it
+# feeds arbitrary bytes to the public single-shot decode entry points
+# (`decode_packet` / `decode_packet_with_depth`) AND the §6.1.1
+# header-only parser (`parse_frame_header`, exposing the "shall refuse"
+# arms at parser-level exec rates), asserting every call returns a
+# `Result` rather than panicking, integer-overflowing (debug), indexing
+# out of bounds, or allocating an attacker-controlled plane buffer the
+# size of the declared width × height.
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -48,6 +51,19 @@ bench = false
 [[bin]]
 name = "decode_packet_with_depth"
 path = "fuzz_targets/decode_packet_with_depth.rs"
+test = false
+doc = false
+bench = false
+
+# Parser-level header-only harness. Sibling to the two full-pipeline
+# decode targets above; runs orders of magnitude faster (no picture /
+# slice / coefficient work) so libFuzzer can exhaustively explore the
+# §6.1.1 "shall refuse" arms (version > 1, reserved interlace_mode 3,
+# v0 chroma + alpha cross-check, qmat range 2..=63, size truncation /
+# overrun) inside its per-target budget.
+[[bin]]
+name = "parse_frame_header"
+path = "fuzz_targets/parse_frame_header.rs"
 test = false
 doc = false
 bench = false
