@@ -1,0 +1,53 @@
+[package]
+name = "oxideav-prores-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone sub-package owned by cargo-fuzz. Lives outside the umbrella
+# `[workspace] members = ["crates/*"]` glob via `[workspace]` of its own
+# so the umbrella's `cargo build` doesn't try to compile the libFuzzer
+# harnesses (which require nightly + libfuzzer_sys runtime).
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+# ProRes's RDD 36 decoder is a layered parse: frame()/§5.1 outer framing,
+# frame_header()/§6.1.1 + optional 64-byte luma + chroma quant matrices,
+# picture_header()/§6.3 + slice_table()/§6.3.6, per-slice slice_header()/§5.3
+# pointing at the §7.1.1 run/level/sign coefficient coder (and the §7.1.2 /
+# Table 12-14 alpha run-length / VLC coder for ap4h / ap4x). Every byte
+# along that path is attacker-controlled when a third party hands us a
+# .mov / .mxf sample, and any one of them can be malformed. There is no
+# external library oracle worth pulling in (and the clean-room wall bars
+# the C references anyway), so this fuzz crate is decode-only: feed
+# arbitrary bytes to the two public single-shot decode entry points and
+# assert every call returns a `Result` rather than panicking, integer-
+# overflowing (debug), indexing out of bounds, or allocating an
+# attacker-controlled plane buffer the size of the declared width × height.
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-prores]
+path = ".."
+# `decode_packet` / `decode_packet_with_depth` are always compiled (no
+# feature gate), so no default features are required for the harness.
+default-features = false
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode_packet"
+path = "fuzz_targets/decode_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_packet_with_depth"
+path = "fuzz_targets/decode_packet_with_depth.rs"
+test = false
+doc = false
+bench = false

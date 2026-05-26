@@ -1,0 +1,26 @@
+name: Fuzz
+
+# Daily fuzz run for the cargo-fuzz harnesses under fuzz/. ProRes's
+# RDD 36 decode pipeline (frame() / 'icpf' framing -> frame_header()
+# with optional 64-byte luma + chroma quant matrices -> picture_header()
+# + slice_table() -> per-slice run/level/sign coefficient coder and
+# §7.1.2 / Table 12-14 alpha run-length VLC -> §7.5.1 per-bit-depth
+# sample output formatter) is the attack surface; every byte from
+# `frame_size` through the slice payloads is attacker-controlled when
+# a third party hands us a .mov / .mxf sample. There is no external
+# library oracle worth pulling in (and the clean-room wall bars the
+# C references anyway), so these are decode-only panic-free harnesses.
+# The 30-minute total budget is split across the two targets
+# (~15 min each) by the org-level reusable workflow.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"   # daily 06:17 UTC, jittered off the hour
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    uses: OxideAV/.github/.github/workflows/crate-fuzz.yml@master
+    with:
+      time_budget_seconds: 1800
+    secrets: inherit

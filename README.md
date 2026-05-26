@@ -512,6 +512,40 @@ progressive Standard cost since total coefficient work is unchanged.
 cargo bench --bench encode -- --warm-up-time 1 --measurement-time 3
 ```
 
+## Fuzzing
+
+A `cargo-fuzz` harness lives under `fuzz/` with two decode-only
+panic-free targets that drive arbitrary attacker-controlled bytes
+through ProRes's public single-shot decode entry points:
+
+* `decode_packet` — feeds bytes into [`decoder::decode_packet`]. Covers
+  the RDD 36 §5.1 frame() outer framing, §6.1.1 frame_header() (`shall
+  refuse` clauses for `bitstream_version > 1`, reserved interlace_mode
+  3, v0 stream constraints on chroma_format / alpha_channel_type,
+  out-of-range qmat entries), §6.3 picture_header() + slice_table(), the
+  §5.3 + §7.1.1 run/level/sign coefficient coder, the §7.1.2 +
+  Table 12-14 alpha run-length VLC for ap4h / ap4x, and the §5.1 ProRes
+  RAW (`aprn` / `aprh`) refusal path.
+* `decode_packet_with_depth` — same parse chain, but additionally
+  exercises [`decoder::decode_packet_with_depth`]'s caller-supplied
+  `(BitDepth, ChromaFormat)` output formatter (RDD 36 §7.5.1 level
+  shifts for `b = 8 / 10 / 12`). The bit-depth and chroma tags are
+  derived from the input's own first byte so libFuzzer steers mutations
+  across all six (depth × chroma) combinations the registry route can
+  reach.
+
+Both harnesses peek at the wire-stream width / height (bytes 16..18 and
+18..20, BE u16) and bail out if `width × height` exceeds 65 536 pixels,
+so libFuzzer doesn't waste cycles on inputs that the upstream OOM cap
+would reject anyway. A daily 30-minute GitHub Actions run is scheduled
+under `.github/workflows/fuzz.yml`, splitting the budget across the two
+targets.
+
+```sh
+# nightly toolchain required by libfuzzer-sys
+cd fuzz && cargo +nightly fuzz run decode_packet -- -max_total_time=60
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

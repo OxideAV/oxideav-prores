@@ -1,0 +1,6 @@
+# cargo-fuzz build artefacts and runtime corpus state.
+target
+corpus
+artifacts
+coverage
+Cargo.lock

@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Daily `cargo-fuzz` decode harness (panic-free).** A new `fuzz/`
+  sub-package (its own `[workspace]`, sibling to the umbrella) ships
+  two libFuzzer targets that feed arbitrary attacker-controlled bytes
+  through ProRes's public single-shot decode entry points:
+  * `decode_packet` — drives [`decoder::decode_packet`] over the full
+    RDD 36 §5.1 frame() outer framing, §6.1.1 frame_header() (with
+    `shall refuse` checks for `bitstream_version > 1`, reserved
+    interlace_mode 3, v0 stream constraints on chroma_format /
+    alpha_channel_type, qmat entries outside `2..=63`), §6.3
+    picture_header() + slice_table(), §5.3 + §7.1.1 run/level/sign
+    coefficient coder, §7.1.2 + Table 12-14 alpha run-length VLC for
+    ap4h / ap4x, and the §5.1 ProRes RAW (`aprn` / `aprh`) refusal
+    path.
+  * `decode_packet_with_depth` — exercises
+    [`decoder::decode_packet_with_depth`]'s caller-supplied
+    `(BitDepth, ChromaFormat)` output formatter (RDD 36 §7.5.1 level
+    shifts for `b = 8 / 10 / 12`). The output tags are derived from the
+    input's own first byte so libFuzzer steers across all six (depth ×
+    chroma) combinations.
+  Both harnesses peek at the wire-stream width / height (bytes 16..18
+  and 18..20, BE u16) and bail out if `width × height` exceeds 65 536
+  pixels so libFuzzer doesn't waste cycles on inputs the upstream OOM
+  cap (`MAX_DECODED_PIXELS = 32_768²`) would reject anyway. The harness
+  contract is purely "return a `Result` rather than panic / integer-
+  overflow / index out of bounds / allocate an attacker-controlled
+  buffer". The 30-minute daily budget is scheduled under
+  `.github/workflows/fuzz.yml` (cron `17 6 * * *` UTC), splitting the
+  budget across the two targets via the org reusable workflow.
+
 - **ffmpeg cross-decode acceptance for the profile-aware perceptual
   quant matrices (RDD 36 §7.3).** Eight new tests in
   `tests/ffmpeg_cross_decode.rs` validate that bitstreams emitted by
