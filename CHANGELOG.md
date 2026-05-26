@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ffmpeg cross-decode acceptance for the profile-aware perceptual
+  quant matrices (RDD 36 §7.3).** Eight new tests in
+  `tests/ffmpeg_cross_decode.rs` validate that bitstreams emitted by
+  `encode_frame_with_qmats(..., QuantMatrices::perceptual_for_profile(p))`
+  decode cleanly through ffmpeg's stock `prores` / `prores_ks` decoder
+  for every profile. Two new driver helpers
+  (`cross_decode_progressive_422_perceptual` /
+  `cross_decode_progressive_444_perceptual`) mirror the existing flat-
+  matrix drivers but route through the explicit-qmats encode path,
+  patch the resulting packet into an ffmpeg-generated template MOV,
+  decode it via ffmpeg to raw YUV, and score luma PSNR at the decoder's
+  native depth (10-bit for 4:2:2, 12-bit for 4:4:4). The drivers add a
+  `frame_header_size == 148` sanity assertion + per-plane
+  `luma_qmat` / `chroma_qmat` field round-trip check on every packet
+  to guard the `perceptual_for_profile_not_default_for_any_profile`
+  invariant — the 4444 XQ blend (1/8 perceptual + 7/8 flat) sits
+  closest to flat yet must still trigger the loaded-qmats header path.
+  Coverage: Proxy / LT / Standard / HQ all at 8-bit 64×48 (4 cases);
+  HQ also at 10-bit (genuine §7.5.1 b=10 level shift through the
+  loaded-qmat path); 4444 / 4444 XQ at 8-bit; 4444 also at 12-bit
+  (ffmpeg's ap4h/ap4x native depth, exercising the b=12 level shift on
+  the 4:4:4 grid). Measured 58.01–63.84 dB luma PSNR across the eight
+  cases — comfortably above the 35 dB bar the perceptual matrices give
+  up vs. the flat default's PSNR-optimality. Closes the r144 follow-up
+  tail: the previous `tests/perceptual_quant.rs::ffmpeg_cross_decodes_perceptual_matrices`
+  case covered only the single non-blended `QuantMatrices::perceptual()`
+  matrix on the Standard profile; this round adds per-profile blended-
+  matrix cross-decode coverage for every supported profile.
+
 - **Profile-aware perceptual quantisation matrix preset (RDD 36 §7.3
   + ISO/IEC 10918-1 Annex K Tables K.1 / K.2).** New constructor
   `QuantMatrices::perceptual_for_profile(Profile)` blends the

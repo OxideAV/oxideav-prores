@@ -259,6 +259,18 @@ mismatch between an explicit profile and the requested
 `PixelFormat` (4:2:2 ↔ Yuv422P; 4:4:4 ↔ Yuv444P) is rejected at
 encoder construction.
 
+Cross-decode acceptance: bitstreams emitted by
+`encode_frame_with_qmats(..., QuantMatrices::perceptual_for_profile(p))`
+decode through ffmpeg's stock `prores` / `prores_ks` decoder at 58.0–63.8 dB
+luma PSNR for every profile — Proxy / LT / Standard / HQ at 8-bit (with
+HQ also exercised at 10-bit through the §7.5.1 `b = 10` level shift on
+the loaded-qmat path); 4444 / 4444 XQ at 8-bit (with 4444 also at 12-bit
+through the §7.5.1 `b = 12` level shift). The 4444 XQ corner is the
+strongest guard — its 1/8 perceptual + 7/8 flat blend sits closest to
+flat yet still triggers the `load_*_qmat = 1` header path
+(`frame_header_size == 148`), so a silent collapse to the flat default
+would surface immediately. See `tests/ffmpeg_cross_decode.rs`.
+
 ### Bitstream version compatibility (RDD 36 §6.4)
 
 The decoder enforces every "decoder shall refuse" clause attached to

@@ -35,9 +35,11 @@ use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, Vide
 use oxideav_prores::alpha::AlphaChannelType;
 use oxideav_prores::decoder::BitDepth;
 use oxideav_prores::encoder::{
-    encode_frame_interlaced, encode_frame_with_alpha, make_encoder_with_config, EncoderConfig,
+    encode_frame_interlaced, encode_frame_with_alpha, encode_frame_with_qmats,
+    make_encoder_with_config, EncoderConfig,
 };
 use oxideav_prores::frame::{ChromaFormat, Profile};
+use oxideav_prores::quant::QuantMatrices;
 
 fn have_ffmpeg() -> bool {
     Command::new("ffmpeg")
@@ -2159,4 +2161,454 @@ fn cross_decode_ap4x_progressive_12bit() {
 #[test]
 fn cross_decode_ap4h_progressive_12bit_larger() {
     cross_decode_progressive_444(Profile::Prores4444, 128, 96, BitDepth::Twelve);
+}
+
+// ───────────── profile-aware perceptual qmats (RDD 36 §7.3 + JPEG K.1/K.2) ─────────────
+//
+// `QuantMatrices::perceptual_for_profile(p)` blends the JPEG-derived
+// perceptual matrix toward the spec's flat all-4s default in proportion
+// to the profile's `default_quant_index` (blend = qi/8); the resulting
+// non-default matrix is loaded into the frame header (`load_luma_qmat =
+// load_chroma_qmat = 1`) per RDD 36 §7.3. The earlier `cross_decode_*`
+// cases above all exercise the flat-default header path
+// (`load_*_qmat = 0`); this section drives the LOADED-qmats path
+// end-to-end through ffmpeg's `prores`/`prores_ks` decoder for every
+// profile so we know the per-profile blended matrices roundtrip across
+// the wall. Closes the r144 follow-up tail.
+
+/// 4:2:2 progressive cross-decode with explicit per-profile perceptual
+/// quant matrices loaded into the frame header. Mirrors
+/// [`cross_decode_progressive_422`] but routes through
+/// `encode_frame_with_qmats` with
+/// `QuantMatrices::perceptual_for_profile(profile)`.
+fn cross_decode_progressive_422_perceptual(
+    profile: Profile,
+    width: u32,
+    height: u32,
+    depth: BitDepth,
+) {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping perceptual 4:2:2 cross-decode");
+        return;
+    }
+    assert!(
+        matches!(
+            profile,
+            Profile::Proxy | Profile::Lt | Profile::Standard | Profile::Hq
+        ),
+        "this driver is for the 4:2:2 profiles only"
+    );
+    let tmp = tempdir().expect("tempdir");
+    let profile_flag: u8 = match profile {
+        Profile::Proxy => 0,
+        Profile::Lt => 1,
+        Profile::Standard => 2,
+        Profile::Hq => 3,
+        _ => unreachable!("non-4:2:2 profile in 4:2:2 perceptual driver"),
+    };
+    let pix_fmt = "yuv422p10le";
+    let template_path = tmp.join(format!(
+        "tpl_perc422_p{profile_flag}_{width}x{height}_{}.mov",
+        depth.bits()
+    ));
+    if !ffmpeg_make_template_mov_422_progressive(
+        profile_flag,
+        width,
+        height,
+        pix_fmt,
+        &template_path,
+    ) {
+        eprintln!(
+            "perceptual 4:2:2 template MOV unavailable — skipping \
+             (profile={profile_flag}, {}-bit)",
+            depth.bits()
+        );
+        return;
+    }
+    let template = std::fs::read(&template_path).expect("read template");
+
+    // Encode with the profile-specific perceptual matrix loaded into the
+    // header. qi = 2 = finest legal step; the blended matrix supplies the
+    // per-coefficient weighting on top.
+    let src = synthetic_progressive_422(width, height, depth);
+    let qmats = QuantMatrices::perceptual_for_profile(profile);
+    let pkt = encode_frame_with_qmats(
+        &src,
+        width,
+        height,
+        ChromaFormat::Y422,
+        depth,
+        profile,
+        2,
+        qmats,
+    )
+    .expect("encode_frame_with_qmats 4:2:2 progressive perceptual");
+
+    // Sanity: the encoded frame header MUST report load_luma_qmat = 1 +
+    // load_chroma_qmat = 1 (frame_header_size 148) — the non-flat blended
+    // matrix triggers the loaded-qmat path even at the 4444 XQ corner
+    // where the blend is mostly flat (per the
+    // `perceptual_for_profile_not_default_for_any_profile` invariant in
+    // `src/quant.rs`).
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt).expect("parse our packet");
+    assert_eq!(fh.interlace_mode, 0, "progressive frame interlace_mode");
+    assert_eq!(
+        fh.picture_count(),
+        1,
+        "progressive frame must carry exactly 1 picture"
+    );
+    assert_eq!(
+        fh.alpha_channel_type, 0,
+        "4:2:2 frame must report alpha_channel_type=0"
+    );
+    assert_eq!(
+        fh.frame_header_size, 148,
+        "perceptual_for_profile must load both qmats (header_size 148)"
+    );
+    assert_eq!(
+        fh.luma_qmat,
+        QuantMatrices::perceptual_for_profile(profile).luma,
+        "luma_qmat round-trip mismatch in encoded frame header"
+    );
+    assert_eq!(
+        fh.chroma_qmat,
+        QuantMatrices::perceptual_for_profile(profile).chroma,
+        "chroma_qmat round-trip mismatch in encoded frame header"
+    );
+
+    let patched = patch_mov_with_packet(&template, &pkt);
+    let patched_path = tmp.join(format!(
+        "pat_perc422_p{profile_flag}_{width}x{height}_{}.mov",
+        depth.bits()
+    ));
+    std::fs::write(&patched_path, &patched).expect("write patched");
+
+    let decoded_path = tmp.join("decoded_perc422.yuv");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            patched_path.to_str().unwrap(),
+            "-pix_fmt",
+            pix_fmt,
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            decoded_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode");
+    assert!(
+        status.success(),
+        "ffmpeg failed to decode our perceptual 4:2:2 packet \
+         (profile={profile_flag}, {}-bit)",
+        depth.bits()
+    );
+    let decoded = std::fs::read(&decoded_path).expect("read decoded");
+    let y_bytes_10 = (width as usize) * (height as usize) * 2;
+    assert!(
+        decoded.len() >= y_bytes_10,
+        "ffmpeg produced {} bytes, expected at least {y_bytes_10} for the luma plane",
+        decoded.len()
+    );
+    let decoded_y = &decoded[..y_bytes_10];
+
+    let src_y_10: Vec<u8> = match depth {
+        BitDepth::Eight => upshift_8_to_10_le(&src.planes[0].data),
+        BitDepth::Ten => src.planes[0].data.clone(),
+        BitDepth::Twelve => {
+            let mut out = Vec::with_capacity(src.planes[0].data.len());
+            for chunk in src.planes[0].data.chunks_exact(2) {
+                let v12 = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.extend_from_slice(&(v12 >> 2).to_le_bytes());
+            }
+            out
+        }
+    };
+    let psnr = psnr_10bit(&src_y_10, decoded_y);
+    eprintln!(
+        "perceptual cross-decode 4:2:2 (profile={profile_flag}, {width}x{height}, {}-bit \
+         source → 10-bit compare): packet={} bytes, luma PSNR={psnr:.2} dB",
+        depth.bits(),
+        pkt.len()
+    );
+    // Perceptual matrices redistribute precision away from HF coefficients;
+    // PSNR drops a few dB vs the flat default, but the 4:2:2 cross-decode
+    // bar stays comfortably above 35 dB on the synthetic broadband ramp.
+    assert!(
+        psnr >= 35.0,
+        "perceptual 4:2:2 cross-decode PSNR {psnr:.2} dB under 35 dB bar \
+         (profile={profile_flag}, {}-bit)",
+        depth.bits()
+    );
+
+    // Left/right ramp check — same guard as the flat-matrix path.
+    let read_y = |off: usize| -> u64 {
+        u16::from_le_bytes([decoded_y[off * 2], decoded_y[off * 2 + 1]]) as u64
+    };
+    let mut left_sum = 0u64;
+    let mut right_sum = 0u64;
+    let w = width as usize;
+    let half = w / 2;
+    for j in 0..(height as usize) {
+        for i in 0..w {
+            let v = read_y(j * w + i);
+            if i < half {
+                left_sum += v;
+            } else {
+                right_sum += v;
+            }
+        }
+    }
+    assert!(
+        right_sum > left_sum,
+        "perceptual 4:2:2 cross-decode: right-half sum {right_sum} not > left-half sum \
+         {left_sum} (luma ramp lost — §7.2 block-scan regression?)"
+    );
+}
+
+/// 4:4:4 progressive cross-decode with explicit per-profile perceptual
+/// quant matrices loaded into the frame header. Mirrors
+/// [`cross_decode_progressive_444`] (no alpha) but routes through
+/// `encode_frame_with_qmats` with
+/// `QuantMatrices::perceptual_for_profile(profile)`.
+fn cross_decode_progressive_444_perceptual(
+    profile: Profile,
+    width: u32,
+    height: u32,
+    depth: BitDepth,
+) {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping perceptual 4:4:4 cross-decode");
+        return;
+    }
+    assert!(
+        matches!(profile, Profile::Prores4444 | Profile::Prores4444Xq),
+        "this driver is for the 4444 / 4444 XQ profiles only"
+    );
+    let tmp = tempdir().expect("tempdir");
+    let profile_flag: u8 = match profile {
+        Profile::Prores4444 => 4,
+        Profile::Prores4444Xq => 5,
+        _ => unreachable!("non-4444 profile in 4444 perceptual driver"),
+    };
+    let template_path = tmp.join(format!(
+        "tpl_perc444_p{profile_flag}_{width}x{height}_{}.mov",
+        depth.bits()
+    ));
+    if !ffmpeg_make_template_mov_444_progressive(profile_flag, width, height, &template_path) {
+        eprintln!(
+            "perceptual 4:4:4 template MOV unavailable — skipping \
+             (profile={profile_flag}, {}-bit)",
+            depth.bits()
+        );
+        return;
+    }
+    let template = std::fs::read(&template_path).expect("read template");
+
+    let src = synthetic_progressive_444(width, height, depth);
+    let qmats = QuantMatrices::perceptual_for_profile(profile);
+    let pkt = encode_frame_with_qmats(
+        &src,
+        width,
+        height,
+        ChromaFormat::Y444,
+        depth,
+        profile,
+        2,
+        qmats,
+    )
+    .expect("encode_frame_with_qmats 4:4:4 progressive perceptual");
+
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt).expect("parse our packet");
+    assert_eq!(fh.interlace_mode, 0, "progressive frame interlace_mode");
+    assert_eq!(
+        fh.picture_count(),
+        1,
+        "progressive frame must carry exactly 1 picture"
+    );
+    assert_eq!(
+        fh.alpha_channel_type, 0,
+        "4:4:4 no-alpha frame must report alpha_channel_type=0"
+    );
+    assert_eq!(
+        fh.chroma_format,
+        ChromaFormat::Y444,
+        "4:4:4 frame must report ChromaFormat::Y444"
+    );
+    assert_eq!(
+        fh.frame_header_size, 148,
+        "perceptual_for_profile must load both qmats (header_size 148)"
+    );
+    assert_eq!(
+        fh.luma_qmat,
+        QuantMatrices::perceptual_for_profile(profile).luma,
+        "luma_qmat round-trip mismatch in encoded frame header"
+    );
+    assert_eq!(
+        fh.chroma_qmat,
+        QuantMatrices::perceptual_for_profile(profile).chroma,
+        "chroma_qmat round-trip mismatch in encoded frame header"
+    );
+
+    let patched = patch_mov_with_packet(&template, &pkt);
+    let patched_path = tmp.join(format!(
+        "pat_perc444_p{profile_flag}_{width}x{height}_{}.mov",
+        depth.bits()
+    ));
+    std::fs::write(&patched_path, &patched).expect("write patched");
+
+    let decoded_path = tmp.join("decoded_perc444.yuv");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            patched_path.to_str().unwrap(),
+            "-pix_fmt",
+            "yuv444p12le",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            decoded_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode");
+    assert!(
+        status.success(),
+        "ffmpeg failed to decode our perceptual 4:4:4 packet \
+         (profile={profile_flag}, {}-bit)",
+        depth.bits()
+    );
+    let decoded = std::fs::read(&decoded_path).expect("read decoded");
+    let plane_bytes_12 = (width as usize) * (height as usize) * 2;
+    assert!(
+        decoded.len() >= plane_bytes_12 * 3,
+        "ffmpeg produced {} bytes, expected at least {} for 3 12-bit 4:4:4 planes",
+        decoded.len(),
+        plane_bytes_12 * 3
+    );
+    let decoded_y = &decoded[..plane_bytes_12];
+
+    let src_y_12: Vec<u8> = match depth {
+        BitDepth::Eight => {
+            let mut out = Vec::with_capacity(src.planes[0].data.len() * 2);
+            for &v in &src.planes[0].data {
+                let v12 = (v as u16) << 4;
+                out.extend_from_slice(&v12.to_le_bytes());
+            }
+            out
+        }
+        BitDepth::Ten => {
+            let mut out = Vec::with_capacity(src.planes[0].data.len());
+            for chunk in src.planes[0].data.chunks_exact(2) {
+                let v10 = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.extend_from_slice(&(v10 << 2).to_le_bytes());
+            }
+            out
+        }
+        BitDepth::Twelve => src.planes[0].data.clone(),
+    };
+    let psnr = psnr_12bit_444(&src_y_12, decoded_y);
+    eprintln!(
+        "perceptual cross-decode 4:4:4 (profile={profile_flag}, {width}x{height}, {}-bit \
+         source → 12-bit compare): packet={} bytes, luma PSNR={psnr:.2} dB",
+        depth.bits(),
+        pkt.len()
+    );
+    assert!(
+        psnr >= 35.0,
+        "perceptual 4:4:4 cross-decode PSNR {psnr:.2} dB under 35 dB bar \
+         (profile={profile_flag}, {}-bit)",
+        depth.bits()
+    );
+
+    let read_y = |off: usize| -> u64 {
+        u16::from_le_bytes([decoded_y[off * 2], decoded_y[off * 2 + 1]]) as u64
+    };
+    let mut left_sum = 0u64;
+    let mut right_sum = 0u64;
+    let w = width as usize;
+    let half = w / 2;
+    for j in 0..(height as usize) {
+        for i in 0..w {
+            let v = read_y(j * w + i);
+            if i < half {
+                left_sum += v;
+            } else {
+                right_sum += v;
+            }
+        }
+    }
+    assert!(
+        right_sum > left_sum,
+        "perceptual 4:4:4 cross-decode: right-half sum {right_sum} not > left-half sum \
+         {left_sum} (luma ramp lost — §7.2 block-scan regression?)"
+    );
+}
+
+// 4:2:2 perceptual cross-decode — one test per 4:2:2 profile (Proxy / LT /
+// Standard / HQ). Each blends the JPEG K.1/K.2 perceptual matrix toward
+// flat by `default_quant_index / 8` (8/8, 6/8, 4/8, 2/8 respectively),
+// so each test drives a *different* loaded matrix through ffmpeg's
+// `prores` decoder.
+#[test]
+fn cross_decode_apco_progressive_perceptual_8bit() {
+    cross_decode_progressive_422_perceptual(Profile::Proxy, 64, 48, BitDepth::Eight);
+}
+
+#[test]
+fn cross_decode_apcs_progressive_perceptual_8bit() {
+    cross_decode_progressive_422_perceptual(Profile::Lt, 64, 48, BitDepth::Eight);
+}
+
+#[test]
+fn cross_decode_apcn_progressive_perceptual_8bit() {
+    cross_decode_progressive_422_perceptual(Profile::Standard, 64, 48, BitDepth::Eight);
+}
+
+#[test]
+fn cross_decode_apch_progressive_perceptual_8bit() {
+    cross_decode_progressive_422_perceptual(Profile::Hq, 64, 48, BitDepth::Eight);
+}
+
+// 10-bit progressive 4:2:2 perceptual case — exercises the §7.5.1 b=10
+// level shift through `encode_frame_with_qmats` on the deepest 4:2:2
+// path. The 12-bit case would also work but ffmpeg's 4:2:2 decode is
+// 10-bit internally so the compare depth saturates at 10-bit; the
+// 8/10-bit pair is sufficient to validate the level-shift × loaded-qmat
+// interaction without redundant runs.
+#[test]
+fn cross_decode_apch_progressive_perceptual_10bit() {
+    cross_decode_progressive_422_perceptual(Profile::Hq, 64, 48, BitDepth::Ten);
+}
+
+// 4:4:4 perceptual cross-decode — one test per 4:4:4 profile (4444 and
+// 4444 XQ). The XQ case in particular exercises the `default_quant_index
+// = 1 → blend 1/8` corner where the blended matrix sits closest to flat
+// yet is still non-default; the `frame_header_size == 148` assertion in
+// the driver guards against the silent-no-op failure mode covered by
+// `perceptual_for_profile_not_default_for_any_profile` in `src/quant.rs`.
+#[test]
+fn cross_decode_ap4h_progressive_perceptual_8bit() {
+    cross_decode_progressive_444_perceptual(Profile::Prores4444, 64, 48, BitDepth::Eight);
+}
+
+#[test]
+fn cross_decode_ap4x_progressive_perceptual_8bit() {
+    cross_decode_progressive_444_perceptual(Profile::Prores4444Xq, 64, 48, BitDepth::Eight);
+}
+
+// 12-bit 4:4:4 perceptual — ffmpeg's ap4h/ap4x native depth. Exercises the
+// §7.5.1 b=12 level shift through the loaded-qmat path on the 4:4:4 grid.
+#[test]
+fn cross_decode_ap4h_progressive_perceptual_12bit() {
+    cross_decode_progressive_444_perceptual(Profile::Prores4444, 64, 48, BitDepth::Twelve);
 }
