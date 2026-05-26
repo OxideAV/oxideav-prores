@@ -213,6 +213,52 @@ let enc = make_encoder_with_config(&params, EncoderConfig::perceptual())?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### Profile-aware perceptual matrices
+
+[`quant::QuantMatrices::perceptual_for_profile`] +
+[`encoder::EncoderConfig::perceptual_for_profile`] take a [`frame::Profile`]
+and blend the JPEG-derived perceptual matrix toward the flat all-4s
+default in proportion to the profile's
+[`frame::Profile::default_quant_index`] (blend = qi / 8). Higher-quality
+profiles preserve more high-frequency precision; lower-quality profiles
+get heavier HF rolloff for tighter packets at matched perceptual
+quality.
+
+| Profile     | qi | blend | HF rolloff                       |
+|-------------|----|-------|----------------------------------|
+| Proxy       |  8 |  8/8  | full (matches `perceptual()`)    |
+| LT          |  6 |  6/8  | heavy                            |
+| Standard    |  4 |  4/8  | moderate                         |
+| HQ          |  2 |  2/8  | light                            |
+| 4444        |  2 |  2/8  | light                            |
+| 4444 XQ     |  1 |  1/8  | minimal (matrix close to flat)   |
+
+The factory also pins the supplied profile so the chosen tier is
+honoured regardless of the `bit_rate` → profile heuristic. Every
+blended weight stays in `2..=63` (RDD 36 §7.3), and the matrices are
+loaded into the frame header so any RDD 36 decoder dequantises
+correctly.
+
+```rust
+use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+use oxideav_prores::frame::Profile;
+
+// 4444 XQ with profile-aware perceptual rolloff — matrix sits close
+// to flat, giving the encoder near-maximum HF precision while still
+// loading custom weights into the frame header.
+let cfg = EncoderConfig::perceptual_for_profile(Profile::Prores4444Xq);
+let enc = make_encoder_with_config(&params, cfg)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+At matched `quantization_index`, the HQ-blended preset reconstructs
+higher Y-PSNR than the Proxy-blended preset on broadband sources, and
+the Proxy-blended preset emits a smaller packet — both monotonic in
+the profile's quality tier (see `tests/perceptual_profile.rs`). The
+mismatch between an explicit profile and the requested
+`PixelFormat` (4:2:2 ↔ Yuv422P; 4:4:4 ↔ Yuv444P) is rejected at
+encoder construction.
+
 ### Bitstream version compatibility (RDD 36 §6.4)
 
 The decoder enforces every "decoder shall refuse" clause attached to

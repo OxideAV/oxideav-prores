@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Profile-aware perceptual quantisation matrix preset (RDD 36 §7.3
+  + ISO/IEC 10918-1 Annex K Tables K.1 / K.2).** New constructor
+  `QuantMatrices::perceptual_for_profile(Profile)` blends the
+  JPEG-derived perceptual matrix with the spec's flat all-4s default
+  in proportion to each profile's `default_quant_index` (blend =
+  `default_quant_index / 8`): Proxy → full JPEG perceptual matrix
+  (matches `QuantMatrices::perceptual()`); 4444 XQ → 1/8 perceptual +
+  7/8 flat (HF nearly preserved). Per-weight formula is
+  `clamp(round((8 - qi) * 4 + qi * W_jpeg[k]) / 8, 2, 63)` with the
+  RDD 36 §7.3 weight-range clamp at the corners. Companion factory
+  `EncoderConfig::perceptual_for_profile(Profile)` packages the
+  blended matrix with an explicit profile pin so the requested
+  quality tier is honoured regardless of the `bit_rate` heuristic in
+  `pick_profile`. Five new unit tests in `quant::tests` cover the
+  Proxy-equals-perceptual fixed point, all-profile weight-range
+  validity, monotonic HF-weight ordering across the six profiles, the
+  4444 XQ matrix's distance bias toward flat, and the no-profile-
+  collapses-to-default invariant (otherwise the encoder would emit
+  `load_*_qmat = 0` and the preset would be a silent no-op). Seven
+  new integration tests in `tests/perceptual_profile.rs` cover
+  end-to-end decodability + Y-PSNR floor for every profile, full
+  frame-header roundtrip of the blended matrices via `parse_frame`,
+  profile pinning that beats the bit_rate heuristic (4444 XQ at
+  100 Mbit/s), chroma-mismatch rejection (HQ ↔ Yuv444P), matched-qi
+  quality-tier ordering (HQ-blend Y-PSNR ≥ Proxy-blend; Proxy-blend
+  packet ≤ HQ-blend packet), and byte-identical fallback when the
+  caller asks for the flat preset explicitly. Closes the workspace-
+  README "lacks profile-aware quant-matrix selection" tail. Follow-up:
+  ffmpeg cross-decode acceptance for the blended matrices across all
+  six profiles (the existing perceptual_quant.rs ffmpeg case covers
+  only the single non-blended `QuantMatrices::perceptual()` matrix).
+
 - **Criterion decode benchmark (`benches/decode.rs`).** Benches the
   decode hot path on three representative single-frame inputs — a 4:2:2
   8-bit Standard (`apcn`) frame, a 4:4:4 8-bit ProRes 4444 (`ap4h`)

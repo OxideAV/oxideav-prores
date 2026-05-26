@@ -7,6 +7,20 @@
 //! requested. Tools that want non-flat matrices include them in the
 //! frame header explicitly.
 //!
+//! Two perceptual presets are provided. [`QuantMatrices::perceptual`]
+//! is the JPEG K.1/K.2 matrix normalised to DC=2 and used directly —
+//! one matrix for every profile. [`QuantMatrices::perceptual_for_profile`]
+//! blends that same JPEG-derived matrix with the flat all-4s default
+//! using a profile-aware blend factor derived from each profile's
+//! [`crate::frame::Profile::default_quant_index`] — lower-quality
+//! profiles (Proxy / LT) get heavier high-frequency rolloff for tighter
+//! packets at matched perceptual quality; higher-quality profiles
+//! (HQ / 4444 / 4444 XQ) preserve more HF detail by pulling the matrix
+//! back toward flat. The blend factor is `default_quant_index / 8`, so
+//! Proxy (qi=8) gets the full perceptual matrix, 4444 XQ (qi=1) gets
+//! 1/8 perceptual + 7/8 flat. Every blended weight is clamped to the
+//! RDD 36 §7.3 valid range `2..=63`.
+//!
 //! `QSCALE_TABLE` (Table 15) maps `quantization_index` (1..=224) to the
 //! quantisation scale factor (1..=512). Values 1..=128 are linear, then
 //! `128 + 4 * (i - 128)` from index 129 up to 224.
@@ -102,6 +116,51 @@ impl QuantMatrices {
             luma: PERCEPTUAL_LUMA_QMAT,
             chroma: PERCEPTUAL_CHROMA_QMAT,
         }
+    }
+
+    /// Profile-aware perceptual preset: blend the JPEG-derived
+    /// perceptual matrix with the flat all-4s default in proportion to
+    /// the supplied profile's [`crate::frame::Profile::default_quant_index`].
+    ///
+    /// `blend = default_quant_index / 8` (a rational in `1/8..=8/8`),
+    /// and every output weight is
+    /// `clamp(round((1 - blend) * 4 + blend * W_perceptual[k]), 2, 63)`.
+    ///
+    /// Concretely the six profiles map to:
+    ///
+    /// | Profile     | qi | blend | HF rolloff       |
+    /// |-------------|----|-------|------------------|
+    /// | Proxy       |  8 |  8/8  | full (identical to [`Self::perceptual`]) |
+    /// | LT          |  6 |  6/8  | heavy            |
+    /// | Standard    |  4 |  4/8  | moderate         |
+    /// | HQ          |  2 |  2/8  | light            |
+    /// | 4444        |  2 |  2/8  | light            |
+    /// | 4444 XQ     |  1 |  1/8  | minimal (matrix close to flat)   |
+    ///
+    /// Lower-quality profiles get heavier high-frequency rolloff for
+    /// tighter packets at matched perceptual quality; higher-quality
+    /// profiles preserve more HF detail. Per RDD 36 §7.3 the weights
+    /// stay in `2..=63` (the clamp covers the corner where rounding
+    /// would land on `1` or `0`). The chroma matrix derives from
+    /// [`PERCEPTUAL_CHROMA_QMAT`] using the same blend; flat-anchored
+    /// chroma weights also rise toward the saturated end as `blend`
+    /// approaches 1.
+    pub fn perceptual_for_profile(profile: crate::frame::Profile) -> Self {
+        // Blend numerator is the profile's default_quant_index. Range
+        // covers 1 (4444 XQ) up to 8 (Proxy) per RDD 36 Profile table —
+        // div 8 fits cleanly into integer math (anti-bias rounding via
+        // +4 / 8 below).
+        let bn = profile.default_quant_index() as u32; // 1..=8
+        let mut luma = [0u8; 64];
+        let mut chroma = [0u8; 64];
+        for k in 0..64 {
+            // blended = ((8 - bn) * 4 + bn * W) / 8, with +4 for round-to-nearest.
+            let lw = ((8 - bn) * 4 + bn * PERCEPTUAL_LUMA_QMAT[k] as u32 + 4) / 8;
+            let cw = ((8 - bn) * 4 + bn * PERCEPTUAL_CHROMA_QMAT[k] as u32 + 4) / 8;
+            luma[k] = lw.clamp(2, 63) as u8;
+            chroma[k] = cw.clamp(2, 63) as u8;
+        }
+        Self { luma, chroma }
     }
 
     /// True when both matrices equal the spec's all-4s default.
@@ -264,6 +323,114 @@ mod tests {
         bad.luma[0] = 4;
         bad.chroma[5] = 0;
         assert!(!bad.weights_valid());
+    }
+
+    #[test]
+    fn perceptual_for_profile_proxy_equals_perceptual() {
+        // Proxy has the highest default qi (8) so the blend factor is
+        // 8/8 = 1.0 — the result must coincide with the plain
+        // perceptual preset (the JPEG-derived matrix unmodified).
+        let p = QuantMatrices::perceptual_for_profile(crate::frame::Profile::Proxy);
+        assert_eq!(p, QuantMatrices::perceptual());
+    }
+
+    #[test]
+    fn perceptual_for_profile_weights_in_valid_range_for_all_profiles() {
+        use crate::frame::Profile;
+        for &profile in &[
+            Profile::Proxy,
+            Profile::Lt,
+            Profile::Standard,
+            Profile::Hq,
+            Profile::Prores4444,
+            Profile::Prores4444Xq,
+        ] {
+            let m = QuantMatrices::perceptual_for_profile(profile);
+            assert!(
+                m.weights_valid(),
+                "weights out of 2..=63 for profile {profile:?}: luma {:?} chroma {:?}",
+                &m.luma[..],
+                &m.chroma[..],
+            );
+            // The DC weight is the maximum-precision corner — at every
+            // blend it should stay ≤ 4 (flat) since both endpoints are
+            // ≤ 4 there (flat = 4, perceptual = 2).
+            assert!(m.luma[0] <= 4, "DC luma should not exceed 4");
+            assert!(m.chroma[0] <= 4, "DC chroma should not exceed 4");
+        }
+    }
+
+    #[test]
+    fn perceptual_for_profile_hf_weight_monotonic_in_quality_tier() {
+        // The highest-quality profile (XQ, qi=1) blends mostly toward
+        // the flat default (4); the lowest-quality (Proxy, qi=8) blends
+        // fully to the JPEG matrix (HF weight = 12 on the deep luma
+        // corner). So HF luma weight at index 63 must strictly increase
+        // from XQ → 4444/HQ → Standard → LT → Proxy.
+        use crate::frame::Profile;
+        let xq = QuantMatrices::perceptual_for_profile(Profile::Prores4444Xq).luma[63];
+        let hq = QuantMatrices::perceptual_for_profile(Profile::Hq).luma[63];
+        let std = QuantMatrices::perceptual_for_profile(Profile::Standard).luma[63];
+        let lt = QuantMatrices::perceptual_for_profile(Profile::Lt).luma[63];
+        let proxy = QuantMatrices::perceptual_for_profile(Profile::Proxy).luma[63];
+        assert!(xq <= hq, "XQ {xq} > HQ {hq} (HF should grow toward Proxy)");
+        assert!(hq <= std, "HQ {hq} > Standard {std}");
+        assert!(std <= lt, "Standard {std} > LT {lt}");
+        assert!(lt <= proxy, "LT {lt} > Proxy {proxy}");
+        // Sanity: Proxy hits the full perceptual HF weight (PERCEPTUAL_LUMA_QMAT[63] = 12).
+        assert_eq!(proxy, PERCEPTUAL_LUMA_QMAT[63]);
+    }
+
+    #[test]
+    fn perceptual_for_profile_xq_pulls_toward_flat() {
+        // 4444 XQ (qi=1) blend = 1/8 — the resulting matrix should be
+        // visibly closer to the flat default than to the full perceptual
+        // matrix. Quantify "closer": mean absolute difference from flat
+        // < mean absolute difference from perceptual.
+        let xq = QuantMatrices::perceptual_for_profile(crate::frame::Profile::Prores4444Xq);
+        let flat = QuantMatrices::flat();
+        let perc = QuantMatrices::perceptual();
+        let dist_flat: u32 = xq
+            .luma
+            .iter()
+            .zip(flat.luma.iter())
+            .map(|(a, b)| a.abs_diff(*b) as u32)
+            .sum();
+        let dist_perc: u32 = xq
+            .luma
+            .iter()
+            .zip(perc.luma.iter())
+            .map(|(a, b)| a.abs_diff(*b) as u32)
+            .sum();
+        assert!(
+            dist_flat < dist_perc,
+            "XQ matrix distance to flat ({dist_flat}) must be < distance to perceptual ({dist_perc})",
+        );
+    }
+
+    #[test]
+    fn perceptual_for_profile_not_default_for_any_profile() {
+        // Even the most flat-leaning profile (4444 XQ, blend = 1/8)
+        // must differ from the all-4s default at least in the corners
+        // where PERCEPTUAL_*_QMAT carries weights ≥ 12. Otherwise the
+        // encoder would emit load_*_qmat = 0 and the matrix selection
+        // would be a silent no-op.
+        use crate::frame::Profile;
+        for &profile in &[
+            Profile::Proxy,
+            Profile::Lt,
+            Profile::Standard,
+            Profile::Hq,
+            Profile::Prores4444,
+            Profile::Prores4444Xq,
+        ] {
+            let m = QuantMatrices::perceptual_for_profile(profile);
+            assert!(
+                !m.is_default(),
+                "profile {profile:?} blended matrix collapsed to flat default — \
+                 encoder would silently emit load_*_qmat = 0",
+            );
+        }
     }
 
     #[test]

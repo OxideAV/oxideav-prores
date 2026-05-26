@@ -157,6 +157,30 @@ impl EncoderConfig {
         }
     }
 
+    /// Construct a config that emits **profile-aware** perceptual quant
+    /// matrices (see [`QuantMatrices::perceptual_for_profile`]) and pins
+    /// the encoder to the supplied [`Profile`].
+    ///
+    /// Equivalent to
+    /// `EncoderConfig::for_profile(profile).with_quant_matrices(
+    /// QuantMatrices::perceptual_for_profile(profile))`.
+    ///
+    /// The blend factor is `profile.default_quant_index() / 8`:
+    /// Proxy → full JPEG perceptual matrix; 4444 XQ → mostly flat with
+    /// a touch of perceptual rolloff. Higher-quality profiles preserve
+    /// more high-frequency precision than the plain
+    /// [`Self::perceptual`] preset; lower-quality profiles match it.
+    /// Per RDD 36 §7.3 the matrices are loaded into the frame header
+    /// (`load_luma_qmat = load_chroma_qmat = 1`) so any RDD 36 decoder
+    /// dequantises correctly.
+    pub fn perceptual_for_profile(profile: Profile) -> Self {
+        Self {
+            quant_matrices: Some(QuantMatrices::perceptual_for_profile(profile)),
+            profile: Some(profile),
+            ..Self::default()
+        }
+    }
+
     /// Construct a config that pins the encoder to the supplied
     /// [`Profile`]. The override is honoured verbatim (the `bit_rate`
     /// heuristic in [`pick_profile`] is bypassed). All other fields take
