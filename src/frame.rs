@@ -205,6 +205,16 @@ pub fn parse_frame(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
             "prores: frame_size exceeds available buffer",
         ));
     }
+    // RDD 36 §5.1 frame(): `frame_size` is the size of the whole frame
+    // unit INCLUDING the 4-byte size field, the 4-byte 'icpf' magic, the
+    // frame_header() (≥20 bytes per §6.1.1), and ≥1 picture() — so it
+    // must be at least 8. A malformed `frame_size < 8` would otherwise
+    // panic on the `&frame_data[8..]` slice; refuse it cleanly.
+    if (frame_size as usize) < 8 {
+        return Err(Error::invalid(
+            "prores: frame_size below the 8-byte size+magic prefix",
+        ));
+    }
     let frame_data = &data[..frame_size as usize];
     let after_magic = &frame_data[8..];
     let (fh, after_fh) = parse_frame_header(after_magic)?;

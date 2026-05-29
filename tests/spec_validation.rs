@@ -297,3 +297,32 @@ fn encoder_round_trips_v1_compatibility() {
     let (fh, _) = parse_frame_header(&buf_alpha[8..]).unwrap();
     assert_eq!(fh.bitstream_version, 1, "alpha forces v1");
 }
+
+/// `frame_size` is the total size of the frame() unit in bytes,
+/// INCLUDING the 4-byte size field and the 4-byte 'icpf' magic
+/// (RDD 36 §5.1). A malformed bitstream declaring `frame_size < 8`
+/// can't possibly contain the 8-byte size+magic prefix, let alone a
+/// 20-byte frame_header — the parser must refuse it cleanly instead
+/// of panicking on the `&data[..frame_size][8..]` slice. Regression
+/// for the 2026-05-28 fuzz finding at `frame.rs:209`.
+#[test]
+fn rejects_frame_size_below_eight_bytes() {
+    use oxideav_prores::frame::parse_frame;
+    // Each of frame_size = 0..=7 is impossible (less than the size +
+    // 'icpf' prefix itself). Build a buffer that's long enough that we
+    // don't get the "frame truncated" or "frame_size > buf" early
+    // outs — the issue is `frame_size < 8`, not buffer length.
+    for fs in 0u32..=7 {
+        let mut buf = Vec::with_capacity(32);
+        buf.extend_from_slice(&fs.to_be_bytes());
+        buf.extend_from_slice(b"icpf");
+        // 24 trailing bytes so `data.len() >= 8` and `data.len() >= fs`.
+        buf.extend_from_slice(&[0u8; 24]);
+        let err = parse_frame(&buf).expect_err("must reject fs < 8");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("frame_size") || msg.contains("8-byte"),
+            "fs={fs}: error mentions frame_size or 8-byte prefix: {msg}"
+        );
+    }
+}

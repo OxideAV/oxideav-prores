@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Decoder no longer panics on `frame_size < 8`.** RDD 36 §5.1's
+  `frame_size` field is the total size of the frame() unit
+  **including** the 4-byte size field and the 4-byte 'icpf' magic, so
+  a conforming value is always at least 8. `parse_frame` already
+  refused `frame_size > data.len()` but failed to refuse `frame_size <
+  8`, causing the subsequent `&frame_data[8..]` slice to panic. The
+  2026-05-28 scheduled `cargo-fuzz` run caught this on the
+  `decode_packet` and `decode_packet_with_depth` harnesses. Fixed by
+  adding an explicit `frame_size >= 8` check that returns
+  `Error::invalid("prores: frame_size below the 8-byte size+magic
+  prefix")`. Regression test `rejects_frame_size_below_eight_bytes`
+  in `tests/spec_validation.rs` covers every value `0..=7` for the
+  size field while keeping the buffer large enough to avoid the
+  unrelated truncation early-out.
+
 ### Added
 
 - **DC-only IDCT fast path on the decode hot loop (RDD 36 §7.4).** Two
