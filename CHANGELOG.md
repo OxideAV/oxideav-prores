@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Third `cargo-fuzz` target: `parse_headers`.** Drives independent
+  input slices into all four public RDD-36 header parsers in
+  [`frame`] — [`frame::parse_frame`] (§5.1 outer framing),
+  [`frame::parse_frame_header`] (§6.1.1 frame_header + optional
+  64-byte luma + chroma quant matrices), [`frame::parse_picture_header`]
+  (§6.3 picture_header), and [`frame::parse_slice_header`] (§5.3
+  slice_header, both with-alpha and no-alpha shapes). These entry
+  points are reachable from any caller that bypasses the top-level
+  decode path (e.g. a sample-bytes inspector) and are far cheaper to
+  drive than the full decode chain, so libFuzzer can explore the
+  header arithmetic and quant-matrix loading branches at a higher
+  rate per second than the existing `decode_packet` /
+  `decode_packet_with_depth` harnesses. A 30-second local run
+  reached 186 cov / 240 ft over 11.8 M executions with no panics;
+  the scheduled `.github/workflows/fuzz.yml` 30-minute budget is now
+  split across all three targets. The first byte of the input picks
+  a rotation seed for the slice split, and bit 0 of the second byte
+  picks the `has_alpha` flag for `parse_slice_header`, so libFuzzer
+  can steer mutations into all four parsers in a single iteration.
+
 ### Fixed
 
 - **Decoder no longer panics on `frame_size < 8`.** RDD 36 §5.1's

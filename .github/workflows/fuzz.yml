@@ -9,9 +9,9 @@ name: Fuzz
 # `frame_size` through the slice payloads is attacker-controlled when
 # a third party hands us a .mov / .mxf sample. There is no external
 # library oracle worth pulling in (and the clean-room wall bars the
-# C references anyway), so these are decode-only panic-free harnesses.
-# The 30-minute total budget is split across the two targets
-# (~15 min each) by the org-level reusable workflow.
+# C references anyway), so these are decode/parse-only panic-free
+# harnesses. The 30-minute total budget is split across the three
+# targets (~10 min each) by the org-level reusable workflow.
 
 on:
   schedule:

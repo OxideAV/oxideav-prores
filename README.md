@@ -514,9 +514,9 @@ cargo bench --bench encode -- --warm-up-time 1 --measurement-time 3
 
 ## Fuzzing
 
-A `cargo-fuzz` harness lives under `fuzz/` with two decode-only
-panic-free targets that drive arbitrary attacker-controlled bytes
-through ProRes's public single-shot decode entry points:
+A `cargo-fuzz` harness lives under `fuzz/` with three panic-free
+targets that drive arbitrary attacker-controlled bytes through
+ProRes's public decode entry points and header parsers:
 
 * `decode_packet` — feeds bytes into [`decoder::decode_packet`]. Covers
   the RDD 36 §5.1 frame() outer framing, §6.1.1 frame_header() (`shall
@@ -533,13 +533,24 @@ through ProRes's public single-shot decode entry points:
   derived from the input's own first byte so libFuzzer steers mutations
   across all six (depth × chroma) combinations the registry route can
   reach.
+* `parse_headers` — feeds independent input slices into all four
+  public header parsers in [`frame`]: [`frame::parse_frame`] (§5.1
+  outer framing), [`frame::parse_frame_header`] (§6.1.1 frame_header
+  + optional 64-byte luma + chroma quant matrices), [`frame::parse_picture_header`]
+  (§6.3 picture_header), and [`frame::parse_slice_header`] (§5.3
+  slice_header, both with-alpha and no-alpha shapes). These parsers
+  are reachable from any application that bypasses the top-level
+  decode path (e.g. a sample-bytes inspector) and are far cheaper
+  to drive than the full decode chain, so libFuzzer can explore the
+  header arithmetic and quant-matrix loading branches at a higher
+  rate per second.
 
-Both harnesses peek at the wire-stream width / height (bytes 16..18 and
-18..20, BE u16) and bail out if `width × height` exceeds 65 536 pixels,
-so libFuzzer doesn't waste cycles on inputs that the upstream OOM cap
-would reject anyway. A daily 30-minute GitHub Actions run is scheduled
-under `.github/workflows/fuzz.yml`, splitting the budget across the two
-targets.
+The two decode-pipeline harnesses peek at the wire-stream width /
+height (bytes 16..18 and 18..20, BE u16) and bail out if `width ×
+height` exceeds 65 536 pixels, so libFuzzer doesn't waste cycles on
+inputs that the upstream OOM cap would reject anyway. A daily 30-minute
+GitHub Actions run is scheduled under `.github/workflows/fuzz.yml`,
+splitting the budget across the three targets.
 
 ```sh
 # nightly toolchain required by libfuzzer-sys

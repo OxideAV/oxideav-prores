@@ -22,10 +22,11 @@ cargo-fuzz = true
 # .mov / .mxf sample, and any one of them can be malformed. There is no
 # external library oracle worth pulling in (and the clean-room wall bars
 # the C references anyway), so this fuzz crate is decode-only: feed
-# arbitrary bytes to the two public single-shot decode entry points and
-# assert every call returns a `Result` rather than panicking, integer-
-# overflowing (debug), indexing out of bounds, or allocating an
-# attacker-controlled plane buffer the size of the declared width × height.
+# arbitrary bytes to the two public single-shot decode entry points AND
+# to the four public header parsers in `frame`, and assert every call
+# returns a `Result` rather than panicking, integer-overflowing (debug),
+# indexing out of bounds, or allocating an attacker-controlled plane
+# buffer the size of the declared width × height.
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -48,6 +49,13 @@ bench = false
 [[bin]]
 name = "decode_packet_with_depth"
 path = "fuzz_targets/decode_packet_with_depth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_headers"
+path = "fuzz_targets/parse_headers.rs"
 test = false
 doc = false
 bench = false
