@@ -40,7 +40,7 @@ use oxideav_core::{
 };
 
 use crate::alpha::{decode_scanned_alpha, AlphaChannelType};
-use crate::dct::idct8x8;
+use crate::dct::{idct8x8, idct8x8_dc_only, is_dc_only};
 use crate::frame::{
     compute_slice_sizes, parse_frame, parse_picture_header, parse_slice_header, ChromaFormat,
     FrameHeader,
@@ -512,7 +512,17 @@ fn decode_picture_into_planes<'a>(
                 for (i, (bx, by)) in LUMA_OFFSETS.iter().enumerate() {
                     let mut blk_f =
                         dequant_to_f32(&blocks[base + i], &fh.luma_qmat, sh.quantization_index);
-                    idct8x8(&mut blk_f);
+                    // RDD 36 §7.4 IDCT specialised by AC content: a block
+                    // whose AC coefficients dequantise to zero (smooth
+                    // areas, common at higher quantisation indices) yields
+                    // a constant `block[0] / 8` plane after the IDCT, so
+                    // we can skip the 64 × 16 multiply-add general loop.
+                    // See `dct::idct8x8_dc_only` for the derivation.
+                    if is_dc_only(&blk_f) {
+                        idct8x8_dc_only(&mut blk_f);
+                    } else {
+                        idct8x8(&mut blk_f);
+                    }
                     paste_block(
                         y_plane,
                         y_byte_stride,
@@ -529,7 +539,11 @@ fn decode_picture_into_planes<'a>(
                         &fh.chroma_qmat,
                         sh.quantization_index,
                     );
-                    idct8x8(&mut blk_f);
+                    if is_dc_only(&blk_f) {
+                        idct8x8_dc_only(&mut blk_f);
+                    } else {
+                        idct8x8(&mut blk_f);
+                    }
                     let (x0, y0) = match chroma {
                         ChromaFormat::Y422 => (mb_x * 8, my * MB_SIDE_PX + by * 8),
                         ChromaFormat::Y444 => {
@@ -544,7 +558,11 @@ fn decode_picture_into_planes<'a>(
                         &fh.chroma_qmat,
                         sh.quantization_index,
                     );
-                    idct8x8(&mut blk_f);
+                    if is_dc_only(&blk_f) {
+                        idct8x8_dc_only(&mut blk_f);
+                    } else {
+                        idct8x8(&mut blk_f);
+                    }
                     let (x0, y0) = match chroma {
                         ChromaFormat::Y422 => (mb_x * 8, my * MB_SIDE_PX + by * 8),
                         ChromaFormat::Y444 => {

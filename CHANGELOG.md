@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DC-only IDCT fast path on the decode hot loop (RDD 36 §7.4).** Two
+  new entry points in [`dct`]: `is_dc_only(&[f32; 64]) -> bool` and
+  `idct8x8_dc_only(&mut [f32; 64])`. When every AC coefficient of a
+  dequantised block is exactly zero — common on smooth areas, especially
+  at higher quantisation indices — the general IDCT's 64 × 16
+  multiply-adds collapse to one multiply + 64 stores: with the cosine
+  basis used by [`dct::idct8x8`] (`t[0][n] = 1/(2·√2)`), a DC-only block
+  reconstructs to a constant plane of `block[0] / 8`. The decoder's
+  three IDCT call sites (luma + Cb + Cr) probe `is_dc_only` on the
+  dequantised f32 block and dispatch to the fast path when it returns
+  true; the slow path is unchanged when any AC coefficient survives
+  quantisation. Bit-equivalence with the general loop is asserted at
+  the unit-test level (`idct_dc_only_matches_general_idct` across eight
+  DC values spanning the level-shifted ±2048 range) and at the
+  fixture-corpus level (every PSNR / mean-abs-error assertion in
+  `tests/docs_corpus.rs` continues to pass on the real Apple- and
+  ffmpeg-encoded streams). No spec deviation: §7.4 specifies the IDCT
+  output, not the algorithm.
+
 - **Daily `cargo-fuzz` decode harness (panic-free).** A new `fuzz/`
   sub-package (its own `[workspace]`, sibling to the umbrella) ships
   two libFuzzer targets that feed arbitrary attacker-controlled bytes
