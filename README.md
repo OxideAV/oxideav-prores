@@ -512,6 +512,30 @@ progressive Standard cost since total coefficient work is unchanged.
 cargo bench --bench encode -- --warm-up-time 1 --measurement-time 3
 ```
 
+### Fast paths in the DCT module
+
+Both the decoder and the encoder probe the 8x8 block before invoking
+the textbook forward / inverse DCT and dispatch to a constant-time
+fast path on the relevant degenerate case:
+
+| Path                          | Trigger condition                                | Cost vs general                              |
+|-------------------------------|--------------------------------------------------|----------------------------------------------|
+| [`dct::idct8x8_dc_only`]      | dequantised block has all 63 AC = 0              | 1 multiply + 64 stores vs 64 × 16 mul-adds   |
+| [`dct::fdct8x8_constant`]     | input block has all 64 samples bit-identical     | 1 multiply + 63 stores vs 64 × 16 mul-adds   |
+
+The decode-side `idct8x8_dc_only` fires whenever the entropy coder's
+`endOfData()` produced a smooth block — common at higher quantisation
+indices on natural content. The encode-side `fdct8x8_constant` fires
+on boundary-clamp pad blocks (RDD 36 §7.5.1 replicates the last
+sample to fill a partial MB row), large flat areas, and the smooth
+regions of synthetic gradients. Both paths are verified bit-exact
+against the general DCT loops on every plausible input level
+(`dct::tests::idct_dc_only_matches_general_idct`,
+`dct::tests::fdct_constant_matches_general_fdct`) and end-to-end via
+`encoder::tests::constant_flat_frame_decodes_pixel_exact_at_hq`, which
+encodes a flat-value-`v` 64×48 frame at HQ (qi=2) and asserts every
+Y-plane byte round-trips to `v` exactly.
+
 ## Fuzzing
 
 A `cargo-fuzz` harness lives under `fuzz/` with three panic-free

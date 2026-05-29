@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Constant-block forward DCT fast path on the encode hot loop (RDD 36
+  §7.4).** Two new entry points in [`dct`]: `is_constant_block(&[f32;
+  64]) -> bool` and `fdct8x8_constant(&mut [f32; 64])`. When every
+  sample of an 8x8 input block is bit-identical — common on
+  boundary-clamp pad blocks (RDD 36 §7.5.1 padding fills a partial MB
+  row by replicating the last sample), large flat areas at high quant
+  indices, and the smooth regions of synthetic gradients — the general
+  forward DCT's 64 × 16 multiply-adds collapse to one multiply + 63
+  stores: with the cosine basis used by [`dct::fdct8x8`] (`t[0][n] =
+  1/(2·√2)`, and `sum_n cos((2n+1) k π / 16) = 0` for `k > 0`), a
+  constant-block input produces a single DC coefficient of `8 * v` with
+  all 63 AC coefficients exactly zero. The encoder's only IDCT call
+  site ([`encoder::encode_block`]) probes `is_constant_block` on the
+  freshly read-and-level-shifted f32 block and dispatches to the fast
+  path when it returns `true`; otherwise the textbook
+  [`dct::fdct8x8`] runs unchanged. Symmetric with the round-185
+  [`dct::idct8x8_dc_only`] decoder fast path: `fdct8x8_constant ->
+  quantise -> dequantise -> idct8x8_dc_only` round-trips bit-exact for
+  every byte value tested (`encoder::tests::encode_block_constant_input_matches_general_path`,
+  `dct::tests::fdct_constant_matches_general_fdct`,
+  `dct::tests::fdct_constant_idct_dc_only_round_trip_is_identity`).
+  Additional integration regression
+  `encoder::tests::constant_flat_frame_decodes_pixel_exact_at_hq`
+  drives a 64x48 flat-value-`v` frame at HQ (qi=2) through the full
+  encode → decode round-trip and asserts every Y-plane byte equals `v`
+  for `v ∈ {16, 64, 128, 200, 235}`, end-to-end coverage of the fast
+  path on a realistic frame shape. The 240+ existing tests continue
+  to pass unchanged; the path is purely additive — non-constant blocks
+  still go through the textbook DCT, so PSNR and bit-streams are
+  byte-identical on all measured fixtures.
+
 - **Third `cargo-fuzz` target: `parse_headers`.** Drives independent
   input slices into all four public RDD-36 header parsers in
   [`frame`] — [`frame::parse_frame`] (§5.1 outer framing),

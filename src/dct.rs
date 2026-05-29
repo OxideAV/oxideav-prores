@@ -77,6 +77,66 @@ pub fn idct8x8(block: &mut [f32; 64]) {
     }
 }
 
+/// Specialised forward DCT for the **constant-block** case: every entry of
+/// `block[..]` is exactly the same scalar `v` (already level-shifted by the
+/// caller per RDD 36 §7.5.1). Equivalent to (but faster than) calling
+/// [`fdct8x8`] on the buffer.
+///
+/// **Derivation (from the same cosine basis [`fdct8x8`] uses).** With
+/// `t[k][n] = 0.5 * c_k * cos((2n+1) k π / 16)` and `c_0 = 1/√2`,
+/// the row pass of a constant-block input collapses to
+///
+/// ```text
+///   tmp[y * 8 + k] = sum_n  t[k][n] * v
+///                  = v * sum_n  0.5 * c_k * cos((2n+1) k π / 16)
+/// ```
+///
+/// For `k == 0` every cosine is `1`, so `sum_n = 8 * 0.5 * (1/√2) = 2√2`.
+/// For `k > 0` the eight cosine samples sum to exactly zero (one full
+/// cycle of cos around eight equally-spaced phases), so the entire AC
+/// row of `tmp` is zero. The column pass then produces a single non-zero
+/// entry at `(k, m) = (0, 0)` equal to `v * (2√2)² = 8 * v`. So the
+/// constant-block forward DCT is one DC coefficient of `8 * v`, all 63 AC
+/// coefficients zero.
+///
+/// Caller is responsible for the constant-block check via
+/// [`is_constant_block`] (or an in-place check by the caller). The
+/// function does **not** read `block[1..]`; if those entries differ from
+/// `block[0]` before the call, the result is wrong.
+///
+/// Common hit cases inside the encoder: the right-edge / bottom-edge
+/// boundary-clamp pad blocks (per RDD 36 §7.5.1 the encoder copies the
+/// last sample to fill a partial MB row), large flat areas of natural
+/// content at high quant indices, and synthetic gradients whose smooth
+/// regions reduce to single-value 8x8 tiles.
+pub fn fdct8x8_constant(block: &mut [f32; 64]) {
+    let v = block[0];
+    let dc = v * 8.0;
+    for s in block.iter_mut() {
+        *s = 0.0;
+    }
+    block[0] = dc;
+}
+
+/// Predicate matching the [`fdct8x8_constant`] precondition: every entry
+/// of `block[..]` equals `block[0]` exactly.
+///
+/// The encoder calls this on a freshly read-and-level-shifted 8x8 input
+/// block. The samples come from `read_sample()` which returns f32 values
+/// in the centred range `[-256, 256)`; two samples that came from the
+/// same source byte produce bit-identical f32, so a constant-source
+/// block is detected exactly.
+#[inline]
+pub fn is_constant_block(block: &[f32; 64]) -> bool {
+    let v0 = block[0];
+    for &v in &block[1..] {
+        if v != v0 {
+            return false;
+        }
+    }
+    true
+}
+
 /// Specialised inverse DCT for the **DC-only** case: every entry of
 /// `block[1..]` is zero. Equivalent to (but faster than) calling
 /// [`idct8x8`] on a buffer with a non-zero `block[0]` and 63 zeros.
@@ -198,6 +258,76 @@ mod tests {
         // 800 / 8 = 100.
         for &s in block.iter() {
             assert!((s - 100.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn is_constant_block_detects_uniform_input() {
+        let block = [42.0f32; 64];
+        assert!(is_constant_block(&block));
+
+        let mut diff = [42.0f32; 64];
+        diff[37] = 41.999;
+        assert!(!is_constant_block(&diff), "any differing entry breaks it");
+
+        // Negative zero != positive zero at the bit level but compares
+        // equal as f32; we accept that as a match (DC = 0 either way).
+        let mut signed_zero = [0.0f32; 64];
+        signed_zero[5] = -0.0;
+        assert!(is_constant_block(&signed_zero));
+    }
+
+    #[test]
+    fn fdct_constant_matches_general_fdct() {
+        // Every plausible level-shifted sample value from the read_sample
+        // range `[-256, 256)` plus exact endpoints. The general fdct8x8
+        // and the constant fast path must produce identical buffers to
+        // f32 round-off.
+        for &v in &[-256.0f32, -200.0, -1.0, 0.0, 1.0, 64.0, 128.0, 255.0] {
+            let mut a = [v; 64];
+            let mut b = [v; 64];
+            fdct8x8(&mut a);
+            fdct8x8_constant(&mut b);
+            for i in 0..64 {
+                assert!(
+                    (a[i] - b[i]).abs() < 1e-3,
+                    "v={v}: fdct_constant[{i}] = {} vs fdct[{i}] = {}",
+                    b[i],
+                    a[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fdct_constant_emits_dc_equal_to_eight_v() {
+        let mut block = [12.5f32; 64];
+        fdct8x8_constant(&mut block);
+        assert!(
+            (block[0] - 100.0).abs() < 1e-4,
+            "DC = 8 * 12.5 = 100, got {}",
+            block[0]
+        );
+        for &s in &block[1..] {
+            assert_eq!(s, 0.0, "AC must be exactly 0 after constant fdct");
+        }
+    }
+
+    #[test]
+    fn fdct_constant_idct_dc_only_round_trip_is_identity() {
+        // Constant input -> constant fdct -> DC-only idct -> constant output.
+        // Verifies the two fast paths compose to identity within float
+        // round-off, matching the textbook fdct->idct round-trip.
+        for &v in &[-256.0f32, -1.0, 0.0, 1.0, 100.0, 255.0] {
+            let mut block = [v; 64];
+            fdct8x8_constant(&mut block);
+            idct8x8_dc_only(&mut block);
+            for &s in block.iter() {
+                assert!(
+                    (s - v).abs() < 1e-3,
+                    "round-trip lost the constant: v={v}, got {s}"
+                );
+            }
         }
     }
 }
