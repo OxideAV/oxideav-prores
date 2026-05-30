@@ -2612,3 +2612,250 @@ fn cross_decode_ap4x_progressive_perceptual_8bit() {
 fn cross_decode_ap4h_progressive_perceptual_12bit() {
     cross_decode_progressive_444_perceptual(Profile::Prores4444, 64, 48, BitDepth::Twelve);
 }
+
+// =============================================================================
+// Configurable macroblocks-per-slice cross-decode acceptance (RDD 36 §5.3).
+//
+// Picks every legal `mbs_per_slice` value from the set `{1, 2, 4, 8}` — the
+// full range representable by the picture header's 2-bit
+// `log2_desired_slice_size_in_mb` field. Drives the high-level `Encoder`
+// trait (`make_encoder_with_config(... with_mbs_per_slice(m))` +
+// `send_frame` / `receive_packet`) so we cover the registry-equivalent
+// construction path, not just the free-function encoder path. Closes the
+// r170 follow-up tail noted in `CHANGELOG.md`: the existing
+// `tests/mbs_per_slice.rs` covers self-roundtrip, packet-size monotonicity,
+// and field round-trip through `parse_picture_header`, but ffmpeg
+// cross-decode acceptance was previously limited to the default 8-MB
+// layout (every other test in this file uses the default).
+//
+// The width is fixed at 128 px (= 8 MBs / row at the 16-px macroblock side
+// of RDD 36 §5.3) so every legal `mbs_per_slice` value subdivides the row
+// into a different slice count: 8 → 1 slice/row, 4 → 2, 2 → 4, 1 → 8.
+// A 48-px height (3 MB rows) keeps the encode/decode round-trip cheap
+// while still exercising multi-row slice packing.
+fn cross_decode_progressive_422_mbs_per_slice(
+    profile: Profile,
+    width: u32,
+    height: u32,
+    mbs_per_slice: u8,
+) {
+    if !have_ffmpeg() {
+        eprintln!(
+            "ffmpeg missing — skipping mbs_per_slice cross-decode \
+             (profile={profile:?}, mbs_per_slice={mbs_per_slice})"
+        );
+        return;
+    }
+    assert!(
+        matches!(
+            profile,
+            Profile::Proxy | Profile::Lt | Profile::Standard | Profile::Hq
+        ),
+        "this driver is for the 4:2:2 profiles only"
+    );
+    assert!(
+        matches!(mbs_per_slice, 1 | 2 | 4 | 8),
+        "mbs_per_slice must be 1, 2, 4, or 8 (RDD 36 §5.3)"
+    );
+    let Some(tmp) = tempdir() else {
+        eprintln!("tempdir unavailable — skipping mbs_per_slice cross-decode");
+        return;
+    };
+    let profile_flag: u8 = match profile {
+        Profile::Proxy => 0,
+        Profile::Lt => 1,
+        Profile::Standard => 2,
+        Profile::Hq => 3,
+        _ => unreachable!("non-4:2:2 profile in 4:2:2 driver"),
+    };
+    let pix_fmt = "yuv422p10le";
+    let template_path = tmp.join(format!(
+        "tmpl_mbs_p{profile_flag}_{width}x{height}_m{mbs_per_slice}.mov"
+    ));
+    if !ffmpeg_make_template_mov_422_progressive(
+        profile_flag,
+        width,
+        height,
+        pix_fmt,
+        &template_path,
+    ) {
+        eprintln!(
+            "progressive 4:2:2 template MOV unavailable — skipping \
+             (profile={profile_flag}, mbs_per_slice={mbs_per_slice})"
+        );
+        return;
+    }
+    let template = std::fs::read(&template_path).expect("read template");
+
+    // Build a high-level encoder pinned to the requested profile + slice
+    // size and drive it through `send_frame`/`receive_packet` — the
+    // registry-equivalent path. The 8-bit source covers the mainstream
+    // depth; the encode path is independent of `mbs_per_slice` per
+    // `tests/mbs_per_slice.rs::default_path_byte_identical_to_explicit_eight`,
+    // so a single depth is sufficient to validate that the picture-header
+    // signalling carries the requested value all the way to ffmpeg.
+    let src = synthetic_progressive_422(width, height, BitDepth::Eight);
+    let mut params = CodecParameters::video(CodecId::new("prores"));
+    params.media_type = MediaType::Video;
+    params.width = Some(width);
+    params.height = Some(height);
+    params.pixel_format = Some(PixelFormat::Yuv422P);
+    let cfg = EncoderConfig::default()
+        .with_profile(profile)
+        .with_mbs_per_slice(mbs_per_slice);
+    let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder_with_config");
+    enc.send_frame(&Frame::Video(src.clone()))
+        .expect("send_frame");
+    let pkt = enc.receive_packet().expect("receive_packet");
+
+    // The encoded frame must report progressive 4:2:2 + the requested
+    // `log2_desired_slice_size_in_mb` — proves the `with_mbs_per_slice`
+    // builder threaded through `make_encoder_with_config` →
+    // `ProResEncoder` → `picture_header` per RDD 36 §5.3 / §6.3.
+    let (fh, pictures) = oxideav_prores::frame::parse_frame(&pkt.data).expect("parse our packet");
+    assert_eq!(fh.interlace_mode, 0, "progressive frame interlace_mode");
+    assert_eq!(
+        fh.picture_count(),
+        1,
+        "progressive frame must carry exactly 1 picture"
+    );
+    assert_eq!(
+        fh.alpha_channel_type, 0,
+        "4:2:2 frame must report alpha_channel_type=0"
+    );
+    let (ph, _) =
+        oxideav_prores::frame::parse_picture_header(pictures).expect("parse_picture_header");
+    let expected_log2 = match mbs_per_slice {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        8 => 3,
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        ph.log2_desired_slice_size_in_mb, expected_log2,
+        "picture header must carry log2_desired_slice_size_in_mb={expected_log2} \
+         for mbs_per_slice={mbs_per_slice}"
+    );
+
+    let patched = patch_mov_with_packet(&template, &pkt.data);
+    let patched_path = tmp.join(format!(
+        "pat_mbs_p{profile_flag}_{width}x{height}_m{mbs_per_slice}.mov"
+    ));
+    std::fs::write(&patched_path, &patched).expect("write patched");
+
+    let decoded_path = tmp.join(format!(
+        "dec_mbs_p{profile_flag}_{width}x{height}_m{mbs_per_slice}.yuv"
+    ));
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            patched_path.to_str().unwrap(),
+            "-pix_fmt",
+            pix_fmt,
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            decoded_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode");
+    assert!(
+        status.success(),
+        "ffmpeg failed to decode our send_frame mbs_per_slice packet \
+         (profile={profile_flag}, mbs_per_slice={mbs_per_slice})"
+    );
+    let decoded = std::fs::read(&decoded_path).expect("read decoded");
+    let y_bytes_10 = (width as usize) * (height as usize) * 2;
+    assert!(
+        decoded.len() >= y_bytes_10,
+        "ffmpeg produced {} bytes, expected at least {y_bytes_10} for luma",
+        decoded.len()
+    );
+    let decoded_y = &decoded[..y_bytes_10];
+
+    let src_y_10 = upshift_8_to_10_le(&src.planes[0].data);
+    let psnr = psnr_10bit(&src_y_10, decoded_y);
+    eprintln!(
+        "cross-decode mbs_per_slice (profile={profile_flag}, mbs_per_slice={mbs_per_slice}, \
+         {width}x{height}): packet={} bytes, luma PSNR={psnr:.2} dB",
+        pkt.data.len()
+    );
+    assert!(
+        psnr >= 40.0,
+        "send_frame mbs_per_slice cross-decode PSNR {psnr:.2} dB under 40 dB bar \
+         (profile={profile_flag}, mbs_per_slice={mbs_per_slice})"
+    );
+
+    // Left-half vs right-half luma sum check — `synthetic_progressive_422`
+    // ramps left-dark → right-bright, so a slice-misordering bug (a §5.3
+    // / §6.3 slice-table regression at the new mbs_per_slice value)
+    // would collapse the left/right bias even when the per-slice content
+    // decoded cleanly in isolation.
+    let read_y = |off: usize| -> u64 {
+        u16::from_le_bytes([decoded_y[off * 2], decoded_y[off * 2 + 1]]) as u64
+    };
+    let mut left_sum = 0u64;
+    let mut right_sum = 0u64;
+    let w = width as usize;
+    let half = w / 2;
+    for j in 0..(height as usize) {
+        for i in 0..w {
+            let v = read_y(j * w + i);
+            if i < half {
+                left_sum += v;
+            } else {
+                right_sum += v;
+            }
+        }
+    }
+    assert!(
+        right_sum > left_sum,
+        "mbs_per_slice cross-decode: right-half sum {right_sum} not > left-half sum \
+         {left_sum} (slice-misordering regression at mbs_per_slice={mbs_per_slice}?)"
+    );
+}
+
+// Standard (apcn) at all four legal mbs_per_slice values. Standard is the
+// most-deployed 4:2:2 profile; cover it at every slice count so the
+// signalling round-trip is exercised across the full picture-header range.
+#[test]
+fn cross_decode_apcn_progressive_mbs_per_slice_8() {
+    cross_decode_progressive_422_mbs_per_slice(Profile::Standard, 128, 48, 8);
+}
+
+#[test]
+fn cross_decode_apcn_progressive_mbs_per_slice_4() {
+    cross_decode_progressive_422_mbs_per_slice(Profile::Standard, 128, 48, 4);
+}
+
+#[test]
+fn cross_decode_apcn_progressive_mbs_per_slice_2() {
+    cross_decode_progressive_422_mbs_per_slice(Profile::Standard, 128, 48, 2);
+}
+
+#[test]
+fn cross_decode_apcn_progressive_mbs_per_slice_1() {
+    cross_decode_progressive_422_mbs_per_slice(Profile::Standard, 128, 48, 1);
+}
+
+// HQ (apch) at the two extremes: the default 8-MB layout (= maximum
+// MBs/slice, smallest packet) and the 1-MB layout (= maximum slice count,
+// largest packet) — the corner where slice-table parsing has the most
+// entries to walk. HQ has the lowest profile-default qi (2) of the 4:2:2
+// tier, so it stresses the entropy coder more than apcn at matched
+// content.
+#[test]
+fn cross_decode_apch_progressive_mbs_per_slice_8() {
+    cross_decode_progressive_422_mbs_per_slice(Profile::Hq, 128, 48, 8);
+}
+
+#[test]
+fn cross_decode_apch_progressive_mbs_per_slice_1() {
+    cross_decode_progressive_422_mbs_per_slice(Profile::Hq, 128, 48, 1);
+}

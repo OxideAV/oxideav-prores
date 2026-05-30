@@ -137,6 +137,17 @@ Valid values are `1`, `2`, `4`, `8`; anything else returns
 purely additive. ffmpeg's `prores_ks` exposes the same control
 through `-mbs_per_slice {1,2,4,8}`.
 
+Cross-decode acceptance: bitstreams emitted by
+`make_encoder_with_config(... with_mbs_per_slice(m))` + `send_frame`
+decode through ffmpeg's stock `prores_ks` decoder at 58.8-63.9 dB luma
+PSNR for every legal value (Standard at all four `{1, 2, 4, 8}`,
+HQ at the `{1, 8}` extremes; 128×48). Each cross-decode case
+re-checks `picture_header.log2_desired_slice_size_in_mb == log2(m)`
+to confirm the builder threaded through to the emitted bitstream
+instead of silently defaulting. Packet sizes grow monotonically as
+`mbs_per_slice` shrinks (apcn: 6708 → 7106 bytes from 8 → 1
+MBs/slice; ~6%). See `tests/ffmpeg_cross_decode.rs`.
+
 ### Explicit profile selection
 
 By default the encoder maps `CodecParameters::bit_rate` to one of the

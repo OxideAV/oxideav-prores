@@ -37,6 +37,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ffmpeg cross-decode acceptance for the configurable
+  macroblocks-per-slice knob (RDD 36 §5.3).** Six new tests in
+  `tests/ffmpeg_cross_decode.rs` validate that bitstreams emitted by
+  `make_encoder_with_config(... with_mbs_per_slice(m))` +
+  `send_frame` / `receive_packet` decode cleanly through ffmpeg's stock
+  `prores_ks` decoder at every legal `mbs_per_slice` value from the set
+  `{1, 2, 4, 8}` — the full range representable by the picture header's
+  2-bit `log2_desired_slice_size_in_mb` field. The new driver
+  `cross_decode_progressive_422_mbs_per_slice` mirrors the existing
+  default-layout drivers but drives the high-level `Encoder` trait
+  through `make_encoder_with_config` (registry-equivalent construction
+  path), patches the resulting packet into an ffmpeg-generated
+  progressive 4:2:2 template MOV, decodes it via ffmpeg to raw
+  `yuv422p10le`, and scores luma PSNR. Each case also asserts
+  `interlace_mode == 0`, `picture_count == 1`, `alpha_channel_type == 0`,
+  and `picture_header.log2_desired_slice_size_in_mb == log2(m)` —
+  the last check proves the `with_mbs_per_slice` builder threaded
+  through `make_encoder_with_config` → `ProResEncoder` →
+  `picture_header` instead of silently defaulting to the 8-MB layout.
+  Coverage: Standard (apcn) at every legal value (`{1, 2, 4, 8}`,
+  4 cases) + HQ (apch) at the `{1, 8}` extremes (lowest profile-default
+  qi in the 4:2:2 tier; stresses the entropy coder more than apcn).
+  Fixed at 128×48 (8 MBs / row at the 16-px macroblock side of §5.3)
+  so every legal value subdivides the row into a different slice count:
+  `8 → 1 slice/row, 4 → 2, 2 → 4, 1 → 8`. Measured **58.85-63.93 dB**
+  luma PSNR across all 6 cases, well above the 40 dB acceptance bar.
+  Packet sizes grow monotonically as `mbs_per_slice` shrinks (apcn:
+  6708 → 6777 → 6902 → 7106 bytes from 8 → 4 → 2 → 1 MBs/slice; ~6%
+  total range), matching the per-slice-header amortisation cost. A
+  left-half vs right-half luma-sum check on the decoded plane catches
+  slice-misordering regressions that per-slice PSNR would mask. Closes
+  the r170 follow-up tail: previously the existing `tests/mbs_per_slice.rs`
+  covered self-roundtrip + picture-header field round-trip + packet-size
+  monotonicity, and `tests/ffmpeg_cross_decode.rs` covered cross-decode
+  acceptance only at the default 8-MB layout (every other test in that
+  file uses the default).
+
 - **Constant-block forward DCT fast path on the encode hot loop (RDD 36
   §7.4).** Two new entry points in [`dct`]: `is_constant_block(&[f32;
   64]) -> bool` and `fdct8x8_constant(&mut [f32; 64])`. When every
