@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-prores/compare/v0.0.8...v0.0.9) - 2026-05-29
+
+### Other
+
+- constant-block forward DCT fast path on the encode hot loop (RDD 36 §7.4)
+- 3rd target parse_headers — direct RDD 36 header-parser harness
+- refuse frame_size < 8 to fix fuzz-discovered panic (RDD 36 §5.1)
+- DC-only IDCT fast path on the decode hot loop (RDD 36 §7.4)
+- standalone driver + round-161 baseline (encode/decode/roundtrip/interlaced)
+- cargo-fuzz decode harness (panic-free, 2 targets, daily 30-min)
+- ffmpeg cross-decode acceptance for the profile-aware perceptual quant matrices
+- Profile-aware perceptual quant-matrix preset (RDD 36 §7.3 + JPEG K.1/K.2)
+- Criterion encode hot-path benchmark (6 profiles + 10-bit + interlaced)
+- Criterion decode hot-path benchmark (apcn / ap4h / 10-bit)
+- configurable mbs_per_slice knob (RDD 36 §5.3)
+- ffmpeg cross-decode acceptance for the progressive 4:4:4 (no-alpha) path
+- ffmpeg cross-decode tests for the progressive 4:2:2 encoder
+- per-field PSNR test on a small in-tree interlaced TFF fixture
+- skip notes.md presence check when docs corpus is absent
+- detect ProRes RAW (aprn/aprh) and refuse it cleanly
+- EncoderConfig::with_interlace_mode — interlaced encode via the Encoder trait
+- ffmpeg cross-decode acceptance for the progressive 4444+alpha path
+- interlaced 4444+alpha ffmpeg cross-decode acceptance
+- 10-bit interlaced ffmpeg cross-decode acceptance
+- ffmpeg cross-decode acceptance for the interlaced path
+- enforce RDD 36 §6.4 + §6.1.1 'shall refuse' clauses
+- EncoderConfig::with_profile() — explicit profile override + multi-frame rate-control test
+
 ### Added
 
 - **Constant-block forward DCT fast path on the encode hot loop (RDD 36
