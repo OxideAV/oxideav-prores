@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Decoder-output SHA-256 pin on the two 1920×1080 interlaced
+  fixtures (RDD 36 §5.1 + §6.2 Table 2 + §7.5.3).** Replaces the prior
+  `DecodesCleanly`-only coverage of `pal-1080i50` and `interlaced-tff`
+  with a byte-level pin of the in-tree decoder's Y/Cb/Cr output for
+  frame 0 (`8 294 400` bytes of `yuv422p10le`), so any future
+  regression to the multi-picture frame walker, the field-row
+  deinterleave, the slice walker, or the IDCT path flips the test red
+  instead of silently shifting decode output. Both fixtures must hash
+  to the same value (they share the apcn elementary bitstream wrapped
+  in differing MOV `moov` metadata) — a cross-fixture identity check
+  catches container state leaking into the elementary decoder. The
+  pin is the float-IDCT SHA; each fixture's `expected.yuv.sha256`
+  fixed-point reference SHA is read from the manifest and reported in
+  the test log alongside ours, so the ~1-LSB IDCT divergence
+  permitted by RDD 36 §7.4 stays visible. New test file
+  `tests/interlaced_decode_sha.rs` (4 tests including a FIPS 180-4
+  §B.1/§B.2 self-check of the test-side SHA-256). 247 → 251 tests.
+
 ## [0.0.9](https://github.com/OxideAV/oxideav-prores/compare/v0.0.8...v0.0.9) - 2026-05-29
 
 ### Other

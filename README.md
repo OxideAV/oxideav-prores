@@ -363,6 +363,25 @@ field independently — both fields must clear 40 dB. Measured **78.19 /
 catching picture-order swap and silent second-picture skip that
 whole-frame aggregate PSNR does not.
 
+The two broadcast-scale fixtures —
+`docs/video/prores/fixtures/interlaced-tff/` and
+`docs/video/prores/fixtures/pal-1080i50/`, both 1920×1080 apcn 10-bit
+TFF — are tied down by `tests/interlaced_decode_sha.rs`. That test
+pins a SHA-256 of the decoder's Y/Cb/Cr byte stream for frame 0 (`8 294
+400` bytes of `yuv422p10le`) so any future change to the §5.1
+multi-picture frame walker, the §7.5.3 field-row deinterleave, the
+§5.3 slice walker, or the §7.4 IDCT path flips the test red instead
+of silently shifting decode output. Both fixtures must hash to the
+same value — they share the apcn elementary bitstream wrapped in
+differing MOV `moov` metadata, so a cross-fixture identity check
+catches container state leaking into the elementary decoder. The pin
+is the in-tree float-IDCT SHA; each fixture's `expected.yuv.sha256`
+fixed-point reference SHA is read from the manifest and reported in
+the test log alongside ours, so the ~1-LSB IDCT divergence permitted
+by RDD 36 §7.4 stays visible. A FIPS 180-4 §B.1/§B.2 self-check of
+the test-side SHA-256 guards against typos in the hash code that
+would mask a real decoder regression.
+
 Streams produced by `encode_frame_interlaced` for apcn / apch cross-decode
 through ffmpeg's `prores_ks` decoder at ≥ 64 dB luma PSNR — both 8-bit
 (TFF and BFF, 64×48 and 128×96) and **genuine 10-bit** field-pair
