@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Decoder-output SHA-256 pin on the seven progressive 1080p / 720p
+  corpus fixtures (RDD 36 §5.1 + §5.3 + §7.2 Figure 4 + §7.5.1).**
+  Companion to the existing interlaced SHA pin in
+  `tests/interlaced_decode_sha.rs`: a new `tests/progressive_decode_sha.rs`
+  decodes frame 0 of each progressive corpus fixture that ships an
+  `expected.yuv.sha256` sidecar — `proxy-1280x720` (apco, yuv422p10le),
+  `lt-1280x720` (apcs, yuv422p10le), `sq-1920x1080` (apcn,
+  yuv422p10le, canonical 1020-slice layout), `hq-1920x1080` (apch,
+  yuv422p10le, high-rate quant tier), `4444-1920x1080` (ap4h,
+  yuv444p10le, exercises §7.4 4:4:4 chroma-block doubling),
+  `4444xq-1920x1080` (ap4x, yuv444p10le, version=1 XQ quant range),
+  and `4444-with-alpha` (ap4h with `alpha_channel_type = 2`, 4 output
+  planes via §5.3.3 + §7.1.2). Each test hashes the concatenated
+  Y/Cb/Cr (+A) byte stream and asserts the SHA matches a per-fixture
+  float-IDCT constant — locking down the §5.1 single-picture frame
+  container, §5.3 default 8-MBs-per-slice slice walker, §7.2 Figure
+  4 progressive scan, §7.4 IDCT scaling, and §7.5.1 component →
+  pixel-sample mapping in one test per profile. The reference
+  (fixed-point) SHA is read from each fixture's manifest and reported
+  in the test log alongside ours so the permitted ~1-LSB float vs
+  fixed-point IDCT divergence (RDD 36 §7.4) stays visible without
+  flipping the test red. A FIPS 180-4 §B.1/§B.2 SHA-256 self-check
+  is duplicated inside the binary for the same anti-typo guard the
+  interlaced test uses. 251 → 259 tests (+8: 7 fixture pins + 1
+  SHA self-check). Promotes the prior `DecodesCleanly`-only coverage
+  for these fixtures in `tests/docs_corpus.rs` from "the decoder
+  didn't error" into "the decoder emitted exactly these bytes".
+
 - **Decoder-output SHA-256 pin on the two 1920×1080 interlaced
   fixtures (RDD 36 §5.1 + §6.2 Table 2 + §7.5.3).** Replaces the prior
   `DecodesCleanly`-only coverage of `pal-1080i50` and `interlaced-tff`

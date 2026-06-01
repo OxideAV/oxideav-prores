@@ -382,6 +382,25 @@ by RDD 36 §7.4 stays visible. A FIPS 180-4 §B.1/§B.2 self-check of
 the test-side SHA-256 guards against typos in the hash code that
 would mask a real decoder regression.
 
+The **progressive** path gets the same lockstep treatment via
+`tests/progressive_decode_sha.rs`, covering frame 0 of the seven
+progressive corpus fixtures that ship an `expected.yuv.sha256`
+sidecar — `proxy-1280x720` (apco), `lt-1280x720` (apcs),
+`sq-1920x1080` (apcn), `hq-1920x1080` (apch), `4444-1920x1080`
+(ap4h), `4444xq-1920x1080` (ap4x), and `4444-with-alpha` (ap4h with
+`alpha_channel_type = 2`, 4 output planes via §5.3.3 + §7.1.2). Each
+test decodes frame 0 at the fixture's pinned `(BitDepth, ChromaFormat)`,
+hashes the concatenated Y/Cb/Cr (+A) byte stream, and asserts the SHA
+matches a per-fixture float-IDCT constant — locking down the §5.1
+single-picture frame container, §5.3 default 8-MBs-per-slice slice
+walker, §7.2 Figure 4 progressive scan, §7.4 IDCT scaling, and
+§7.5.1 component → pixel sample mapping in one test per profile. As
+with the interlaced pin, each fixture's reference (fixed-point) SHA
+is reported alongside ours so the permitted ~1-LSB float vs
+fixed-point IDCT divergence stays visible without flipping the test
+red. The SHA-256 self-check is duplicated against FIPS 180-4 §B.1/§B.2
+inside the same binary for the same anti-typo guard.
+
 Streams produced by `encode_frame_interlaced` for apcn / apch cross-decode
 through ffmpeg's `prores_ks` decoder at ≥ 64 dB luma PSNR — both 8-bit
 (TFF and BFF, 64×48 and 128×96) and **genuine 10-bit** field-pair
