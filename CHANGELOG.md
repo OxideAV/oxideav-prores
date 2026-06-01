@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Decoder-output SHA-256 pin on BOTH frames of the small in-tree
+  interlaced 128×128 apcn fixture (RDD 36 §5.1 + §6.2 Table 2 +
+  §7.5.3).** Companion to the existing 1920×1080 interlaced pin in
+  `tests/interlaced_decode_sha.rs` (frame 0 only of `interlaced-tff` /
+  `pal-1080i50`) and to the per-field PSNR test in
+  `tests/docs_corpus.rs::corpus_interlaced_tff_128x128_apcn_per_field_psnr`.
+  The new `tests/interlaced_decode_sha_128x128.rs` decodes both frames
+  of `docs/video/prores/fixtures/interlaced-tff-128x128-apcn/input.mov`
+  as `yuv422p10le` (`65 536` bytes per frame) and pins three separate
+  SHAs: frame 0, frame 1, and the concatenated `frame0 ‖ frame1` byte
+  stream (`131 072` bytes — matches the scope of the fixture's
+  `expected.yuv.sha256` manifest so the reference fixed-point IDCT SHA
+  is read from the manifest and reported alongside ours, keeping the
+  ~1-LSB float vs fixed-point IDCT divergence permitted by §7.4
+  visible). The two per-frame pins MUST differ — the synthetic
+  `testsrc` source's second second differs from the first, so a
+  regression where the §5.1 multi-picture walker silently re-decodes
+  frame 0 twice surfaces here as a SHA collision (asserted by
+  `assert_ne!`). 259 → 263 tests (+4: 3 fixture pins + 1 SHA self-check
+  against FIPS 180-4 §B.1 / §B.2). Promotes the prior PSNR-only
+  coverage of the 128×128 fixture from "the decoded fields' MSE stayed
+  under threshold" into "the decoder emitted exactly these bytes" on
+  both frames, catching a same-PSNR byte shift the field-PSNR check
+  cannot.
+
 - **Decoder-output SHA-256 pin on the seven progressive 1080p / 720p
   corpus fixtures (RDD 36 §5.1 + §5.3 + §7.2 Figure 4 + §7.5.1).**
   Companion to the existing interlaced SHA pin in

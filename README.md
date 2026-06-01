@@ -363,6 +363,22 @@ field independently — both fields must clear 40 dB. Measured **78.19 /
 catching picture-order swap and silent second-picture skip that
 whole-frame aggregate PSNR does not.
 
+The small in-tree 128×128 fixture
+(`docs/video/prores/fixtures/interlaced-tff-128x128-apcn/`) is tied down
+by `tests/interlaced_decode_sha_128x128.rs`. Both frames of the
+2-frame container are pinned by SHA-256 of their decoded `yuv422p10le`
+output (`65 536` bytes per frame, frame 0 and frame 1 hashes assert
+distinct — a regression where the §5.1 walker silently re-decodes
+frame 0 twice would surface as a SHA collision), plus a third pin on
+the concatenated `frame0 ‖ frame1` byte stream (`131 072` bytes —
+matches the scope of the fixture's `expected.yuv.sha256` manifest, so
+the reference fixed-point IDCT SHA is read from the manifest and
+reported alongside ours to keep the ~1-LSB float vs fixed-point IDCT
+divergence permitted by §7.4 visible). Companion to the existing
+per-field PSNR test in `tests/docs_corpus.rs`: PSNR catches a partial
+field-mapping drift but cannot catch a same-PSNR byte shift; the SHA
+pin catches that.
+
 The two broadcast-scale fixtures —
 `docs/video/prores/fixtures/interlaced-tff/` and
 `docs/video/prores/fixtures/pal-1080i50/`, both 1920×1080 apcn 10-bit
