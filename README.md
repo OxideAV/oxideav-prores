@@ -417,6 +417,29 @@ fixed-point IDCT divergence stays visible without flipping the test
 red. The SHA-256 self-check is duplicated against FIPS 180-4 §B.1/§B.2
 inside the same binary for the same anti-typo guard.
 
+The **encoder side** gets the same byte-level lockstep treatment via
+`tests/encoder_output_sha.rs`, which pins a SHA-256 across every
+public encoder free-function entry point: `encode_frame` for all six
+profiles (apco / apcs / apcn / apch / ap4h / ap4x) at their
+`Profile::default_quant_index`, `encode_frame_with_alpha` for ap4h +
+8-bit alpha (exercising §5.3.3 + §7.1.2 `scanned_alpha()` emission at
+the tail of each slice), `encode_frame_interlaced` for apcn TFF and
+BFF (exercising §5.1 two-picture walker + §6.1.1 Table 2
+`interlace_mode` byte + §7.5.3 row-{0,2,…}/{1,3,…} field splitting),
+and `encode_frame_with_qmats` for ap4h with
+`QuantMatrices::perceptual_for_profile` (exercising the 148-byte
+frame_header path where `load_luma_qmat = load_chroma_qmat = 1`). The
+synthetic input is a deterministic 128×64 frame (pure function of
+`(i, j)` + chroma subsampling — no fixture file), so any encoder-side
+drift in DCT, quantisation, slice scan, entropy coder, frame_header /
+picture_header / slice_header byte layout, or the §5.1 frame container
+surfaces as a SHA mismatch. Each pin is followed by a
+`decode_packet_with_depth()` round-trip to catch a SHA-only flipper
+(encoder change that mints different bytes but is internally consistent
+with a matched decoder change), and `assert_ne!` lines guard that
+TFF ≠ BFF and flat ≠ perceptual stay on the wire. Same FIPS 180-4 §B.1
+/ §B.2 self-check runs alongside the pins.
+
 Streams produced by `encode_frame_interlaced` for apcn / apch cross-decode
 through ffmpeg's `prores_ks` decoder at ≥ 64 dB luma PSNR — both 8-bit
 (TFF and BFF, 64×48 and 128×96) and **genuine 10-bit** field-pair
