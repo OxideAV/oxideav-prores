@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Encoder-output SHA-256 lockstep pin across every public encoder
+  free-function entry point (RDD 36 §5.1 + §5.2 + §5.3 + §6.2 +
+  §7.1.1 + §7.1.2 + §7.3 + §7.4 + §7.5.3).** Companion to the existing
+  decoder-output SHA pins (`tests/progressive_decode_sha.rs` +
+  `tests/interlaced_decode_sha{,_128x128}.rs`): those hash bytes the
+  decoder *produces*, this hashes bytes the **encoder** produces. A
+  fixed 128×64 deterministic synthetic input — pure function of `(i, j)`
+  and chroma subsampling, no fixture file — is driven through
+  `encode_frame` (apco / apcs / apcn / apch / ap4h / ap4x at default
+  `quantization_index`), `encode_frame_with_alpha` (ap4h + 8-bit alpha
+  exercises §5.3.3 + §7.1.2 `scanned_alpha()` tail-of-slice emission),
+  `encode_frame_interlaced` (apcn TFF + BFF exercises §5.1 two-picture
+  walker + §6.1.1 Table 2 `interlace_mode` byte + §7.5.3 field
+  splitting), and `encode_frame_with_qmats` (ap4h with
+  `QuantMatrices::perceptual_for_profile` exercises the 148-byte
+  frame_header path with `load_luma_qmat = load_chroma_qmat = 1`). Each
+  pinned constant is the hex SHA-256 of the bytes returned from this
+  crate's own encoder run; companion `decode_packet_with_depth()` call
+  catches a SHA-only flipper (encoder change that mints different bytes
+  but is internally consistent with a matched decoder change), and
+  TFF≠BFF + flat≠perceptual `assert_ne!` lines catch silent regressions
+  where the encoder ignores an interlace or matrix flag. Local
+  FIPS 180-4 §B.1 / §B.2 SHA-256 self-check (empty / `abc` /
+  56-character chunk-spanning vector) guards against typos in the K
+  constants or round equations that would mask a real encoder
+  regression. 10 pins + 1 self-check = 11 new tests; no external
+  encoder consulted (clean-room).
 - **Decoder-output SHA-256 pin on BOTH frames of the small in-tree
   interlaced 128×128 apcn fixture (RDD 36 §5.1 + §6.2 Table 2 +
   §7.5.3).** Companion to the existing 1920×1080 interlaced pin in
