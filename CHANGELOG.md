@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Encoder-output SHA-256 lockstep pin extended onto the 10-bit and
+  12-bit forward level-shift paths (RDD 36 §7.5.1, encoder side).** The
+  existing encoder SHA pins all hashed the `BitDepth::Eight`
+  `read_sample` arm (`v = s * 2 - 256`). The two deeper-bit arms run
+  distinct arithmetic — `v = s / 2 - 256` for 10-bit and
+  `v = s / 8 - 256` for 12-bit — and feed the same DCT / quant /
+  entropy pipeline, but were only validated by cross-decode PSNR / self
+  round-trip, not by a byte-level wire pin. This round adds four pins
+  via `encode_frame_with_depth` against deterministic synthetic 10-bit
+  and 12-bit inputs (pure function of `(i, j)`, packed little-endian
+  u16 inside the legal sample range so the high-bit mask in
+  `read_sample` is exercised): `apcn` at 10-bit + 12-bit (4:2:2 grid,
+  the broadcast canonical interop target — yuv422p10le / yuv422p12le),
+  and `ap4h` at 10-bit + 12-bit (the §7.4 doubled 4:4:4 chroma grid;
+  12-bit is ffmpeg's native ap4h sample depth). Each pin is followed
+  by a `decode_packet_with_depth()` round-trip with bit-depth-aware
+  Y-plane stride check (1 byte/sample at 8-bit vs 2 bytes/sample at
+  10/12-bit per the `LE u16` packing), and an `assert_ne!` against the
+  matching 8-bit / 10-bit pin guards against silent depth-flip
+  regressions (e.g. the 10-bit divisor being applied to a 12-bit input,
+  or `read_sample` accidentally reading only the low byte of a 16-bit
+  sample). Synthetic patterns are deliberately *not* a `s_10 = 4 s_8` /
+  `s_12 = 16 s_8` scaling of the 8-bit pattern, because the §7.5.1
+  level-shift exactly cancels that scaling and would collide the wire
+  bytes across depths; the 10-bit and 12-bit inputs instead use
+  distinct gradient slopes + offsets so every pin pegs a unique byte
+  stream. 4 new tests; no external encoder consulted (clean-room,
+  RDD 36 §7.5.1 only).
 - **Encoder-output SHA-256 lockstep pin across every public encoder
   free-function entry point (RDD 36 §5.1 + §5.2 + §5.3 + §6.2 +
   §7.1.1 + §7.1.2 + §7.3 + §7.4 + §7.5.3).** Companion to the existing

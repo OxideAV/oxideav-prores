@@ -60,7 +60,8 @@ use oxideav_core::VideoFrame;
 use oxideav_prores::alpha::AlphaChannelType;
 use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
 use oxideav_prores::encoder::{
-    encode_frame, encode_frame_interlaced, encode_frame_with_alpha, encode_frame_with_qmats,
+    encode_frame, encode_frame_interlaced, encode_frame_with_alpha, encode_frame_with_depth,
+    encode_frame_with_qmats,
 };
 use oxideav_prores::frame::{ChromaFormat, Profile};
 use oxideav_prores::quant::QuantMatrices;
@@ -288,10 +289,16 @@ fn assert_decodes_cleanly(
     );
     // Round-trip preserves pts.
     assert_eq!(decoded.pts, Some(0), "round-trip lost pts");
-    // First plane stride must match the encoded width.
+    // First plane stride must match the encoded width × bytes-per-sample
+    // (1 byte for 8-bit, 2 bytes for 10-bit / 12-bit LE-packed planes).
+    let bps = match bit_depth {
+        BitDepth::Eight => 1,
+        BitDepth::Ten | BitDepth::Twelve => 2,
+    };
     assert_eq!(
-        decoded.planes[0].stride, W as usize,
-        "round-trip Y stride mismatch"
+        decoded.planes[0].stride,
+        W as usize * bps,
+        "round-trip Y stride mismatch (bit_depth={bit_depth:?}, bps={bps})"
     );
 }
 
@@ -526,3 +533,332 @@ const EXPECTED_APCN_8BIT_QI4_INTERLACED_BFF: &str =
     "4ff781f8c66686e253d123b8f0ef640aecf4d2e9f311afb9d458cd7c6c5f34f3";
 const EXPECTED_AP4H_8BIT_QI2_PERCEPTUAL: &str =
     "6f782398b5c7f1f5cc8ddf008eb71dd1c98f404b960ca862dca18662ece24637";
+
+// ---------------------------------------------------------------------
+// 10-bit and 12-bit synthetic inputs.
+//
+// The 8-bit synthetics above pin the §7.5.1 forward level-shift for
+// `b = 8` (`v = s * 2 - 256`). The deeper-depth `read_sample` branches
+// run their own arithmetic — `v = s / 2 - 256` for 10-bit,
+// `v = s / 8 - 256` for 12-bit — and feed the same DCT/quant/entropy
+// pipeline. Each adds a distinct surface that a SHA pin can lock down:
+// a regression that flipped the 10-bit branch to the 12-bit divisor
+// (or accidentally read only the low byte of a 16-bit sample) would
+// still PSNR-pass the existing cross-decode tests but would surface
+// here as a SHA mismatch.
+//
+// Values are packed little-endian u16 per RDD 36 §7.5.1 expectations
+// (high bits are masked off by `read_sample` so anything above the
+// nominal range is ignored — but we stay inside `0..=1023` / `0..=4095`
+// so the synthetic is deterministic from spec-legal inputs).
+// ---------------------------------------------------------------------
+
+fn put_le16(buf: &mut [u8], idx: usize, v: u16) {
+    let off = idx * 2;
+    buf[off] = (v & 0xFF) as u8;
+    buf[off + 1] = (v >> 8) as u8;
+}
+
+// Note on synthetic value choice: we deliberately do NOT just scale the
+// 8-bit pattern by 4 (10-bit) / 16 (12-bit), because the §7.5.1 forward
+// level-shift exactly cancels that scaling (`s * 2 - 256` at 8-bit and
+// `s / 2 - 256` at 10-bit yield identical centred `v` when `s_10 =
+// 4 * s_8`). The collision would produce byte-identical wire output
+// across depths and defeat the assert_ne pin. Instead we shift the
+// pattern phase + use a different gradient slope per depth so each
+// SHA pin pegs a distinct internal byte stream.
+
+fn synthetic_yuv422p_10bit() -> VideoFrame {
+    let w = W as usize;
+    let h = H as usize;
+    let cw = w / 2;
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; cw * h * 2];
+    let mut cr = vec![0u8; cw * h * 2];
+    for j in 0..h {
+        for i in 0..w {
+            // 10-bit luma pattern in the [64, 940] SMPTE-legal window.
+            // Distinct from the 8-bit pattern (not a 4x scale) so the
+            // post-level-shift value differs.
+            let v = (256i32 + ((i * 7 + j * 11) as i32 % 600)).clamp(64, 940) as u16;
+            put_le16(&mut y, j * w + i, v & 0x03FF);
+        }
+        for i in 0..cw {
+            let cbv = (512i32 + ((i as i32 - cw as i32 / 2).clamp(-72, 72)) * 5) as u16;
+            let crv = (512i32 + ((j as i32 - h as i32 / 2).clamp(-72, 72)) * 5) as u16;
+            put_le16(&mut cb, j * cw + i, cbv & 0x03FF);
+            put_le16(&mut cr, j * cw + i, crv & 0x03FF);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: cr,
+            },
+        ],
+    }
+}
+
+fn synthetic_yuv444p_10bit() -> VideoFrame {
+    let w = W as usize;
+    let h = H as usize;
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; w * h * 2];
+    let mut cr = vec![0u8; w * h * 2];
+    for j in 0..h {
+        for i in 0..w {
+            let yv = (256i32 + ((i * 7 + j * 11) as i32 % 600)).clamp(64, 940) as u16;
+            let cbv = (512i32 + ((i as i32 - w as i32 / 2).clamp(-72, 72)) * 5) as u16;
+            let crv = (512i32 + ((j as i32 - h as i32 / 2).clamp(-72, 72)) * 5) as u16;
+            put_le16(&mut y, j * w + i, yv & 0x03FF);
+            put_le16(&mut cb, j * w + i, cbv & 0x03FF);
+            put_le16(&mut cr, j * w + i, crv & 0x03FF);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cr,
+            },
+        ],
+    }
+}
+
+fn synthetic_yuv422p_12bit() -> VideoFrame {
+    let w = W as usize;
+    let h = H as usize;
+    let cw = w / 2;
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; cw * h * 2];
+    let mut cr = vec![0u8; cw * h * 2];
+    for j in 0..h {
+        for i in 0..w {
+            // 12-bit pattern in the [256, 3840] SMPTE-legal-ish window.
+            // Slope distinct from both the 8-bit and 10-bit patterns.
+            let v = (1024i32 + ((i * 9 + j * 13) as i32 % 2400)).clamp(256, 3840) as u16;
+            put_le16(&mut y, j * w + i, v & 0x0FFF);
+        }
+        for i in 0..cw {
+            let cbv = (2048i32 + ((i as i32 - cw as i32 / 2).clamp(-72, 72)) * 20) as u16;
+            let crv = (2048i32 + ((j as i32 - h as i32 / 2).clamp(-72, 72)) * 20) as u16;
+            put_le16(&mut cb, j * cw + i, cbv & 0x0FFF);
+            put_le16(&mut cr, j * cw + i, crv & 0x0FFF);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: cr,
+            },
+        ],
+    }
+}
+
+fn synthetic_yuv444p_12bit() -> VideoFrame {
+    let w = W as usize;
+    let h = H as usize;
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; w * h * 2];
+    let mut cr = vec![0u8; w * h * 2];
+    for j in 0..h {
+        for i in 0..w {
+            let yv = (1024i32 + ((i * 9 + j * 13) as i32 % 2400)).clamp(256, 3840) as u16;
+            let cbv = (2048i32 + ((i as i32 - w as i32 / 2).clamp(-72, 72)) * 20) as u16;
+            let crv = (2048i32 + ((j as i32 - h as i32 / 2).clamp(-72, 72)) * 20) as u16;
+            put_le16(&mut y, j * w + i, yv & 0x0FFF);
+            put_le16(&mut cb, j * w + i, cbv & 0x0FFF);
+            put_le16(&mut cr, j * w + i, crv & 0x0FFF);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cr,
+            },
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------
+// Encoder SHA pins on the 10-bit and 12-bit forward-level-shift paths
+// (RDD 36 §7.5.1, encoder side).
+//
+// The companion 8-bit pins above lock down the byte-level wire bytes
+// for `b = 8`. These four extend the same lockstep onto the two deeper
+// `read_sample` branches encoded into `BitDepth::Ten` / `Twelve` —
+// pinning at exactly the chroma format / profile pair where each bit
+// depth is canonical:
+//
+// * `apcn` (422 Standard) at 10-bit: the broadcast canonical interop
+//   target for 4:2:2 ProRes (everything Apple ships goes via
+//   yuv422p10le). The §7.5.1 `b = 10` divisor (`s / 2 - 256`) is the
+//   sole arithmetic distinguishing this from the 8-bit pin.
+// * `ap4h` (4444) at 10-bit: same 10-bit level-shift but on the full
+//   4:4:4 chroma grid the §7.4 doubling visits.
+// * `apcn` (422 Standard) at 12-bit: the broadcast 12-bit target for
+//   4:2:2 ProRes (yuv422p12le); §7.5.1 `b = 12` divisor (`s / 8 - 256`).
+// * `ap4h` (4444) at 12-bit: ffmpeg's native ap4h depth — also exposes
+//   the alpha entry's 16-bit-internal alpha resample boundary
+//   indirectly, but the SHA pin here is on the no-alpha 4444 path so
+//   only the §7.5.1 12-bit branch + 4:4:4 chroma walk are exercised.
+//
+// Each test re-decodes its packet through this crate's decoder via
+// `assert_decodes_cleanly` so an encoder change that minted different
+// bytes but is internally consistent with a matched decoder change
+// also flips one of the SHA-only pins or the round-trip's plane-count
+// / stride assertions.
+// ---------------------------------------------------------------------
+
+/// 422 Standard (`apcn`), progressive, 10-bit (yuv422p10le), default qi = 4.
+/// Exercises `read_sample`'s `BitDepth::Ten` arm (RDD 36 §7.5.1
+/// `v = s / 2 - 256`) on the 4:2:2 chroma grid.
+#[test]
+fn encoder_sha_pin_apcn_10bit_default_qi() {
+    let frame = synthetic_yuv422p_10bit();
+    let pkt = encode_frame_with_depth(
+        &frame,
+        W,
+        H,
+        ChromaFormat::Y422,
+        BitDepth::Ten,
+        Profile::Standard,
+        4,
+    )
+    .unwrap();
+    let sha = hex(&sha256(&pkt));
+    assert_eq!(sha, EXPECTED_APCN_10BIT_QI4, "apcn 10-bit qi=4 SHA drift");
+    assert_decodes_cleanly(&pkt, ChromaFormat::Y422, BitDepth::Ten, false);
+    // The 10-bit forward level-shift must produce different wire bytes
+    // from 8-bit at the same profile / qi — `read_sample` divides by 2
+    // instead of multiplying by 2, so any same-DC fast-path collision
+    // would land here.
+    assert_ne!(
+        EXPECTED_APCN_8BIT_QI4, EXPECTED_APCN_10BIT_QI4,
+        "apcn 8-bit and 10-bit SHAs must differ — §7.5.1 level-shift"
+    );
+}
+
+/// 4444 (`ap4h`), progressive, 10-bit (yuv444p10le), default qi = 2.
+/// Same `BitDepth::Ten` level-shift but on the §7.4 4:4:4 doubled
+/// chroma block grid.
+#[test]
+fn encoder_sha_pin_ap4h_10bit_no_alpha() {
+    let frame = synthetic_yuv444p_10bit();
+    let pkt = encode_frame_with_depth(
+        &frame,
+        W,
+        H,
+        ChromaFormat::Y444,
+        BitDepth::Ten,
+        Profile::Prores4444,
+        2,
+    )
+    .unwrap();
+    let sha = hex(&sha256(&pkt));
+    assert_eq!(sha, EXPECTED_AP4H_10BIT_QI2, "ap4h 10-bit qi=2 SHA drift");
+    assert_decodes_cleanly(&pkt, ChromaFormat::Y444, BitDepth::Ten, false);
+    assert_ne!(
+        EXPECTED_AP4H_8BIT_QI2, EXPECTED_AP4H_10BIT_QI2,
+        "ap4h 8-bit and 10-bit SHAs must differ — §7.5.1 level-shift"
+    );
+}
+
+/// 422 Standard (`apcn`), progressive, 12-bit (yuv422p12le), default qi = 4.
+/// Exercises `read_sample`'s `BitDepth::Twelve` arm (RDD 36 §7.5.1
+/// `v = s / 8 - 256`) on the 4:2:2 chroma grid.
+#[test]
+fn encoder_sha_pin_apcn_12bit_default_qi() {
+    let frame = synthetic_yuv422p_12bit();
+    let pkt = encode_frame_with_depth(
+        &frame,
+        W,
+        H,
+        ChromaFormat::Y422,
+        BitDepth::Twelve,
+        Profile::Standard,
+        4,
+    )
+    .unwrap();
+    let sha = hex(&sha256(&pkt));
+    assert_eq!(sha, EXPECTED_APCN_12BIT_QI4, "apcn 12-bit qi=4 SHA drift");
+    assert_decodes_cleanly(&pkt, ChromaFormat::Y422, BitDepth::Twelve, false);
+    assert_ne!(
+        EXPECTED_APCN_10BIT_QI4, EXPECTED_APCN_12BIT_QI4,
+        "apcn 10-bit and 12-bit SHAs must differ — §7.5.1 divisor swap"
+    );
+}
+
+/// 4444 (`ap4h`), progressive, 12-bit (yuv444p12le), default qi = 2.
+/// Same `BitDepth::Twelve` level-shift on the §7.4 4:4:4 doubled
+/// chroma grid. This is ffmpeg's native ap4h sample depth, so the
+/// pin guards the canonical 12-bit interop wire bytes.
+#[test]
+fn encoder_sha_pin_ap4h_12bit_no_alpha() {
+    let frame = synthetic_yuv444p_12bit();
+    let pkt = encode_frame_with_depth(
+        &frame,
+        W,
+        H,
+        ChromaFormat::Y444,
+        BitDepth::Twelve,
+        Profile::Prores4444,
+        2,
+    )
+    .unwrap();
+    let sha = hex(&sha256(&pkt));
+    assert_eq!(sha, EXPECTED_AP4H_12BIT_QI2, "ap4h 12-bit qi=2 SHA drift");
+    assert_decodes_cleanly(&pkt, ChromaFormat::Y444, BitDepth::Twelve, false);
+    assert_ne!(
+        EXPECTED_AP4H_10BIT_QI2, EXPECTED_AP4H_12BIT_QI2,
+        "ap4h 10-bit and 12-bit SHAs must differ — §7.5.1 divisor swap"
+    );
+}
+
+const EXPECTED_APCN_10BIT_QI4: &str =
+    "ca02b92f39098dba5016b36a6f8b312f06796b4834f6f3ef9db143ad1414a6f0";
+const EXPECTED_AP4H_10BIT_QI2: &str =
+    "3ecc5425a1bdab45a46fd3fe3b891dad05b1894dbee1ae70bc1974efda78993f";
+const EXPECTED_APCN_12BIT_QI4: &str =
+    "2a3a595b86266b55af602e990699231c6969ad5ba5fb5125784ae2ad14041bfc";
+const EXPECTED_AP4H_12BIT_QI2: &str =
+    "8e2296ba352a1deeaee9361c43839927f17d9f38508098ee59d2962c39f52f4f";

@@ -440,6 +440,23 @@ with a matched decoder change), and `assert_ne!` lines guard that
 TFF ≠ BFF and flat ≠ perceptual stay on the wire. Same FIPS 180-4 §B.1
 / §B.2 self-check runs alongside the pins.
 
+The encoder SHA-pin coverage **extends onto the deeper-depth
+`read_sample` arms** as well: `encode_frame_with_depth` at
+`BitDepth::Ten` and `BitDepth::Twelve` is pinned for both `apcn`
+(4:2:2 grid, broadcast canonical interop target) and `ap4h` (the
+§7.4 doubled 4:4:4 chroma grid; 12-bit is ffmpeg's native ap4h depth).
+Each pin sources from a deterministic synthetic 10-/12-bit input that
+is *not* a `4x` / `16x` scaling of the 8-bit pattern (since the §7.5.1
+forward level-shift `v = s / 2^(b-9) - 256` exactly cancels that
+scaling and would collide wire bytes across depths) — distinct
+gradient slopes + offsets per depth keep every pin pegged to a unique
+byte stream. `assert_ne!` between the matching 8-bit / 10-bit / 12-bit
+pin pairs catches silent depth-flip regressions (e.g. the 10-bit
+divisor being applied to a 12-bit input, or `read_sample` reading only
+the low byte of a 16-bit sample), and the `decode_packet_with_depth()`
+round-trip's Y-plane stride check is bit-depth-aware (1 byte/sample at
+8-bit vs 2 bytes/sample LE-packed at 10/12-bit).
+
 Streams produced by `encode_frame_interlaced` for apcn / apch cross-decode
 through ffmpeg's `prores_ks` decoder at ≥ 64 dB luma PSNR — both 8-bit
 (TFF and BFF, 64×48 and 128×96) and **genuine 10-bit** field-pair
