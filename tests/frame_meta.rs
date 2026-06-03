@@ -17,7 +17,9 @@ use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, Rational, VideoFrame};
 use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
 use oxideav_prores::frame::{
-    aspect_ratio_from_code, parse_frame, rational_from_frame_rate_code, FrameMeta,
+    alpha_channel_type_from_code, aspect_ratio_from_code, color_primaries_from_code,
+    matrix_coefficients_from_code, parse_frame, rational_from_frame_rate_code, AlphaChannelType,
+    ColorPrimaries, FrameMeta, MatrixCoefficients,
 };
 use oxideav_prores::CODEC_ID_STR;
 
@@ -232,4 +234,89 @@ fn encoder_default_meta_round_trips_as_none_through_decoder_helpers() {
     let (fh, _) = parse_frame(&pkt).expect("parse_frame");
     assert_eq!(rational_from_frame_rate_code(fh.frame_rate_code), None);
     assert_eq!(aspect_ratio_from_code(fh.aspect_ratio_information), None);
+    // Color metadata defaults also reverse to the appropriate
+    // discriminants: `color_primaries`/`matrix_coefficients` carry "0
+    // = unknown" → None, and `alpha_channel_type` carries the named
+    // "0 = no alpha" → Some(None) (the variant, not the outer wrap).
+    assert_eq!(color_primaries_from_code(fh.color_primaries), None);
+    assert_eq!(matrix_coefficients_from_code(fh.matrix_coefficients), None);
+    assert_eq!(
+        alpha_channel_type_from_code(fh.alpha_channel_type),
+        Some(AlphaChannelType::None),
+    );
+}
+
+/// End-to-end through the high-level `Encoder` trait, mirroring
+/// `encoder_explicit_meta_round_trips_through_decoder_helpers` (which
+/// covers Tables 3 + 4) but exercising the §6.1.1 Tables 5, 6, 7
+/// reverse helpers. The encoder is asked for BT.709 primaries +
+/// BT.709 matrix; we parse the emitted bytes back and convert the
+/// parsed u8 codes into named [`ColorPrimaries`] /
+/// [`MatrixCoefficients`] variants. This is the canonical
+/// downstream-pipeline use: a colour-management stage reading a
+/// decoded packet wants the source's gamut + Y'CbCr matrix without
+/// reproducing Tables 5 + 6 itself.
+#[test]
+fn encoder_color_metadata_round_trips_through_decoder_helpers_bt709() {
+    let meta = FrameMeta {
+        aspect_ratio_information: 3,
+        frame_rate_code: 4,
+        color_primaries: 1, // BT.709
+        transfer_characteristic: 1,
+        matrix_coefficients: 1, // BT.709
+    };
+    let pkt = encode_with(
+        64,
+        48,
+        Some(Rational::new(30_000, 1001)),
+        EncoderConfig::default().with_meta(meta),
+    );
+    let (fh, _) = parse_frame(&pkt).expect("parse_frame");
+    assert_eq!(
+        color_primaries_from_code(fh.color_primaries),
+        Some(ColorPrimaries::Bt709),
+    );
+    assert_eq!(
+        matrix_coefficients_from_code(fh.matrix_coefficients),
+        Some(MatrixCoefficients::Bt709),
+    );
+    // BT.709 K_R / K_G / K_B straight off the named variant, no
+    // intermediate Table 6 lookup at the call site.
+    let (k_r, k_g, k_b) = MatrixCoefficients::Bt709.luma_coefficients();
+    assert_eq!((k_r, k_g, k_b), (0.2126, 0.7152, 0.0722));
+}
+
+/// BT.2020 / SMPTE ST 2084 (PQ HDR) profile exercising every named
+/// helper at once — including the BT.2020 NCL matrix's distinct
+/// K-triple. The transfer_characteristic byte (16 = PQ) is checked
+/// as a raw byte: §6.1.1 names the formulae for codes 1 / 16 / 18
+/// inline but doesn't supply a Table that this round's helper sweep
+/// covers, so the field's reverse mapping stays a caller concern.
+#[test]
+fn encoder_color_metadata_round_trips_through_decoder_helpers_bt2020_pq() {
+    let meta = FrameMeta {
+        aspect_ratio_information: 3,
+        frame_rate_code: 8,
+        color_primaries: 9,          // BT.2020
+        transfer_characteristic: 16, // PQ
+        matrix_coefficients: 9,      // BT.2020 NCL
+    };
+    let pkt = encode_with(
+        64,
+        48,
+        Some(Rational::new(60, 1)),
+        EncoderConfig::default().with_meta(meta),
+    );
+    let (fh, _) = parse_frame(&pkt).expect("parse_frame");
+    assert_eq!(
+        color_primaries_from_code(fh.color_primaries),
+        Some(ColorPrimaries::Bt2020),
+    );
+    assert_eq!(
+        matrix_coefficients_from_code(fh.matrix_coefficients),
+        Some(MatrixCoefficients::Bt2020Ncl),
+    );
+    assert_eq!(fh.transfer_characteristic, 16);
+    let (k_r, k_g, k_b) = MatrixCoefficients::Bt2020Ncl.luma_coefficients();
+    assert_eq!((k_r, k_g, k_b), (0.2627, 0.6780, 0.0593));
 }

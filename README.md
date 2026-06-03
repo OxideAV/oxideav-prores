@@ -97,6 +97,25 @@ Table 4 itself. The forward + reverse halves are symmetric: every
 named code round-trips structurally through both helpers (e.g.
 `30000/1001` ⇄ code 4, distinct from `30/1` ⇄ code 5).
 
+The color-metadata bytes get the same treatment via three named
+enums + reverse helpers — [`frame::ColorPrimaries`] +
+[`frame::color_primaries_from_code`] for RDD 36 §6.1.1 Table 5,
+[`frame::MatrixCoefficients`] + [`frame::matrix_coefficients_from_code`]
+for Table 6 (with `luma_coefficients()` returning the K_R / K_G / K_B
+triple in the spec's exact decimals), and [`frame::AlphaChannelType`] +
+[`frame::alpha_channel_type_from_code`] for Table 7 (including a
+`has_alpha()` predicate matching the §5.3 slice parser's
+`alpha_channel_type != 0` guard). A decoded packet's `FrameHeader` now
+surfaces named gamut + matrix + alpha-mode through one cheap helper
+call per field — Bt709 / Bt601_625 / Bt601_525 / Bt2020 / DciP3 /
+P3D65 on the primaries side; Bt709 / Bt601 / Bt2020Ncl on the matrix
+side — and the spec's "unknown / unspecified" codes (0 and 2 for
+Tables 5, 6) cleanly surface as `None` so a colour-management stage
+can distinguish a stream that pins BT.2020 from one that says
+"unknown". `transfer_characteristic` (RDD 36 §6.1.1 names only three
+of the H.273 codes inline — BT.601/709/2020 EOTF, ST 2084 PQ, BT.2100
+HLG) stays exposed as a raw u8 in [`frame::FrameMeta`].
+
 ### Configurable quantisation index (RDD 36 §7.3 / Table 15)
 
 The encoder picks one `quantization_index` per profile by default

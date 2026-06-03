@@ -535,6 +535,164 @@ pub fn aspect_ratio_from_code(code: u8) -> Option<oxideav_core::Rational> {
     }
 }
 
+/// Named values of the RDD 36 §6.1.1 / Table 5 `color_primaries` field.
+///
+/// Each named variant carries the same numeric code value defined by
+/// the spec (whose nonreserved values agree with Table 2 of ITU-T
+/// H.273, as noted in §6.1.1). The reserved / unknown codes are
+/// surfaced as `None` from [`color_primaries_from_code`] rather than
+/// landing on a variant, so a downstream consumer can distinguish "the
+/// stream said unknown" from "the stream specified BT.709".
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ColorPrimaries {
+    /// Code 1 — ITU-R BT.709 primaries (Red 0.640/0.330, Green
+    /// 0.300/0.600, Blue 0.150/0.060, white D65 0.3127/0.3290).
+    Bt709 = 1,
+    /// Code 5 — ITU-R BT.601 625-line primaries (Red 0.640/0.330,
+    /// Green 0.290/0.600, Blue 0.150/0.060, white D65).
+    Bt601_625 = 5,
+    /// Code 6 — ITU-R BT.601 525-line primaries (Red 0.630/0.340,
+    /// Green 0.310/0.595, Blue 0.155/0.070, white D65).
+    Bt601_525 = 6,
+    /// Code 9 — ITU-R BT.2020 primaries (Red 0.708/0.292, Green
+    /// 0.170/0.797, Blue 0.131/0.046, white D65).
+    Bt2020 = 9,
+    /// Code 11 — DCI-P3 primaries with the DCI white point
+    /// (0.314/0.351).
+    DciP3 = 11,
+    /// Code 12 — DCI-P3 primaries with the D65 white point.
+    P3D65 = 12,
+}
+
+impl ColorPrimaries {
+    /// The on-the-wire u8 code for this variant.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Map an RDD 36 §6.1.1 / Table 5 `color_primaries` u8 code to the
+/// chromaticity-set name it identifies. Returns `None` for the
+/// "unknown / unspecified" codes (0 and 2) and every reserved code in
+/// `[3, 4, 7, 8, 10]` + `[13..=255]`.
+///
+/// The named codes are the nonreserved values of Table 5; the spec
+/// explicitly notes that the named code numbers agree with ITU-T
+/// H.273 Table 2.
+pub fn color_primaries_from_code(code: u8) -> Option<ColorPrimaries> {
+    match code {
+        1 => Some(ColorPrimaries::Bt709),
+        5 => Some(ColorPrimaries::Bt601_625),
+        6 => Some(ColorPrimaries::Bt601_525),
+        9 => Some(ColorPrimaries::Bt2020),
+        11 => Some(ColorPrimaries::DciP3),
+        12 => Some(ColorPrimaries::P3D65),
+        // 0 + 2 = unknown/unspecified; 3, 4, 7, 8, 10, 13..=255 = reserved.
+        _ => None,
+    }
+}
+
+/// Named values of the RDD 36 §6.1.1 / Table 6 `matrix_coefficients`
+/// field. The nonreserved codes agree with Table 4 of ITU-T H.273
+/// (noted in §6.1.1). Each variant exposes the K_R / K_G / K_B luma
+/// coefficients via [`MatrixCoefficients::luma_coefficients`] using
+/// the spec's exact decimal values.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MatrixCoefficients {
+    /// Code 1 — ITU-R BT.709 (K_R = 0.2126, K_G = 0.7152, K_B = 0.0722).
+    Bt709 = 1,
+    /// Code 6 — ITU-R BT.601 (K_R = 0.299, K_G = 0.587, K_B = 0.114).
+    Bt601 = 6,
+    /// Code 9 — ITU-R BT.2020 NCL (K_R = 0.2627, K_G = 0.6780, K_B = 0.0593).
+    Bt2020Ncl = 9,
+}
+
+impl MatrixCoefficients {
+    /// The on-the-wire u8 code for this variant.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// `(K_R, K_G, K_B)` triple as written in Table 6, exactly: BT.709
+    /// = (0.2126, 0.7152, 0.0722), BT.601 = (0.299, 0.587, 0.114),
+    /// BT.2020 NCL = (0.2627, 0.6780, 0.0593). The §6.1.1 derivation
+    /// formulas `E'_Y = K_R · E'_R + K_G · E'_G + K_B · E'_B`,
+    /// `E'_Cb = (E'_B − E'_Y) / (2 · (1 − K_B))`,
+    /// `E'_Cr = (E'_R − E'_Y) / (2 · (1 − K_R))` operate on these
+    /// triples; the returned f64 values come straight from Table 6,
+    /// no rounding.
+    pub fn luma_coefficients(self) -> (f64, f64, f64) {
+        match self {
+            Self::Bt709 => (0.2126, 0.7152, 0.0722),
+            Self::Bt601 => (0.299, 0.587, 0.114),
+            Self::Bt2020Ncl => (0.2627, 0.6780, 0.0593),
+        }
+    }
+}
+
+/// Map an RDD 36 §6.1.1 / Table 6 `matrix_coefficients` u8 code to
+/// the named matrix it identifies. Returns `None` for the unknown
+/// codes (0 and 2) and the reserved codes `3..=5`, `7..=8`,
+/// `10..=255`.
+pub fn matrix_coefficients_from_code(code: u8) -> Option<MatrixCoefficients> {
+    match code {
+        1 => Some(MatrixCoefficients::Bt709),
+        6 => Some(MatrixCoefficients::Bt601),
+        9 => Some(MatrixCoefficients::Bt2020Ncl),
+        // 0 + 2 = unknown/unspecified; 3..=5, 7..=8, 10..=255 = reserved.
+        _ => None,
+    }
+}
+
+/// Named values of the RDD 36 §6.1.1 / Table 7 `alpha_channel_type`
+/// field. Only three codes are defined; everything else is reserved.
+///
+/// Decoders use this to decide how to scale the entropy-decoded alpha
+/// values into an output pixel sample (per §7.5.2) — the 8-bit and
+/// 16-bit cases differ in run-length symbol width and per-pixel
+/// storage, but both ride the §7.1.2 + Tables 12-14 entropy coder.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AlphaChannelType {
+    /// Code 0 — no encoded alpha plane is present.
+    None = 0,
+    /// Code 1 — 8-bit integral alpha (one byte/sample on output).
+    Bits8 = 1,
+    /// Code 2 — 16-bit integral alpha (two bytes/sample on output).
+    Bits16 = 2,
+}
+
+impl AlphaChannelType {
+    /// The on-the-wire u8 code for this variant.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// `true` for the named "has alpha" variants (`Bits8` / `Bits16`).
+    /// Mirrors the `alpha_channel_type != 0` guard the §5.3 slice
+    /// parser uses to decide whether to read the trailing
+    /// `scanned_alpha()` block. Provided so a caller can use the
+    /// returned [`AlphaChannelType`] as a boolean predicate without
+    /// switching on every variant.
+    pub fn has_alpha(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// Map an RDD 36 §6.1.1 / Table 7 `alpha_channel_type` u4 code to the
+/// named variant it identifies. Returns `None` for the reserved codes
+/// (`3..=15` per Table 7) — note that callers must mask the low nibble
+/// out of the packed `reserved(4) + alpha_channel_type(4)` byte before
+/// passing it in (`parse_frame_header` already does so).
+pub fn alpha_channel_type_from_code(code: u8) -> Option<AlphaChannelType> {
+    match code {
+        0 => Some(AlphaChannelType::None),
+        1 => Some(AlphaChannelType::Bits8),
+        2 => Some(AlphaChannelType::Bits16),
+        // 3..=15 = reserved per Table 7.
+        _ => None,
+    }
+}
+
 /// Write a complete frame header (frame_size + 'icpf' + frame_header())
 /// with `alpha_channel_type` defaulting to 0 and all metadata fields
 /// zeroed ("unknown"). Forwards to [`write_frame_with_meta`].
@@ -1267,5 +1425,280 @@ mod tests {
         assert_eq!(fh.transfer_characteristic, 0);
         assert_eq!(fh.matrix_coefficients, 0);
         assert_eq!(fh.alpha_channel_type, 2);
+    }
+
+    #[test]
+    fn color_primaries_from_code_named_codes_table_5() {
+        // RDD 36 §6.1.1 Table 5: nonreserved codes 1, 5, 6, 9, 11, 12.
+        assert_eq!(color_primaries_from_code(1), Some(ColorPrimaries::Bt709));
+        assert_eq!(
+            color_primaries_from_code(5),
+            Some(ColorPrimaries::Bt601_625)
+        );
+        assert_eq!(
+            color_primaries_from_code(6),
+            Some(ColorPrimaries::Bt601_525)
+        );
+        assert_eq!(color_primaries_from_code(9), Some(ColorPrimaries::Bt2020));
+        assert_eq!(color_primaries_from_code(11), Some(ColorPrimaries::DciP3));
+        assert_eq!(color_primaries_from_code(12), Some(ColorPrimaries::P3D65));
+    }
+
+    #[test]
+    fn color_primaries_from_code_unknown_and_reserved_are_none() {
+        // Codes 0 and 2 are "Unknown/unspecified" per Table 5; codes 3,
+        // 4, 7, 8, 10, 13..=255 are reserved.
+        assert!(color_primaries_from_code(0).is_none());
+        assert!(color_primaries_from_code(2).is_none());
+        for reserved in [3u8, 4, 7, 8, 10] {
+            assert!(
+                color_primaries_from_code(reserved).is_none(),
+                "code {reserved} is reserved per Table 5"
+            );
+        }
+        for code in 13u16..=255 {
+            assert!(color_primaries_from_code(code as u8).is_none());
+        }
+    }
+
+    #[test]
+    fn color_primaries_code_round_trip() {
+        // Every named variant's `code()` must reverse through
+        // `from_code` to the same variant — guards a typo that
+        // splits the two tables (e.g. swaps Bt2020's 9 with BT.709's
+        // 1 in the match arm).
+        for v in [
+            ColorPrimaries::Bt709,
+            ColorPrimaries::Bt601_625,
+            ColorPrimaries::Bt601_525,
+            ColorPrimaries::Bt2020,
+            ColorPrimaries::DciP3,
+            ColorPrimaries::P3D65,
+        ] {
+            assert_eq!(color_primaries_from_code(v.code()), Some(v));
+        }
+    }
+
+    #[test]
+    fn matrix_coefficients_from_code_named_codes_table_6() {
+        // RDD 36 §6.1.1 Table 6: nonreserved codes 1, 6, 9.
+        assert_eq!(
+            matrix_coefficients_from_code(1),
+            Some(MatrixCoefficients::Bt709)
+        );
+        assert_eq!(
+            matrix_coefficients_from_code(6),
+            Some(MatrixCoefficients::Bt601)
+        );
+        assert_eq!(
+            matrix_coefficients_from_code(9),
+            Some(MatrixCoefficients::Bt2020Ncl)
+        );
+    }
+
+    #[test]
+    fn matrix_coefficients_from_code_unknown_and_reserved_are_none() {
+        // Codes 0 and 2 are "Unknown/unspecified" per Table 6; codes
+        // 3..=5, 7..=8, 10..=255 are reserved.
+        assert!(matrix_coefficients_from_code(0).is_none());
+        assert!(matrix_coefficients_from_code(2).is_none());
+        for reserved in [3u8, 4, 5, 7, 8] {
+            assert!(
+                matrix_coefficients_from_code(reserved).is_none(),
+                "code {reserved} is reserved per Table 6"
+            );
+        }
+        for code in 10u16..=255 {
+            assert!(matrix_coefficients_from_code(code as u8).is_none());
+        }
+    }
+
+    #[test]
+    fn matrix_coefficients_code_round_trip() {
+        for v in [
+            MatrixCoefficients::Bt709,
+            MatrixCoefficients::Bt601,
+            MatrixCoefficients::Bt2020Ncl,
+        ] {
+            assert_eq!(matrix_coefficients_from_code(v.code()), Some(v));
+        }
+    }
+
+    #[test]
+    fn matrix_coefficients_luma_coefficients_match_table_6() {
+        // Spot-check the spec's exact decimals — a typo (e.g. K_G
+        // = 0.7050 instead of 0.7152 for BT.709, dropped from the
+        // §6.1.1 listing) would lose the symbolic precision that
+        // motivated returning f64 instead of constructing the YCbCr
+        // transform here.
+        assert_eq!(
+            MatrixCoefficients::Bt709.luma_coefficients(),
+            (0.2126, 0.7152, 0.0722),
+        );
+        assert_eq!(
+            MatrixCoefficients::Bt601.luma_coefficients(),
+            (0.299, 0.587, 0.114),
+        );
+        assert_eq!(
+            MatrixCoefficients::Bt2020Ncl.luma_coefficients(),
+            (0.2627, 0.6780, 0.0593),
+        );
+        // K_R + K_G + K_B = 1 by definition (the §6.1.1 derivation
+        // forces it; a regression where any single K is bumped would
+        // surface here). Float-tolerance is f64 epsilon scale, not
+        // arbitrary — the spec values are exact decimals.
+        for v in [
+            MatrixCoefficients::Bt709,
+            MatrixCoefficients::Bt601,
+            MatrixCoefficients::Bt2020Ncl,
+        ] {
+            let (k_r, k_g, k_b) = v.luma_coefficients();
+            assert!(
+                (k_r + k_g + k_b - 1.0).abs() < 1e-12,
+                "{v:?}: K_R + K_G + K_B = {} but must = 1",
+                k_r + k_g + k_b,
+            );
+        }
+    }
+
+    #[test]
+    fn alpha_channel_type_from_code_named_codes_table_7() {
+        assert_eq!(
+            alpha_channel_type_from_code(0),
+            Some(AlphaChannelType::None)
+        );
+        assert_eq!(
+            alpha_channel_type_from_code(1),
+            Some(AlphaChannelType::Bits8)
+        );
+        assert_eq!(
+            alpha_channel_type_from_code(2),
+            Some(AlphaChannelType::Bits16)
+        );
+    }
+
+    #[test]
+    fn alpha_channel_type_from_code_reserved_are_none() {
+        // Codes 3..=15 are reserved per Table 7 (the field is u4 so
+        // 15 is the upper bound after masking). Out-of-domain values
+        // are also None.
+        for reserved in 3u8..=15 {
+            assert!(
+                alpha_channel_type_from_code(reserved).is_none(),
+                "code {reserved} is reserved per Table 7"
+            );
+        }
+        assert!(alpha_channel_type_from_code(16).is_none());
+        assert!(alpha_channel_type_from_code(255).is_none());
+    }
+
+    #[test]
+    fn alpha_channel_type_has_alpha_predicate() {
+        assert!(!AlphaChannelType::None.has_alpha());
+        assert!(AlphaChannelType::Bits8.has_alpha());
+        assert!(AlphaChannelType::Bits16.has_alpha());
+    }
+
+    #[test]
+    fn alpha_channel_type_code_round_trip() {
+        for v in [
+            AlphaChannelType::None,
+            AlphaChannelType::Bits8,
+            AlphaChannelType::Bits16,
+        ] {
+            assert_eq!(alpha_channel_type_from_code(v.code()), Some(v));
+        }
+    }
+
+    #[test]
+    fn parsed_frame_header_color_metadata_decodes_to_named_variants() {
+        // End-to-end: write a frame header with a known FrameMeta
+        // (BT.2020 primaries / SMPTE ST 2084 transfer / BT.2020 NCL
+        // matrix), parse it back, and convert the parsed u8 codes
+        // into named enum variants through the new helpers. This is
+        // the canonical downstream-pipeline usage: a decoder reads a
+        // packet and surfaces the source's color metadata to a
+        // colour-management stage without re-implementing Tables 5,
+        // 6, 7 itself.
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let meta = FrameMeta {
+            aspect_ratio_information: 3,
+            frame_rate_code: 8,
+            color_primaries: 9,          // BT.2020
+            transfer_characteristic: 16, // (no helper — see comment below)
+            matrix_coefficients: 9,      // BT.2020 NCL
+        };
+        let mut buf = Vec::new();
+        write_frame_with_meta(
+            &mut buf,
+            0,
+            1920,
+            1080,
+            ChromaFormat::Y422,
+            0,
+            &luma,
+            &chroma,
+            false,
+            false,
+            1, // 8-bit alpha — exercise the alpha_channel_type round-trip too.
+            meta,
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(
+            color_primaries_from_code(fh.color_primaries),
+            Some(ColorPrimaries::Bt2020),
+        );
+        assert_eq!(
+            matrix_coefficients_from_code(fh.matrix_coefficients),
+            Some(MatrixCoefficients::Bt2020Ncl),
+        );
+        assert_eq!(
+            alpha_channel_type_from_code(fh.alpha_channel_type),
+            Some(AlphaChannelType::Bits8),
+        );
+        // `transfer_characteristic` byte made it through verbatim; the
+        // spec carries the formulae for codes 1, 16 (PQ), 18 (HLG)
+        // inline (Table is implicit) — no enum helper here because the
+        // §6.1.1 text only names three of the H.273 transfer codes.
+        assert_eq!(fh.transfer_characteristic, 16);
+    }
+
+    #[test]
+    fn parsed_frame_header_unknown_color_metadata_is_none_through_helpers() {
+        // Symmetric anti-coverage: a packet emitted with zeroed
+        // color metadata must surface as `None` through every
+        // helper. The `alpha_channel_type` helper returns
+        // `Some(AlphaChannelType::None)` (not the outer Option's
+        // `None`) for the 0 code — that one is named, not unknown.
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let mut buf = Vec::new();
+        write_frame_with_meta(
+            &mut buf,
+            0,
+            64,
+            48,
+            ChromaFormat::Y422,
+            0,
+            &luma,
+            &chroma,
+            false,
+            false,
+            0,
+            FrameMeta::default(),
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(color_primaries_from_code(fh.color_primaries), None);
+        assert_eq!(matrix_coefficients_from_code(fh.matrix_coefficients), None);
+        assert_eq!(
+            alpha_channel_type_from_code(fh.alpha_channel_type),
+            Some(AlphaChannelType::None),
+        );
+        assert!(!AlphaChannelType::None.has_alpha());
     }
 }

@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Decoder-side reverse helpers for RDD 36 §6.1.1 Tables 5, 6, and 7
+  (`color_primaries_from_code`, `matrix_coefficients_from_code`,
+  `alpha_channel_type_from_code`).** Companion to the round-227
+  reverse helpers for Tables 3 + 4 — the encoder writes the raw u8
+  color-metadata bytes through `write_frame_with_meta`, the decoder's
+  `parse_frame_header` returns them verbatim, but the named-variant
+  reverse mapping was previously left to the caller. Three new
+  fieldless enums make the mapping cheap at the call site:
+  `ColorPrimaries` (named variants `Bt709` / `Bt601_625` /
+  `Bt601_525` / `Bt2020` / `DciP3` / `P3D65` for nonreserved codes
+  1, 5, 6, 9, 11, 12 of Table 5), `MatrixCoefficients` (`Bt709` /
+  `Bt601` / `Bt2020Ncl` for nonreserved codes 1, 6, 9 of Table 6,
+  plus `luma_coefficients()` returning the K_R / K_G / K_B triple
+  the §6.1.1 derivation `E'_Y = K_R · E'_R + K_G · E'_G + K_B · E'_B`
+  expects, in the spec's exact decimals), and `AlphaChannelType`
+  (`None` / `Bits8` / `Bits16` for codes 0, 1, 2 of Table 7, plus a
+  `has_alpha()` predicate mirroring the §5.3 slice parser's
+  `alpha_channel_type != 0` guard). Reserved + "unknown" codes
+  surface as outer-Option `None` (Tables 5, 6 codes 0 and 2 = unknown;
+  Tables 5, 6, 7 each have their own reserved range) — the
+  discriminant is the wire-level distinction between "the stream said
+  unknown" and "the stream pinned BT.2020". Forward + reverse halves
+  are symmetric for every named code via `code()` round-trip tests
+  (guards a typo that swaps two table arms). 12 unit tests + 2
+  integration tests in `tests/frame_meta.rs` (BT.709 SDR profile +
+  BT.2020 / SMPTE ST 2084 PQ HDR profile, each driving a real packet
+  through the high-level `Encoder` trait, parsing back through
+  `parse_frame`, and recovering named variants via the helpers).
+  `transfer_characteristic` doesn't get an enum because §6.1.1 names
+  the formulae only for codes 1 / 16 / 18 inline (no Table), so the
+  byte stays exposed verbatim on `FrameMeta`. No external library
+  consulted (clean-room, RDD 36 §6.1.1 / Tables 5, 6, 7 only).
+
 - **Decoder-side reverse helpers for RDD 36 §6.2 Tables 3 and 4
   (`rational_from_frame_rate_code`, `aspect_ratio_from_code`).** The
   forward `frame_rate_code_from_rational` (encoder side) has shipped
