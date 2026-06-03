@@ -16,7 +16,9 @@
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, Rational, VideoFrame};
 use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
-use oxideav_prores::frame::{parse_frame, FrameMeta};
+use oxideav_prores::frame::{
+    aspect_ratio_from_code, parse_frame, rational_from_frame_rate_code, FrameMeta,
+};
 use oxideav_prores::CODEC_ID_STR;
 
 fn synth_422(width: u32, height: u32) -> VideoFrame {
@@ -157,4 +159,77 @@ fn frame_rate_code_default_path_byte_compatible_with_legacy() {
     assert_eq!(pkt[8 + 2 + 1 + 1 + 4 + 2 + 2 + 1 + 1], 0);
     assert_eq!(fh.aspect_ratio_information, 0);
     assert_eq!(fh.frame_rate_code, 0);
+}
+
+/// End-to-end: encode through the high-level [`Encoder`] trait with
+/// `CodecParameters::frame_rate` set to a real-world NTSC drop-frame
+/// rate, parse the emitted bytes back through [`parse_frame`], and
+/// recover the original [`oxideav_core::Rational`] via
+/// [`rational_from_frame_rate_code`]. This is the canonical downstream
+/// consumer path: a demuxer hands a ProRes packet to the decoder, and
+/// the pipeline wants to surface the source's frame rate without
+/// having to know RDD 36 §6.2 / Table 4 itself. The forward derivation
+/// already lives in `encode_with`; the reverse closure is the new
+/// surface added this round.
+#[test]
+fn encoder_derived_rate_round_trips_through_decoder_helper() {
+    let pkt = encode_with(
+        64,
+        48,
+        Some(Rational::new(30_000, 1001)),
+        EncoderConfig::default(),
+    );
+    let (fh, _) = parse_frame(&pkt).expect("parse_frame");
+    assert_eq!(fh.frame_rate_code, 4);
+    assert_eq!(
+        rational_from_frame_rate_code(fh.frame_rate_code),
+        Some(Rational::new(30_000, 1001)),
+        "code 4 must reverse to the exact 30000/1001 NTSC fraction",
+    );
+    // aspect_ratio_information was left at 0 (no explicit meta) — that's
+    // "unknown", distinct from "1:1 square" or any reserved code.
+    assert_eq!(aspect_ratio_from_code(fh.aspect_ratio_information), None);
+}
+
+/// Explicit-meta path: an encoder asked for 16:9 + 60 fps must surface
+/// those exact codes through the decoder helpers, even though
+/// `CodecParameters::frame_rate` says something else.
+#[test]
+fn encoder_explicit_meta_round_trips_through_decoder_helpers() {
+    let meta = FrameMeta {
+        aspect_ratio_information: 3, // 16:9 per Table 3
+        frame_rate_code: 8,          // 60 fps per Table 4
+        color_primaries: 9,
+        transfer_characteristic: 16,
+        matrix_coefficients: 9,
+    };
+    let pkt = encode_with(
+        64,
+        48,
+        Some(Rational::new(25, 1)), // would derive code 3 if no explicit
+        EncoderConfig::default().with_meta(meta),
+    );
+    let (fh, _) = parse_frame(&pkt).expect("parse_frame");
+    assert_eq!(
+        rational_from_frame_rate_code(fh.frame_rate_code),
+        Some(Rational::new(60, 1)),
+    );
+    assert_eq!(
+        aspect_ratio_from_code(fh.aspect_ratio_information),
+        Some(Rational::new(16, 9)),
+    );
+}
+
+/// Symmetric anti-coverage: a packet emitted with every meta field
+/// at 0 must surface `None` through both helpers — the Option
+/// discriminant is the bit-for-bit distinction between an unknown
+/// rate and a rate of "code 0" (which doesn't exist). A regression
+/// where `rational_from_frame_rate_code(0)` silently returned
+/// `Some(Rational::new(0, 1))` would flip this assertion red.
+#[test]
+fn encoder_default_meta_round_trips_as_none_through_decoder_helpers() {
+    let pkt = encode_with(64, 48, None, EncoderConfig::default());
+    let (fh, _) = parse_frame(&pkt).expect("parse_frame");
+    assert_eq!(rational_from_frame_rate_code(fh.frame_rate_code), None);
+    assert_eq!(aspect_ratio_from_code(fh.aspect_ratio_information), None);
 }

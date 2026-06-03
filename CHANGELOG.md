@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Decoder-side reverse helpers for RDD 36 §6.2 Tables 3 and 4
+  (`rational_from_frame_rate_code`, `aspect_ratio_from_code`).** The
+  forward `frame_rate_code_from_rational` (encoder side) has shipped
+  since the FrameMeta round; the reverse direction was previously
+  left to the caller. Downstream pipeline code reading a decoded
+  ProRes packet — or any consumer parsing a frame header via
+  `frame::parse_frame` — now resolves the parsed u4 `frame_rate_code`
+  and `aspect_ratio_information` to an `oxideav_core::Rational` in
+  the spec's exact symbolic form (e.g. code 4 → `30000/1001`, not
+  reduced or float-rounded), with `None` for the "unknown" code 0
+  and the reserved code ranges (12..=15 for Table 4, 4..=15 for
+  Table 3). The Option discriminant is the wire-level distinction
+  between "the stream says rate unknown" and "the stream pins 24
+  fps". The forward + reverse halves are symmetric: every named
+  Table 4 code round-trips structurally through both helpers (an
+  `assert_eq!` in
+  `frame::tests::rational_from_frame_rate_code_table_4_round_trip`
+  defends against a typo that splits the two tables). Three new
+  integration tests in `tests/frame_meta.rs` drive a real encoded
+  packet through the high-level `Encoder` trait, parse it back
+  through `parse_frame`, and recover the source `Rational` via the
+  new helpers — covering the derived-rate path (`Rational::new(30_000,
+  1001)` → code 4 → `30000/1001`), the explicit-meta path (16:9 + 60
+  fps), and the default-meta anti-coverage (every meta field 0 must
+  surface as `None`, not `Some(rate)`). 6 unit tests + 3 integration
+  tests; no external library consulted (clean-room, RDD 36 §6.2 /
+  Tables 3 + 4 only).
+
 - **Encoder-output SHA-256 lockstep pin extended onto the 10-bit and
   12-bit forward level-shift paths (RDD 36 §7.5.1, encoder side).** The
   existing encoder SHA pins all hashed the `BitDepth::Eight`

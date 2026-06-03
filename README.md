@@ -83,6 +83,20 @@ The mapping from `Rational` to `frame_rate_code` lives in
 rates (RDD 36 §6.2 Table 4); any other rate yields `0`
 ("unknown"), which RDD 36 decoders treat as a hint only.
 
+The decoder side gets the symmetric reverse via
+[`frame::rational_from_frame_rate_code`] (Table 4) and
+[`frame::aspect_ratio_from_code`] (Table 3), returning the spec's
+exact symbolic [`oxideav_core::Rational`] for every named code and
+`None` for the "unknown" code 0 + the reserved codes. The Option
+discriminant is the wire-level distinction between "the stream
+explicitly says rate unknown" and "the stream pins 24 fps" — a
+downstream pipeline reading a decoded packet (or any consumer
+parsing a frame header with [`frame::parse_frame`]) can forward
+`frame_rate` along an `oxideav_core` graph without re-implementing
+Table 4 itself. The forward + reverse halves are symmetric: every
+named code round-trips structurally through both helpers (e.g.
+`30000/1001` ⇄ code 4, distinct from `30/1` ⇄ code 5).
+
 ### Configurable quantisation index (RDD 36 §7.3 / Table 15)
 
 The encoder picks one `quantization_index` per profile by default

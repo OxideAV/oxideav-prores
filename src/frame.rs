@@ -460,6 +460,81 @@ pub fn frame_rate_code_from_rational(r: oxideav_core::Rational) -> u8 {
     0
 }
 
+/// Map an RDD 36 §6.2 / Table 4 `frame_rate_code` back to the
+/// [`oxideav_core::Rational`] it names. Returns `None` for the
+/// unknown / reserved codes (0 and 12..=15) and for the upper 4
+/// bits that are never meaningful for a u4 field — callers must
+/// strip them with `& 0x0F` before passing in.
+///
+/// This is the inverse of [`frame_rate_code_from_rational`] for
+/// every code that has a defined rate, and is the natural surface
+/// for downstream pipeline code reading a decoded ProRes packet
+/// (the codec carries no frame rate in any external timebase, so
+/// a decoder that wants to forward `frame_rate` along an
+/// `oxideav_core` graph must convert the in-stream u4 itself).
+///
+/// The returned fractions are the spec's exact symbolic forms
+/// (e.g. `30000/1001`, not the reduced or float-rounded value),
+/// so a parsed code 4 round-trips back through
+/// [`frame_rate_code_from_rational`] to 4 without loss.
+///
+/// | code | returned rate              |
+/// |------|----------------------------|
+/// | 0    | `None` (unknown)           |
+/// | 1    | `24000 / 1001` (~23.976)   |
+/// | 2    | `24 / 1`                   |
+/// | 3    | `25 / 1`                   |
+/// | 4    | `30000 / 1001` (~29.97)    |
+/// | 5    | `30 / 1`                   |
+/// | 6    | `50 / 1`                   |
+/// | 7    | `60000 / 1001` (~59.94)    |
+/// | 8    | `60 / 1`                   |
+/// | 9    | `100 / 1`                  |
+/// | 10   | `120000 / 1001` (~119.88)  |
+/// | 11   | `120 / 1`                  |
+/// | 12..=15 | `None` (reserved)       |
+pub fn rational_from_frame_rate_code(code: u8) -> Option<oxideav_core::Rational> {
+    match code {
+        1 => Some(oxideav_core::Rational::new(24_000, 1001)),
+        2 => Some(oxideav_core::Rational::new(24, 1)),
+        3 => Some(oxideav_core::Rational::new(25, 1)),
+        4 => Some(oxideav_core::Rational::new(30_000, 1001)),
+        5 => Some(oxideav_core::Rational::new(30, 1)),
+        6 => Some(oxideav_core::Rational::new(50, 1)),
+        7 => Some(oxideav_core::Rational::new(60_000, 1001)),
+        8 => Some(oxideav_core::Rational::new(60, 1)),
+        9 => Some(oxideav_core::Rational::new(100, 1)),
+        10 => Some(oxideav_core::Rational::new(120_000, 1001)),
+        11 => Some(oxideav_core::Rational::new(120, 1)),
+        // 0 = unknown/unspecified; 12..=15 = reserved per Table 4.
+        _ => None,
+    }
+}
+
+/// Map an RDD 36 §6.2 / Table 3 `aspect_ratio_information` u4 code to
+/// the pixel/image aspect ratio it names, returned as an
+/// [`oxideav_core::Rational`].
+///
+/// Table 3 only defines four codes:
+/// - `0` → unknown / unspecified → `None`
+/// - `1` → square pixels → `Some(1/1)`
+/// - `2` → 4:3 image aspect → `Some(4/3)`
+/// - `3` → 16:9 image aspect → `Some(16/9)`
+/// - `4..=15` → reserved → `None`
+///
+/// The returned fraction is the documented value with no further
+/// normalisation; a code-1 stream therefore decodes to a literal
+/// `1/1` and stays distinct from a `None` (unknown) result.
+pub fn aspect_ratio_from_code(code: u8) -> Option<oxideav_core::Rational> {
+    match code {
+        1 => Some(oxideav_core::Rational::new(1, 1)),
+        2 => Some(oxideav_core::Rational::new(4, 3)),
+        3 => Some(oxideav_core::Rational::new(16, 9)),
+        // 0 = unknown/unspecified; 4..=15 = reserved per Table 3.
+        _ => None,
+    }
+}
+
 /// Write a complete frame header (frame_size + 'icpf' + frame_header())
 /// with `alpha_channel_type` defaulting to 0 and all metadata fields
 /// zeroed ("unknown"). Forwards to [`write_frame_with_meta`].
@@ -1001,6 +1076,165 @@ mod tests {
         assert_eq!(fh.color_primaries, meta.color_primaries);
         assert_eq!(fh.transfer_characteristic, meta.transfer_characteristic);
         assert_eq!(fh.matrix_coefficients, meta.matrix_coefficients);
+    }
+
+    #[test]
+    fn rational_from_frame_rate_code_table_4_round_trip() {
+        use oxideav_core::Rational;
+        // Every Table 4 named code must round-trip through both halves of
+        // the symmetric pair. The fractions are returned in their exact
+        // spec form (e.g. 30000/1001, not 30000/1001 reduced), so a
+        // structural equality survives the forward+reverse pass.
+        let cases: &[(u8, Rational)] = &[
+            (1, Rational::new(24_000, 1001)),
+            (2, Rational::new(24, 1)),
+            (3, Rational::new(25, 1)),
+            (4, Rational::new(30_000, 1001)),
+            (5, Rational::new(30, 1)),
+            (6, Rational::new(50, 1)),
+            (7, Rational::new(60_000, 1001)),
+            (8, Rational::new(60, 1)),
+            (9, Rational::new(100, 1)),
+            (10, Rational::new(120_000, 1001)),
+            (11, Rational::new(120, 1)),
+        ];
+        for &(code, expected) in cases {
+            let got = rational_from_frame_rate_code(code).unwrap_or_else(|| {
+                panic!("code {code} must resolve to Some(_)");
+            });
+            assert_eq!(
+                got, expected,
+                "code {code} must map to {}/{} verbatim",
+                expected.num, expected.den
+            );
+            // Symmetric inverse: forward of the reverse must yield the
+            // same code (defends against a typo that splits the two
+            // tables — the SHA-only-flipper of metadata work).
+            assert_eq!(
+                frame_rate_code_from_rational(got),
+                code,
+                "code {code} must symmetrically reverse",
+            );
+        }
+    }
+
+    #[test]
+    fn rational_from_frame_rate_code_unknown_and_reserved_are_none() {
+        // Code 0 is "unknown/unspecified" per Table 4 — distinct from any
+        // named rate, so it must yield None (callers distinguish
+        // "missing" from "explicit 24 fps" by the Option discriminant).
+        assert!(rational_from_frame_rate_code(0).is_none());
+        // Codes 12..=15 are reserved per Table 4 — also None.
+        for reserved in 12u8..=15 {
+            assert!(
+                rational_from_frame_rate_code(reserved).is_none(),
+                "code {reserved} is reserved and must be None"
+            );
+        }
+        // The function takes a u8 but documents the field as u4 — anything
+        // above 15 is an out-of-domain bit-pattern, also None.
+        assert!(rational_from_frame_rate_code(16).is_none());
+        assert!(rational_from_frame_rate_code(255).is_none());
+    }
+
+    #[test]
+    fn aspect_ratio_from_code_table_3_named_values() {
+        use oxideav_core::Rational;
+        // RDD 36 §6.2 / Table 3.
+        assert_eq!(aspect_ratio_from_code(1), Some(Rational::new(1, 1)));
+        assert_eq!(aspect_ratio_from_code(2), Some(Rational::new(4, 3)));
+        assert_eq!(aspect_ratio_from_code(3), Some(Rational::new(16, 9)));
+    }
+
+    #[test]
+    fn aspect_ratio_from_code_unknown_and_reserved_are_none() {
+        // Code 0 = unknown, codes 4..=15 = reserved per Table 3.
+        assert!(aspect_ratio_from_code(0).is_none());
+        for reserved in 4u8..=15 {
+            assert!(
+                aspect_ratio_from_code(reserved).is_none(),
+                "code {reserved} is reserved and must be None"
+            );
+        }
+        // Out-of-domain (above the u4 range) is also None.
+        assert!(aspect_ratio_from_code(16).is_none());
+        assert!(aspect_ratio_from_code(255).is_none());
+    }
+
+    #[test]
+    fn parsed_frame_header_meta_decodes_to_rational() {
+        use oxideav_core::Rational;
+        // End-to-end: write a frame header with a known FrameMeta
+        // (16:9, 60 fps), parse it back, and convert the parsed u4
+        // codes into Rationals through the new helpers. This is the
+        // canonical downstream-pipeline usage: a decoder reads a packet
+        // and wants to forward `frame_rate` along an oxideav_core graph,
+        // and aspect_ratio for a UI overlay.
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let meta = FrameMeta {
+            aspect_ratio_information: 3, // 16:9
+            frame_rate_code: 8,          // 60 fps
+            color_primaries: 1,
+            transfer_characteristic: 1,
+            matrix_coefficients: 1,
+        };
+        let mut buf = Vec::new();
+        write_frame_with_meta(
+            &mut buf,
+            0,
+            1920,
+            1080,
+            ChromaFormat::Y422,
+            0,
+            &luma,
+            &chroma,
+            false,
+            false,
+            0,
+            meta,
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(
+            rational_from_frame_rate_code(fh.frame_rate_code),
+            Some(Rational::new(60, 1)),
+        );
+        assert_eq!(
+            aspect_ratio_from_code(fh.aspect_ratio_information),
+            Some(Rational::new(16, 9)),
+        );
+    }
+
+    #[test]
+    fn parsed_frame_header_unknown_meta_is_none_through_helpers() {
+        // Symmetric anti-coverage: a packet emitted with zeroed
+        // FrameMeta (the legacy back-compat path) must surface as
+        // None through both helpers — distinguishing a stream that
+        // says "rate unknown" from one that says "rate is 24 fps".
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let mut buf = Vec::new();
+        write_frame_with_meta(
+            &mut buf,
+            0,
+            64,
+            48,
+            ChromaFormat::Y422,
+            0,
+            &luma,
+            &chroma,
+            false,
+            false,
+            0,
+            FrameMeta::default(),
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(rational_from_frame_rate_code(fh.frame_rate_code), None);
+        assert_eq!(aspect_ratio_from_code(fh.aspect_ratio_information), None);
     }
 
     #[test]
