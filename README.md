@@ -40,6 +40,14 @@ The core `PixelFormat` enum does not yet carry `Yuva422P` / `Yuva444P`
 variants, so the pixel-format reporting stays as `Yuv4(2|4)4P*` — the
 caller checks `frame.planes.len() == 4` to detect alpha.
 
+Downstream stages that need the named Table 7 variant rather than the
+raw u4 code call `FrameHeader::alpha_kind()`, which returns
+`Option<AlphaChannelType>` (`None` / `Bits8` / `Bits16` for codes
+0, 1, 2; outer-Option `None` for the reserved range `3..=15`). The
+outer-Option discriminant preserves the wire-level distinction
+between "no alpha is present" (`Some(AlphaChannelType::None)`) and
+"the field carried a reserved code".
+
 The 4444 and 4444 XQ profiles share the same bitstream structure as
 4444 — XQ is selected when the caller requests the highest quality
 tier and produces a larger packet at lower quantisation.

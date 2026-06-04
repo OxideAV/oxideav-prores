@@ -174,6 +174,34 @@ impl FrameHeader {
             2
         }
     }
+
+    /// Typed accessor for the RDD 36 §6.1.1 / Table 7
+    /// `alpha_channel_type` field. Returns the named variant when the
+    /// stream's u4 code is one of the three defined values
+    /// (`0` → [`AlphaChannelType::None`], `1` → [`AlphaChannelType::Bits8`],
+    /// `2` → [`AlphaChannelType::Bits16`]), and `None` for the
+    /// reserved codes `3..=15`.
+    ///
+    /// The raw `alpha_channel_type` field on this struct is the u8 code
+    /// as it appeared on the wire (masked to the low nibble by the
+    /// parser); call this accessor when a downstream stage wants the
+    /// named variant — e.g. to switch on the alpha-plane storage width
+    /// without reproducing Table 7 at every call site. Returning the
+    /// `None` outer-Option for reserved codes preserves the
+    /// wire-level distinction between "no alpha is present" (which is
+    /// `Some(AlphaChannelType::None)`) and "the field carried a
+    /// reserved code that does not correspond to any named alpha
+    /// configuration" (which is the outer `None`).
+    ///
+    /// Per the spec's clause-cross-checks the field is constrained
+    /// further by [`Self::bitstream_version`]: a version-0 stream must
+    /// carry `alpha_channel_type == 0` (§6.4), and `parse_frame_header`
+    /// rejects any version-0 stream that violates that — so a
+    /// `Some(AlphaChannelType::Bits8 | Bits16)` return from this
+    /// accessor implies `bitstream_version == 1`.
+    pub fn alpha_kind(&self) -> Option<AlphaChannelType> {
+        alpha_channel_type_from_code(self.alpha_channel_type)
+    }
 }
 
 /// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
@@ -1700,5 +1728,111 @@ mod tests {
             Some(AlphaChannelType::None),
         );
         assert!(!AlphaChannelType::None.has_alpha());
+    }
+
+    /// Helper for the `alpha_kind()` accessor tests: build a frame
+    /// header with the given `alpha_channel_type` code and the
+    /// chroma format that's spec-compatible with it. Code 0 is legal
+    /// under both ChromaFormat::Y422 (version 0) and Y444 (version 1);
+    /// codes 1 and 2 require Y444 (version 1) because §6.4 forbids
+    /// non-zero alpha under bitstream_version 0.
+    fn build_with_alpha(code: u8, chroma: ChromaFormat) -> Vec<u8> {
+        let luma = [4u8; 64];
+        let cma = [4u8; 64];
+        let mut buf = Vec::new();
+        write_frame_with_alpha(
+            &mut buf, 0, 64, 48, chroma, 0, // progressive
+            &luma, &cma, false, false, code,
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        buf
+    }
+
+    /// `FrameHeader::alpha_kind()` returns the named variant for each
+    /// of the three defined Table 7 codes. The typed accessor is the
+    /// canonical entry point for downstream code that needs to switch
+    /// on alpha-plane storage width without re-deriving Table 7 — it
+    /// folds the `alpha_channel_type_from_code(fh.alpha_channel_type)`
+    /// boilerplate every call site previously needed into a single
+    /// method on `FrameHeader`.
+    #[test]
+    fn alpha_kind_accessor_recognises_all_three_named_codes() {
+        // Code 0 (`None`) — works under both chroma formats.
+        let buf0 = build_with_alpha(0, ChromaFormat::Y422);
+        let (fh0, _) = parse_frame(&buf0).unwrap();
+        assert_eq!(fh0.alpha_kind(), Some(AlphaChannelType::None));
+        assert_eq!(fh0.alpha_channel_type, 0);
+        assert_eq!(fh0.bitstream_version, 0);
+        assert!(!fh0.alpha_kind().unwrap().has_alpha());
+
+        // Code 1 (`Bits8`) — must be Y444 (forces bitstream_version 1).
+        let buf1 = build_with_alpha(1, ChromaFormat::Y444);
+        let (fh1, _) = parse_frame(&buf1).unwrap();
+        assert_eq!(fh1.alpha_kind(), Some(AlphaChannelType::Bits8));
+        assert_eq!(fh1.alpha_channel_type, 1);
+        assert_eq!(fh1.bitstream_version, 1);
+        assert!(fh1.alpha_kind().unwrap().has_alpha());
+
+        // Code 2 (`Bits16`) — must be Y444 (forces bitstream_version 1).
+        let buf2 = build_with_alpha(2, ChromaFormat::Y444);
+        let (fh2, _) = parse_frame(&buf2).unwrap();
+        assert_eq!(fh2.alpha_kind(), Some(AlphaChannelType::Bits16));
+        assert_eq!(fh2.alpha_channel_type, 2);
+        assert_eq!(fh2.bitstream_version, 1);
+        assert!(fh2.alpha_kind().unwrap().has_alpha());
+
+        // Symmetric: every named variant's `code()` round-trips back to
+        // the u8 the accessor read out of the wire.
+        assert_eq!(fh0.alpha_kind().unwrap().code(), fh0.alpha_channel_type);
+        assert_eq!(fh1.alpha_kind().unwrap().code(), fh1.alpha_channel_type);
+        assert_eq!(fh2.alpha_kind().unwrap().code(), fh2.alpha_channel_type);
+    }
+
+    /// Accessor surfaces the outer-Option `None` for reserved Table 7
+    /// codes `3..=15`. The frame-header parser itself never returns
+    /// such a code today (the u4 is read from a 4-bit field, so every
+    /// value 0..=15 is reachable; the parser does not reject 3..=15
+    /// at the frame-header level — only at §6.4 cross-checks for
+    /// version 0). The `FrameHeader` struct is also publicly
+    /// constructible, so a downstream caller that hand-builds one
+    /// with a reserved code in `alpha_channel_type` needs the
+    /// accessor to distinguish "reserved" from "named". We exercise
+    /// that path here directly on the struct rather than via the
+    /// bitstream (the writer rejects > 2 in debug, and parse_frame
+    /// never emits 3..=15 from any well-formed input).
+    #[test]
+    fn alpha_kind_accessor_returns_none_for_reserved_codes() {
+        // Hand-build a FrameHeader with a reserved code so the
+        // accessor's reserved-code branch is reached.
+        let fh_reserved = FrameHeader {
+            frame_size: 0,
+            frame_header_size: 20,
+            bitstream_version: 1,
+            width: 64,
+            height: 48,
+            chroma_format: ChromaFormat::Y444,
+            interlace_mode: 0,
+            aspect_ratio_information: 0,
+            frame_rate_code: 0,
+            color_primaries: 0,
+            transfer_characteristic: 0,
+            matrix_coefficients: 0,
+            alpha_channel_type: 7, // reserved per Table 7
+            luma_qmat: [4u8; 64],
+            chroma_qmat: [4u8; 64],
+        };
+        assert_eq!(fh_reserved.alpha_kind(), None);
+
+        // Boundary checks: every reserved code 3..=15 surfaces as None.
+        for code in 3u8..=15 {
+            let mut fh = fh_reserved.clone();
+            fh.alpha_channel_type = code;
+            assert_eq!(
+                fh.alpha_kind(),
+                None,
+                "reserved code {code} must surface as outer-Option None",
+            );
+        }
     }
 }

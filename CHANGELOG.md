@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed accessor `FrameHeader::alpha_kind()` for the RDD 36 §6.1.1
+  Table 7 `alpha_channel_type` field.** The raw `alpha_channel_type`
+  u8 stays on the struct (wire-level fidelity); the new accessor
+  returns `Option<AlphaChannelType>` so downstream code can switch on
+  the named variant (`None` / `Bits8` / `Bits16`) without re-deriving
+  Table 7 at every call site. Outer-Option `None` for reserved codes
+  `3..=15` preserves the wire-level distinction between "no alpha"
+  (which is `Some(AlphaChannelType::None)`) and "reserved code". Two
+  unit tests in `src/frame.rs`: all three named codes round-trip via
+  `parse_frame` over a writer-emitted header (chroma + bitstream
+  version constraints from §6.4 verified inline); reserved codes
+  `3..=15` surface as outer-Option `None`.
+
 - **Decoder-side reverse helpers for RDD 36 §6.1.1 Tables 5, 6, and 7
   (`color_primaries_from_code`, `matrix_coefficients_from_code`,
   `alpha_channel_type_from_code`).** Companion to the round-227
