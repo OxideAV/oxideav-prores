@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed accessor `FrameHeader::interlace_kind()` for the RDD 36
+  §6.1.1 Table 2 `interlace_mode` field.** New fieldless enum
+  `InterlaceMode` names the three defined u2 codes (`Progressive` = 0,
+  `TopFieldFirst` = 1, `BottomFieldFirst` = 2) with `code()` for the
+  on-the-wire byte and `is_interlaced()` for the `picture_count == 2`
+  predicate. The accessor returns `Option<InterlaceMode>` mirroring
+  the existing `alpha_kind` / color-metadata reverse-helper shape: a
+  successfully-parsed header always lands on `Some(_)` (the parser
+  rejects the reserved code `3` at read time per Table 2), and the
+  `None` arm covers hand-built `FrameHeader` values that bypassed the
+  parser. The standalone helper `interlace_mode_from_code(u8) ->
+  Option<InterlaceMode>` is also exposed for callers consuming a raw
+  u8 outside a parsed header. Three unit tests in `src/frame.rs`: all
+  three named codes round-trip via `parse_frame` over a writer-emitted
+  header (`picture_count()` agreement verified inline); the reverse
+  helper surfaces `None` for code `3` and every byte above the u2
+  width; and the byte-12 reserved encoding round-trips through
+  `parse_frame_header`'s rejection path with the expected
+  `interlace_mode 3` citation.
+
 - **Typed accessor `FrameHeader::alpha_kind()` for the RDD 36 §6.1.1
   Table 7 `alpha_channel_type` field.** The raw `alpha_channel_type`
   u8 stays on the struct (wire-level fidelity); the new accessor

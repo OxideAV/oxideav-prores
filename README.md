@@ -383,6 +383,19 @@ so a registry-built encoder emits interlaced ProRes (and respects the
 mode under two-pass rate control). Value `3` is reserved (Table 2) and
 rejected at encoder construction.
 
+Decoder-side, downstream callers reading the parsed `FrameHeader` can
+switch on the named scan order via the typed accessor
+[`FrameHeader::interlace_kind`] which returns
+`Option<InterlaceMode>` (variants `Progressive` / `TopFieldFirst` /
+`BottomFieldFirst`, with the `is_interlaced()` predicate matching
+`picture_count() == 2`). The raw `interlace_mode: u8` stays on the
+struct for wire-level fidelity; the accessor folds the Table 2 reverse
+mapping into a single call so a pipeline stage handling field-order
+display, deinterleave, or trailing-picture pairing does not have to
+re-derive Table 2 at every call site. The reverse helper
+`frame::interlace_mode_from_code(u8)` is exposed for callers consuming
+a raw byte outside a parsed header.
+
 ```rust
 use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
 

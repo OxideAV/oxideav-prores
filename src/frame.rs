@@ -146,6 +146,70 @@ impl Profile {
     }
 }
 
+/// Named values of the RDD 36 §6.1.1 / Table 2 `interlace_mode` field.
+///
+/// `interlace_mode` is a 2-bit field at the low nibble of byte 12 of the
+/// frame header (alongside `chroma_format`). Only three codes are
+/// defined; code `3` is reserved and `parse_frame_header` refuses it.
+///
+/// The wire-level scan-order semantics come straight from Table 2:
+/// - `0` → progressive frame; a single picture() follows the header.
+/// - `1` → interlaced, top field first; two pictures follow, the first
+///   carries the top field (offset 0 in the source), the second carries
+///   the bottom field (offset 1 / +1 stride).
+/// - `2` → interlaced, bottom field first; two pictures follow, the
+///   first carries the bottom field, the second carries the top field.
+///
+/// Field ordering also gates the `mb_height` calculation in §7: per
+/// `picture()` the macroblock height is `(picture_pixel_height + 15) >> 4`,
+/// where `picture_pixel_height` = `frame_height >> 1` for an interlaced
+/// frame and `= frame_height` for a progressive one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum InterlaceMode {
+    /// Code 0 — progressive frame; one picture() per frame.
+    Progressive = 0,
+    /// Code 1 — interlaced, top field first; the frame carries two
+    /// pictures, the first being the top field.
+    TopFieldFirst = 1,
+    /// Code 2 — interlaced, bottom field first; the frame carries two
+    /// pictures, the first being the bottom field.
+    BottomFieldFirst = 2,
+}
+
+impl InterlaceMode {
+    /// The on-the-wire u8 code for this variant.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// `true` for the two interlaced variants (`TopFieldFirst` /
+    /// `BottomFieldFirst`). The `picture_count()` accessor on
+    /// [`FrameHeader`] uses the same predicate to decide between 1
+    /// and 2 pictures per frame.
+    pub fn is_interlaced(self) -> bool {
+        !matches!(self, Self::Progressive)
+    }
+}
+
+/// Map an RDD 36 §6.1.1 / Table 2 `interlace_mode` u2 code to the named
+/// scan order it identifies. Returns `None` for the reserved code `3`
+/// — note that `parse_frame_header` refuses code `3` outright per the
+/// table's "reserved" entry, so a downstream consumer of a successfully
+/// parsed header will only see `Some(_)` from this helper. Codes above
+/// the u2 field width (`4..=255`) are also `None`; callers that pass a
+/// raw byte must first mask the 2 bits out of the byte-12 packing
+/// (`(b >> 2) & 0x3`) — `parse_frame_header` already does so.
+pub fn interlace_mode_from_code(code: u8) -> Option<InterlaceMode> {
+    match code {
+        0 => Some(InterlaceMode::Progressive),
+        1 => Some(InterlaceMode::TopFieldFirst),
+        2 => Some(InterlaceMode::BottomFieldFirst),
+        // 3 = reserved per Table 2 (`parse_frame_header` rejects on read);
+        // 4..=255 cannot appear in the u2 wire field.
+        _ => None,
+    }
+}
+
 /// Parsed RDD 36 frame header. Fields the rest of the decoder needs.
 #[derive(Clone, Debug)]
 pub struct FrameHeader {
@@ -173,6 +237,31 @@ impl FrameHeader {
         } else {
             2
         }
+    }
+
+    /// Typed accessor for the RDD 36 §6.1.1 / Table 2
+    /// `interlace_mode` field. Returns the named variant when the
+    /// stream's u2 code is one of the three defined values
+    /// (`0` → [`InterlaceMode::Progressive`],
+    ///  `1` → [`InterlaceMode::TopFieldFirst`],
+    ///  `2` → [`InterlaceMode::BottomFieldFirst`]).
+    ///
+    /// The raw `interlace_mode` field on this struct is the u8 code
+    /// as it appeared on the wire (masked to the u2 width by the
+    /// parser). `parse_frame_header` already refuses code `3` per
+    /// Table 2's "reserved" entry, so this accessor always returns
+    /// `Some(_)` for a successfully-parsed header — the `Option`
+    /// shape matches the rest of the §6.1.1 reverse-helper surface
+    /// (`alpha_channel_type_from_code`, `color_primaries_from_code`,
+    /// `matrix_coefficients_from_code`) and lets callers handle a
+    /// constructed-by-hand header that bypassed the parser.
+    ///
+    /// Field count semantics line up with [`Self::picture_count`]:
+    /// a `Progressive` return implies one picture() in the frame;
+    /// the two interlaced variants imply two pictures, with the
+    /// first carrying the named-leading field.
+    pub fn interlace_kind(&self) -> Option<InterlaceMode> {
+        interlace_mode_from_code(self.interlace_mode)
     }
 
     /// Typed accessor for the RDD 36 §6.1.1 / Table 7
@@ -1834,5 +1923,167 @@ mod tests {
                 "reserved code {code} must surface as outer-Option None",
             );
         }
+    }
+
+    /// `FrameHeader::interlace_kind()` returns the named Table 2 variant
+    /// for each of the three defined codes (0/1/2) after parsing a
+    /// frame that was emitted with that wire field. `picture_count()`
+    /// agrees: 1 picture for progressive, 2 for either interlaced
+    /// scan order — the same predicate `is_interlaced()` exposes on
+    /// the variant.
+    #[test]
+    fn interlace_kind_accessor_recognises_all_three_named_codes() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |mode: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                mode,
+                &luma,
+                &chroma,
+                false,
+                false,
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        // Code 0 — progressive.
+        let buf0 = build(0);
+        let (fh0, _) = parse_frame(&buf0).unwrap();
+        assert_eq!(fh0.interlace_kind(), Some(InterlaceMode::Progressive));
+        assert_eq!(fh0.interlace_mode, 0);
+        assert_eq!(fh0.picture_count(), 1);
+        assert!(!fh0.interlace_kind().unwrap().is_interlaced());
+
+        // Code 1 — TFF.
+        let buf1 = build(1);
+        let (fh1, _) = parse_frame(&buf1).unwrap();
+        assert_eq!(fh1.interlace_kind(), Some(InterlaceMode::TopFieldFirst));
+        assert_eq!(fh1.interlace_mode, 1);
+        assert_eq!(fh1.picture_count(), 2);
+        assert!(fh1.interlace_kind().unwrap().is_interlaced());
+
+        // Code 2 — BFF.
+        let buf2 = build(2);
+        let (fh2, _) = parse_frame(&buf2).unwrap();
+        assert_eq!(fh2.interlace_kind(), Some(InterlaceMode::BottomFieldFirst));
+        assert_eq!(fh2.interlace_mode, 2);
+        assert_eq!(fh2.picture_count(), 2);
+        assert!(fh2.interlace_kind().unwrap().is_interlaced());
+
+        // Symmetric: every named variant's `code()` round-trips back to
+        // the u8 the accessor read out of the wire.
+        assert_eq!(fh0.interlace_kind().unwrap().code(), fh0.interlace_mode,);
+        assert_eq!(fh1.interlace_kind().unwrap().code(), fh1.interlace_mode,);
+        assert_eq!(fh2.interlace_kind().unwrap().code(), fh2.interlace_mode,);
+    }
+
+    /// The reverse helper `interlace_mode_from_code` mirrors the
+    /// accessor: 0/1/2 → named variants; 3 → None (reserved per
+    /// Table 2); 4..=255 → None (above the u2 wire-field width). The
+    /// parser refuses code 3 outright, so this branch is only
+    /// reachable when a caller hand-builds a `FrameHeader` or calls
+    /// the standalone helper directly.
+    #[test]
+    fn interlace_mode_from_code_reserved_and_out_of_range_are_none() {
+        assert_eq!(
+            interlace_mode_from_code(0),
+            Some(InterlaceMode::Progressive),
+        );
+        assert_eq!(
+            interlace_mode_from_code(1),
+            Some(InterlaceMode::TopFieldFirst),
+        );
+        assert_eq!(
+            interlace_mode_from_code(2),
+            Some(InterlaceMode::BottomFieldFirst),
+        );
+        // Code 3 = reserved per Table 2.
+        assert_eq!(interlace_mode_from_code(3), None);
+        // Above-u2 codes: cannot appear in a parsed wire field, but the
+        // helper is total and surfaces None for every byte value.
+        for code in 4u8..=255 {
+            assert_eq!(
+                interlace_mode_from_code(code),
+                None,
+                "out-of-u2 code {code} must surface as None",
+            );
+        }
+
+        // Accessor branch on a hand-built header carrying the reserved
+        // code — the parser would have rejected this byte before
+        // assembling the struct, but the accessor must still surface
+        // outer-Option None per its documented contract.
+        let fh_reserved = FrameHeader {
+            frame_size: 0,
+            frame_header_size: 20,
+            bitstream_version: 1,
+            width: 64,
+            height: 48,
+            chroma_format: ChromaFormat::Y444,
+            interlace_mode: 3, // reserved per Table 2
+            aspect_ratio_information: 0,
+            frame_rate_code: 0,
+            color_primaries: 0,
+            transfer_characteristic: 0,
+            matrix_coefficients: 0,
+            alpha_channel_type: 0,
+            luma_qmat: [4u8; 64],
+            chroma_qmat: [4u8; 64],
+        };
+        assert_eq!(fh_reserved.interlace_kind(), None);
+    }
+
+    /// `parse_frame_header` is the authoritative refusal point for the
+    /// reserved Table 2 code (`3`). The accessor's reserved branch is
+    /// therefore unreachable from a parsed-from-bytes header — verify
+    /// that the byte 12 `(3 << 2)` encoding hits the parser's
+    /// rejection path with the exact §6.1.1 / Table 2 citation.
+    ///
+    /// The `write_frame` writer debug-asserts `interlace_mode <= 2` so
+    /// the reserved code cannot be emitted through the normal writer
+    /// path; we build a minimal valid frame from a legal mode and then
+    /// poke byte 12 to flip the u2 field to `3`, which is exactly the
+    /// shape the parser must refuse if it ever sees it.
+    #[test]
+    fn parse_frame_header_rejects_interlace_mode_3() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let mut buf = Vec::new();
+        write_frame(
+            &mut buf,
+            0,
+            64,
+            48,
+            ChromaFormat::Y422,
+            0, // start from progressive (legal)
+            &luma,
+            &chroma,
+            false,
+            false,
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        // Byte layout: 8 bytes of frame_size + 'icpf' magic, then the
+        // frame_header starting at offset 8. Byte 12 of the
+        // frame_header is at absolute offset 8 + 12 = 20 in the buffer
+        // (`parse_frame_header` reads `data[12]` after the caller
+        // already consumed the 8-byte size+magic prefix). The u2
+        // interlace field lives in bits 3..2; flip them to `3` while
+        // keeping chroma_format (bits 7..6) intact.
+        let byte_12 = &mut buf[20];
+        *byte_12 = (*byte_12 & !0b0000_1100) | (3 << 2);
+        let err = parse_frame(&buf).expect_err("interlace_mode 3 must be rejected");
+        assert!(
+            err.to_string().contains("interlace_mode 3"),
+            "error should cite the reserved interlace_mode, got: {err}"
+        );
     }
 }
