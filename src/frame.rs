@@ -291,6 +291,37 @@ impl FrameHeader {
     pub fn alpha_kind(&self) -> Option<AlphaChannelType> {
         alpha_channel_type_from_code(self.alpha_channel_type)
     }
+
+    /// Typed accessor for the RDD 36 §6.1.1 / Table 5
+    /// `color_primaries` field. Returns the named variant when the
+    /// stream's u8 code matches one of the six nonreserved values
+    /// (`1` → [`ColorPrimaries::Bt709`], `5` → [`ColorPrimaries::Bt601_625`],
+    /// `6` → [`ColorPrimaries::Bt601_525`], `9` → [`ColorPrimaries::Bt2020`],
+    /// `11` → [`ColorPrimaries::DciP3`], `12` → [`ColorPrimaries::P3D65`])
+    /// and `None` for the "unknown / unspecified" codes (`0` and `2`)
+    /// plus every reserved code in `[3, 4, 7, 8, 10, 13..=255]`.
+    ///
+    /// The raw `color_primaries` field on this struct is the u8 code as
+    /// it appeared on the wire (Table 5 is a full-byte field, so no
+    /// masking is needed in `parse_frame_header`); call this accessor
+    /// when a downstream colour-management stage wants the named
+    /// chromaticity set rather than re-deriving Table 5 at every call
+    /// site. Returning `None` for the unknown codes preserves the
+    /// wire-level distinction between "the stream says BT.709" (which
+    /// is `Some(ColorPrimaries::Bt709)`) and "the stream did not pin a
+    /// known primary set" (which is `None`) — a downstream colour
+    /// pipeline can then fall back to a project default rather than
+    /// silently re-interpreting an unknown stream as BT.709.
+    ///
+    /// The accessor is the natural mirror of the existing
+    /// [`Self::interlace_kind`] and [`Self::alpha_kind`] surfaces: it
+    /// returns `Option<ColorPrimaries>` with the same outer-Option
+    /// discriminant, so a consumer reading a parsed packet can call
+    /// `fh.color_primaries_kind()` and `fh.matrix_coefficients` (raw)
+    /// together without breaking up the read.
+    pub fn color_primaries_kind(&self) -> Option<ColorPrimaries> {
+        color_primaries_from_code(self.color_primaries)
+    }
 }
 
 /// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
@@ -2085,5 +2116,149 @@ mod tests {
             err.to_string().contains("interlace_mode 3"),
             "error should cite the reserved interlace_mode, got: {err}"
         );
+    }
+
+    /// `FrameHeader::color_primaries_kind()` returns the named Table 5
+    /// variant for each of the six defined codes (1/5/6/9/11/12) after
+    /// parsing a frame that was emitted with that wire field. The raw
+    /// `color_primaries` u8 stays on the struct (wire-level fidelity);
+    /// the accessor folds the `color_primaries_from_code(fh.color_primaries)`
+    /// boilerplate every call site previously needed into a single
+    /// method on `FrameHeader`. We exercise the writer/parser round
+    /// trip rather than constructing the struct directly so the test
+    /// also verifies that `write_frame_with_meta` lays the byte at the
+    /// right header offset and `parse_frame_header` reads it back at
+    /// full byte width (Table 5 is a full u8 field — no mask is
+    /// involved).
+    #[test]
+    fn color_primaries_kind_accessor_recognises_all_six_named_codes() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |code: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                FrameMeta {
+                    color_primaries: code,
+                    ..FrameMeta::default()
+                },
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        let cases = [
+            (1u8, ColorPrimaries::Bt709),
+            (5u8, ColorPrimaries::Bt601_625),
+            (6u8, ColorPrimaries::Bt601_525),
+            (9u8, ColorPrimaries::Bt2020),
+            (11u8, ColorPrimaries::DciP3),
+            (12u8, ColorPrimaries::P3D65),
+        ];
+        for (code, named) in cases {
+            let buf = build(code);
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.color_primaries, code);
+            assert_eq!(
+                fh.color_primaries_kind(),
+                Some(named),
+                "code {code} should surface as {named:?} via the accessor",
+            );
+            // Symmetric: every named variant's `code()` round-trips
+            // back to the u8 the accessor read out of the wire.
+            assert_eq!(
+                fh.color_primaries_kind().unwrap().code(),
+                fh.color_primaries
+            );
+        }
+    }
+
+    /// Accessor surfaces the outer-Option `None` for every "unknown /
+    /// unspecified" + reserved Table 5 code. The frame-header parser
+    /// reads `color_primaries` as a verbatim u8 (no masking), so any
+    /// value `0..=255` is reachable from a well-formed wire packet.
+    /// We assert at the byte level rather than by hand-building the
+    /// struct: this exercises the same code path a real decoder would
+    /// hit when handed a stream that pinned "unknown" or one of the
+    /// reserved codes.
+    #[test]
+    fn color_primaries_kind_accessor_returns_none_for_unknown_and_reserved_codes() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |code: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                FrameMeta {
+                    color_primaries: code,
+                    ..FrameMeta::default()
+                },
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        // Every byte that is not one of the six named codes must
+        // surface as outer-Option `None` from the typed accessor. The
+        // helper [`color_primaries_from_code`] already enumerates the
+        // reserved set; we cross-check via the FrameHeader path here.
+        for code in 0u8..=255 {
+            let is_named = matches!(code, 1 | 5 | 6 | 9 | 11 | 12);
+            if is_named {
+                continue;
+            }
+            let buf = build(code);
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.color_primaries, code);
+            assert_eq!(
+                fh.color_primaries_kind(),
+                None,
+                "unknown/reserved code {code} must surface as None via the accessor",
+            );
+        }
+
+        // Hand-built struct path: same outer-Option `None` semantics
+        // when a downstream caller assembles a `FrameHeader` directly
+        // (e.g. a probe stage that didn't go through `parse_frame`).
+        let fh_unknown = FrameHeader {
+            frame_size: 0,
+            frame_header_size: 20,
+            bitstream_version: 1,
+            width: 64,
+            height: 48,
+            chroma_format: ChromaFormat::Y444,
+            interlace_mode: 0,
+            aspect_ratio_information: 0,
+            frame_rate_code: 0,
+            color_primaries: 0, // unknown per Table 5
+            transfer_characteristic: 0,
+            matrix_coefficients: 0,
+            alpha_channel_type: 0,
+            luma_qmat: [4u8; 64],
+            chroma_qmat: [4u8; 64],
+        };
+        assert_eq!(fh_unknown.color_primaries_kind(), None);
     }
 }

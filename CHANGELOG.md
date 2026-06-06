@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed accessor `FrameHeader::color_primaries_kind()` for the RDD 36
+  §6.1.1 Table 5 `color_primaries` field.** The raw `color_primaries`
+  u8 stays on the struct (wire-level fidelity); the new accessor
+  returns `Option<ColorPrimaries>` so downstream code can switch on
+  the named variant (`Bt709` / `Bt601_625` / `Bt601_525` / `Bt2020` /
+  `DciP3` / `P3D65`) without re-deriving Table 5 at every call site.
+  Outer-Option `None` for the "unknown / unspecified" codes (0 and 2)
+  plus every reserved code (`[3, 4, 7, 8, 10, 13..=255]`) preserves
+  the wire-level distinction between "the stream says BT.709"
+  (`Some(ColorPrimaries::Bt709)`) and "the stream did not pin a known
+  primary set" (`None`). Two unit tests in `src/frame.rs`: all six
+  named codes round-trip via `parse_frame` over a `write_frame_with_meta`-
+  emitted header, with the variant's `code()` round-tripping back to
+  the on-wire byte; every other byte value `0..=255` surfaces as
+  outer-Option `None`, exercised both via `parse_frame` and on a
+  hand-built `FrameHeader`. Mirrors the proven `interlace_kind()` /
+  `alpha_kind()` accessor shape — same outer-Option discriminant, same
+  `code()` round-trip property — so a consumer reading a parsed packet
+  can call `fh.color_primaries_kind()` and `fh.alpha_kind()` together
+  without breaking up the read.
+
 - **Typed accessor `FrameHeader::interlace_kind()` for the RDD 36
   §6.1.1 Table 2 `interlace_mode` field.** New fieldless enum
   `InterlaceMode` names the three defined u2 codes (`Progressive` = 0,

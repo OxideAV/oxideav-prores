@@ -124,6 +124,18 @@ can distinguish a stream that pins BT.2020 from one that says
 of the H.273 codes inline — BT.601/709/2020 EOTF, ST 2084 PQ, BT.2100
 HLG) stays exposed as a raw u8 in [`frame::FrameMeta`].
 
+Downstream stages that prefer the typed-accessor surface (mirroring
+`alpha_kind()` / `interlace_kind()` on the same struct) call
+[`FrameHeader::color_primaries_kind`], which folds the
+`color_primaries_from_code(fh.color_primaries)` call into a single
+method on the parsed header. The accessor returns
+`Option<ColorPrimaries>` with the same outer-Option discriminant as
+its siblings — `Some(_)` for every named Table 5 code (1/5/6/9/11/12),
+`None` for the "unknown" codes (0 and 2) plus every reserved code in
+`[3, 4, 7, 8, 10, 13..=255]` — so a consumer reading a parsed packet
+can call `fh.color_primaries_kind()` and `fh.alpha_kind()` together
+without breaking up the read.
+
 ### Configurable quantisation index (RDD 36 §7.3 / Table 15)
 
 The encoder picks one `quantization_index` per profile by default
