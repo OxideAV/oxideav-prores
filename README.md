@@ -178,6 +178,20 @@ natural mirror of the existing reverse helper
 the inverse via [`frame::frame_rate_code_from_rational`] when filling
 [`FrameMeta::frame_rate_code`] from a caller-supplied rate.
 
+The §6.2 Table 3 `aspect_ratio_information` field — the high-nibble
+sibling of `frame_rate_code` in the packed byte 13 — is exposed the
+same way via [`FrameHeader::aspect_ratio`], which returns
+`Option<oxideav_core::Rational>` — `Some(_)` carrying the spec's
+exact ratio (`Rational::new(1, 1)` for code 1 / square pixels,
+`Rational::new(4, 3)` for code 2, `Rational::new(16, 9)` for code 3)
+for the three named codes, `None` for the "unknown / unspecified"
+code `0` plus every reserved code in `4..=15`. A consumer reading a
+parsed packet can call `fh.aspect_ratio()` and `fh.frame_rate()`
+alongside the §6.1.1 colour-metadata accessors in one chain — the
+two §6.2-packed nibbles surface through symmetric outer-Option APIs.
+The accessor is the natural mirror of the existing reverse helper
+[`frame::aspect_ratio_from_code`].
+
 [`CodecParameters::frame_rate`]: https://docs.rs/oxideav-core/latest/oxideav_core/struct.CodecParameters.html#structfield.frame_rate
 
 ### Configurable quantisation index (RDD 36 §7.3 / Table 15)

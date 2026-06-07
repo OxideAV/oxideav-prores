@@ -451,6 +451,49 @@ impl FrameHeader {
     pub fn frame_rate(&self) -> Option<oxideav_core::Rational> {
         rational_from_frame_rate_code(self.frame_rate_code)
     }
+
+    /// Typed accessor for the RDD 36 §6.2 / Table 3
+    /// `aspect_ratio_information` field. Returns the named ratio as an
+    /// [`oxideav_core::Rational`] when the stream's u4 code is one of the
+    /// three defined values (`1` → `1/1` square pixels, `2` → `4/3`,
+    /// `3` → `16/9`) and `None` for the "unknown / unspecified" code `0`
+    /// plus every reserved code in `4..=15`.
+    ///
+    /// The raw `aspect_ratio_information` field on this struct is the u4
+    /// code as it appeared on the wire (masked to the high nibble by the
+    /// parser — `parse_frame_header` reads it from the packed
+    /// `aspect_ratio_information(4) + frame_rate_code(4)` byte). Call
+    /// this accessor when a downstream pipeline stage wants the named
+    /// ratio as a [`oxideav_core::Rational`] rather than re-deriving
+    /// Table 3 at every call site. Per Table 3 the code distinguishes a
+    /// pixel-aspect signal (`1` → square pixels, i.e. PAR = 1/1) from
+    /// the two display-aspect signals (`2` → 4:3 picture, `3` → 16:9
+    /// picture); the returned fraction is the documented value with no
+    /// further normalisation, so a code-1 stream decodes to a literal
+    /// `1/1` and stays structurally distinct from a `None` (unknown)
+    /// result.
+    ///
+    /// Returning the outer-Option `None` for unknown + reserved codes
+    /// preserves the wire-level distinction between "the stream pins
+    /// 16:9" (`Some(Rational::new(16, 9))`) and "the stream did not pin
+    /// a known aspect" (`None`) — a downstream pipeline can then fall
+    /// back to a project default rather than silently re-interpreting
+    /// an unknown stream as 16:9.
+    ///
+    /// The accessor is the natural mirror of [`Self::frame_rate`] (its
+    /// neighbour in the packed §6.2 byte): same outer-Option
+    /// discriminant, same [`oxideav_core::Rational`] return type, so a
+    /// consumer reading a parsed packet can read `fh.aspect_ratio()` and
+    /// `fh.frame_rate()` alongside the §6.1.1 colour-metadata accessors
+    /// without breaking up the call chain. Like [`Self::frame_rate`] the
+    /// returned type is the rate fraction itself (rather than a named
+    /// enum) because Table 3 enumerates exact rational ratios with no
+    /// closer-grained naming — `1/1`, `4/3`, and `16/9` are
+    /// wire-distinct codes (1, 2, 3) and the natural typed surface is
+    /// the ratio itself.
+    pub fn aspect_ratio(&self) -> Option<oxideav_core::Rational> {
+        aspect_ratio_from_code(self.aspect_ratio_information)
+    }
 }
 
 /// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
@@ -2910,6 +2953,163 @@ mod tests {
             };
             assert_eq!(
                 fh.frame_rate(),
+                None,
+                "code {code} must surface as outer-Option None on hand-built struct",
+            );
+        }
+    }
+
+    /// `FrameHeader::aspect_ratio()` — every named §6.2 / Table 3 code
+    /// must round-trip through `parse_frame` to the spec's exact
+    /// fraction. The encoder packs `aspect_ratio_information` into the
+    /// high nibble of byte 13 via `write_frame_with_meta`; the parser
+    /// masks it back out and lands it on the struct verbatim, so a
+    /// `FrameMeta { aspect_ratio_information: c, .. }` write + parse
+    /// reproduces the on-wire code and the typed accessor lifts it to
+    /// the named [`oxideav_core::Rational`]. We exercise the byte-level
+    /// path (write_frame_with_meta → parse_frame → fh.aspect_ratio())
+    /// so the test covers the same packing the encoder uses on a real
+    /// packet; in particular code `1` (square pixels) lands on
+    /// `Some(Rational::new(1, 1))` distinct from `None` (unknown), and
+    /// the returned `Rational` agrees with [`aspect_ratio_from_code`]
+    /// for every named code.
+    #[test]
+    fn aspect_ratio_accessor_named_codes_round_trip_through_parse() {
+        use oxideav_core::Rational;
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let cases: &[(u8, Rational)] = &[
+            (1, Rational::new(1, 1)),
+            (2, Rational::new(4, 3)),
+            (3, Rational::new(16, 9)),
+        ];
+        for &(code, expected) in cases {
+            let meta = FrameMeta {
+                aspect_ratio_information: code,
+                ..FrameMeta::default()
+            };
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                1920,
+                1080,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                meta,
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.aspect_ratio_information, code);
+            assert_eq!(
+                fh.aspect_ratio(),
+                Some(expected),
+                "code {code} must lift to {}/{} via the typed accessor",
+                expected.num,
+                expected.den,
+            );
+            // Symmetric reverse: the wire-level `aspect_ratio_from_code`
+            // and the typed accessor must agree (defends against a
+            // typo that splits the two surfaces apart).
+            assert_eq!(
+                aspect_ratio_from_code(fh.aspect_ratio_information),
+                fh.aspect_ratio(),
+                "typed accessor must agree with aspect_ratio_from_code for code {code}",
+            );
+        }
+    }
+
+    /// Accessor surfaces the outer-Option `None` for the
+    /// "unknown / unspecified" code `0` and every reserved code in
+    /// `4..=15`. `aspect_ratio_information` lives in the high nibble of
+    /// byte 13, so every value `0..=15` is reachable from a well-formed
+    /// wire packet. We exercise the byte-level path through
+    /// `parse_frame` for the unknown + reserved codes plus the
+    /// hand-built `FrameHeader` path (for above-u4 values that
+    /// `parse_frame_header` masks away but a hand-assembled struct could
+    /// carry) so a downstream caller that assembles a struct directly
+    /// also gets the same outer-Option `None` semantics.
+    #[test]
+    fn aspect_ratio_accessor_returns_none_for_unknown_and_reserved_codes() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |code: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                FrameMeta {
+                    aspect_ratio_information: code,
+                    ..FrameMeta::default()
+                },
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        // Code 0 — unknown/unspecified, distinct from any named ratio.
+        let buf = build(0);
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(fh.aspect_ratio_information, 0);
+        assert_eq!(fh.aspect_ratio(), None);
+
+        // Codes 4..=15 — reserved per Table 3. `write_frame_with_meta`
+        // packs the low nibble of the value into the high nibble of
+        // byte 13; `parse_frame_header` shifts it back out with
+        // `& 0xF`, so every reserved value is reachable from a
+        // well-formed wire packet.
+        for code in 4u8..=15 {
+            let buf = build(code);
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.aspect_ratio_information, code);
+            assert_eq!(
+                fh.aspect_ratio(),
+                None,
+                "reserved code {code} must surface as outer-Option None",
+            );
+        }
+
+        // Hand-built struct path: same outer-Option `None` semantics
+        // when a downstream caller assembles a `FrameHeader` directly
+        // with a reserved code. Also exercises codes above the u4 width
+        // (`16..=255`) that a hand-built struct could carry even though
+        // `parse_frame_header` would never emit them.
+        for code in [0u8, 4, 5, 14, 15, 16, 100, 255] {
+            let fh = FrameHeader {
+                frame_size: 0,
+                frame_header_size: 20,
+                bitstream_version: 1,
+                width: 64,
+                height: 48,
+                chroma_format: ChromaFormat::Y444,
+                interlace_mode: 0,
+                aspect_ratio_information: code,
+                frame_rate_code: 0,
+                color_primaries: 0,
+                transfer_characteristic: 0,
+                matrix_coefficients: 0,
+                alpha_channel_type: 0,
+                luma_qmat: [4u8; 64],
+                chroma_qmat: [4u8; 64],
+            };
+            assert_eq!(
+                fh.aspect_ratio(),
                 None,
                 "code {code} must surface as outer-Option None on hand-built struct",
             );

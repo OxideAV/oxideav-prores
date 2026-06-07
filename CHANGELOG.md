@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed accessor `FrameHeader::aspect_ratio()` for the RDD 36 §6.2 /
+  Table 3 `aspect_ratio_information` field.** The raw
+  `aspect_ratio_information` u4 stays on the struct (wire-level
+  fidelity); the new accessor returns `Option<oxideav_core::Rational>`
+  carrying the spec's exact ratio — `Rational::new(1, 1)` for code 1
+  (square pixels), `Rational::new(4, 3)` for code 2, `Rational::new(16, 9)`
+  for code 3, and `None` for the "unknown / unspecified" code 0 plus
+  every reserved code in 4..=15. Mirrors the proven
+  `FrameHeader::frame_rate()` accessor shape (same outer-Option
+  discriminant, same `oxideav_core::Rational` return type) — Table 3
+  is a list of exact rational ratios with no closer-grained naming,
+  and `1/1`, `4/3`, `16/9` are wire-distinct codes so the natural
+  typed surface is the ratio itself. A downstream pipeline stage can
+  read `fh.aspect_ratio()` and `fh.frame_rate()` alongside the §6.1.1
+  colour-metadata accessors without breaking up the call chain — the
+  two §6.2-packed nibbles surface through symmetric APIs. Two unit
+  tests in `src/frame.rs`: all three named codes round-trip via
+  `parse_frame` over a `write_frame_with_meta`-emitted header (with
+  the typed accessor and `aspect_ratio_from_code` cross-checked); the
+  unknown code 0 + reserved codes 4..=15 surface as outer-Option
+  `None` via `parse_frame`, with the hand-built `FrameHeader` path
+  additionally covering above-u4 values (16, 100, 255) that a
+  constructed-by-hand struct could carry even though
+  `parse_frame_header` masks them out. Completes the typed-accessor
+  surface for every named §6.2 field.
+
 - **Typed accessor `FrameHeader::frame_rate()` for the RDD 36 §6.2 /
   Table 4 `frame_rate_code` field.** The raw `frame_rate_code` u4
   stays on the struct (wire-level fidelity); the new accessor returns
