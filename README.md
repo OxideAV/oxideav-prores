@@ -160,6 +160,26 @@ codes (1 / 16 / 18, i.e. BT.1886 / ST 2084 / HLG), `None` for the
 `fh.alpha_kind()` in one chain gives a downstream colour-management
 stage every named §6.1.1 field at once.
 
+The §6.2 Table 4 `frame_rate_code` field gets the same typed-accessor
+treatment via [`FrameHeader::frame_rate`], which returns
+`Option<oxideav_core::Rational>` — `Some(_)` carrying the spec's
+exact symbolic fraction (e.g. `Rational::new(30_000, 1001)` for code
+4, distinct from `Rational::new(30, 1)` for code 5) for the eleven
+named codes (`1..=11`), `None` for the "unknown / unspecified" code
+`0` plus every reserved code in `12..=15`. Unlike the colour-metadata
+accessors the returned type is the rate fraction itself rather than a
+named enum (Table 4 is a list of exact rates with no closer-grained
+naming, and `30000/1001` vs `30/1` are wire-distinct), so a downstream
+pipeline stage reading a parsed packet can forward
+[`CodecParameters::frame_rate`] along an `oxideav_core` graph straight
+off `fh.frame_rate()` without precision loss. The accessor is the
+natural mirror of the existing reverse helper
+[`frame::rational_from_frame_rate_code`] — encoder side already does
+the inverse via [`frame::frame_rate_code_from_rational`] when filling
+[`FrameMeta::frame_rate_code`] from a caller-supplied rate.
+
+[`CodecParameters::frame_rate`]: https://docs.rs/oxideav-core/latest/oxideav_core/struct.CodecParameters.html#structfield.frame_rate
+
 ### Configurable quantisation index (RDD 36 §7.3 / Table 15)
 
 The encoder picks one `quantization_index` per profile by default

@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed accessor `FrameHeader::frame_rate()` for the RDD 36 §6.2 /
+  Table 4 `frame_rate_code` field.** The raw `frame_rate_code` u4
+  stays on the struct (wire-level fidelity); the new accessor returns
+  `Option<oxideav_core::Rational>` carrying the spec's exact symbolic
+  fraction (e.g. `Rational::new(30_000, 1001)` for code 4, distinct
+  from `Rational::new(30, 1)` for code 5) for each of the eleven
+  named codes (1..=11), and `None` for the "unknown / unspecified"
+  code 0 plus every reserved code in 12..=15. Unlike the
+  colour-metadata accessors (`color_primaries_kind` /
+  `matrix_coefficients_kind` / `transfer_characteristic_kind`) the
+  returned type is the rate fraction itself rather than a named enum
+  — Table 4 is a list of exact rates with no closer-grained naming,
+  and `30000/1001` vs `30/1` are wire-distinct codes, so the natural
+  typed surface is the rational. A downstream pipeline stage reading
+  a parsed packet can forward `CodecParameters::frame_rate` along an
+  `oxideav_core` graph straight off `fh.frame_rate()` without
+  precision loss; the encoder side already does the inverse via
+  `frame_rate_code_from_rational` when filling
+  `FrameMeta::frame_rate_code` from a caller-supplied rate. Two unit
+  tests in `src/frame.rs`: all eleven named codes round-trip via
+  `parse_frame` over a `write_frame_with_meta`-emitted header, with
+  the returned rational round-tripping back through
+  `frame_rate_code_from_rational` to the on-wire u4; the unknown code
+  0 + reserved codes 12..=15 surface as outer-Option `None` via
+  `parse_frame`, with the hand-built `FrameHeader` path additionally
+  covering above-u4 values that a constructed-by-hand struct could
+  carry. Mirrors the proven `transfer_characteristic_kind()` /
+  `matrix_coefficients_kind()` / `color_primaries_kind()` /
+  `alpha_kind()` / `interlace_kind()` accessor shape — same
+  outer-Option discriminant.
+
 - **Typed accessor `FrameHeader::transfer_characteristic_kind()` for
   the RDD 36 §6.1.1 `transfer_characteristic` field.** New fieldless
   enum `TransferCharacteristic` names the three defined nonreserved

@@ -404,6 +404,53 @@ impl FrameHeader {
     pub fn transfer_characteristic_kind(&self) -> Option<TransferCharacteristic> {
         transfer_characteristic_from_code(self.transfer_characteristic)
     }
+
+    /// Typed accessor for the RDD 36 §6.2 / Table 4 `frame_rate_code`
+    /// field. Returns the named rate as an [`oxideav_core::Rational`]
+    /// when the stream's u4 code is one of the eleven defined values
+    /// (`1` → `24000/1001`, `2` → `24/1`, `3` → `25/1`, `4` →
+    /// `30000/1001`, `5` → `30/1`, `6` → `50/1`, `7` → `60000/1001`,
+    /// `8` → `60/1`, `9` → `100/1`, `10` → `120000/1001`, `11` →
+    /// `120/1`) and `None` for the "unknown / unspecified" code `0`
+    /// plus every reserved code in `12..=15`.
+    ///
+    /// The raw `frame_rate_code` field on this struct is the u4 code as
+    /// it appeared on the wire (masked to the low nibble by the parser
+    /// — `parse_frame_header` reads it from the packed
+    /// `aspect_ratio_information(4) + frame_rate_code(4)` byte). Call
+    /// this accessor when a downstream pipeline stage wants the named
+    /// rate as a [`oxideav_core::Rational`] rather than re-deriving
+    /// Table 4 at every call site. The returned fractions are the
+    /// spec's exact symbolic forms (e.g. `30000/1001`, not the reduced
+    /// or float-rounded value), so the result can be forwarded along an
+    /// `oxideav_core` graph as a [`CodecParameters::frame_rate`]
+    /// without precision loss; the encoder side already does the
+    /// inverse via [`frame_rate_code_from_rational`] when filling
+    /// [`FrameMeta::frame_rate_code`] from a caller-supplied rate.
+    ///
+    /// Returning the outer-Option `None` for unknown + reserved codes
+    /// preserves the wire-level distinction between "the stream pins
+    /// 29.97 fps" (`Some(Rational::new(30000, 1001))`) and "the stream
+    /// did not pin a known rate" (`None`) — a downstream pipeline can
+    /// then fall back to a project default rather than silently
+    /// re-interpreting an unknown stream as 30 fps.
+    ///
+    /// The accessor is the natural mirror of
+    /// [`Self::color_primaries_kind`] / [`Self::matrix_coefficients_kind`]
+    /// / [`Self::transfer_characteristic_kind`]: same outer-Option
+    /// discriminant, so a consumer reading a parsed packet can read
+    /// `fh.frame_rate()` alongside the colour-metadata accessors
+    /// without breaking up the call chain. Unlike those accessors the
+    /// returned type is a [`oxideav_core::Rational`] (rather than a
+    /// named enum) because §6.2 Table 4 is a list of exact rational
+    /// rates with no closer-grained naming — `30000/1001` and `30/1`
+    /// are wire-distinct codes (4 and 5), and the natural typed surface
+    /// is the rate fraction itself.
+    ///
+    /// [`CodecParameters::frame_rate`]: oxideav_core::CodecParameters::frame_rate
+    pub fn frame_rate(&self) -> Option<oxideav_core::Rational> {
+        rational_from_frame_rate_code(self.frame_rate_code)
+    }
 }
 
 /// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
@@ -2706,5 +2753,166 @@ mod tests {
             chroma_qmat: [4u8; 64],
         };
         assert_eq!(fh_unknown.transfer_characteristic_kind(), None);
+    }
+
+    /// `FrameHeader::frame_rate()` returns the named §6.2 Table 4 rate
+    /// for each of the eleven defined codes after parsing a frame that
+    /// was emitted with that wire field. The raw `frame_rate_code` u4
+    /// stays on the struct (wire-level fidelity); the accessor folds
+    /// the `rational_from_frame_rate_code(fh.frame_rate_code)`
+    /// boilerplate every call site previously needed into a single
+    /// method on `FrameHeader`. We exercise the writer/parser round
+    /// trip rather than constructing the struct directly so the test
+    /// also verifies that `write_frame_with_meta` lays the nibble at
+    /// the right header offset (low nibble of byte 13) and
+    /// `parse_frame_header` reads it back with the correct mask.
+    #[test]
+    fn frame_rate_accessor_recognises_all_eleven_named_codes() {
+        use oxideav_core::Rational;
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |code: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                FrameMeta {
+                    frame_rate_code: code,
+                    ..FrameMeta::default()
+                },
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        let cases = [
+            (1u8, Rational::new(24_000, 1001)),
+            (2u8, Rational::new(24, 1)),
+            (3u8, Rational::new(25, 1)),
+            (4u8, Rational::new(30_000, 1001)),
+            (5u8, Rational::new(30, 1)),
+            (6u8, Rational::new(50, 1)),
+            (7u8, Rational::new(60_000, 1001)),
+            (8u8, Rational::new(60, 1)),
+            (9u8, Rational::new(100, 1)),
+            (10u8, Rational::new(120_000, 1001)),
+            (11u8, Rational::new(120, 1)),
+        ];
+        for (code, named) in cases {
+            let buf = build(code);
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.frame_rate_code, code);
+            assert_eq!(
+                fh.frame_rate(),
+                Some(named),
+                "code {code} should surface as {named:?} via the accessor",
+            );
+            // Symmetric: the named rate round-trips back through
+            // `frame_rate_code_from_rational` to the on-wire u4.
+            assert_eq!(
+                frame_rate_code_from_rational(fh.frame_rate().unwrap()),
+                fh.frame_rate_code
+            );
+        }
+    }
+
+    /// Accessor surfaces the outer-Option `None` for the
+    /// "unknown / unspecified" code 0 and every reserved code in
+    /// `12..=15`. The frame-header parser reads `frame_rate_code` as a
+    /// 4-bit nibble (low half of byte 13), so every value `0..=15` is
+    /// reachable from a well-formed wire packet. We exercise the
+    /// byte-level path through `parse_frame` for the unknown + reserved
+    /// codes plus the hand-built `FrameHeader` path so a downstream
+    /// caller that assembles a struct directly (e.g. a probe stage that
+    /// didn't go through `parse_frame`) also gets the same outer-Option
+    /// `None` semantics.
+    #[test]
+    fn frame_rate_accessor_returns_none_for_unknown_and_reserved_codes() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |code: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                FrameMeta {
+                    frame_rate_code: code,
+                    ..FrameMeta::default()
+                },
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        // Code 0 — unknown/unspecified.
+        let buf = build(0);
+        let (fh, _) = parse_frame(&buf).unwrap();
+        assert_eq!(fh.frame_rate_code, 0);
+        assert_eq!(fh.frame_rate(), None);
+
+        // Codes 12..=15 — reserved per Table 4. `write_frame_with_meta`
+        // packs the low nibble into byte 13; `parse_frame_header` masks
+        // it back out with `& 0x0F`, so every reserved value is
+        // reachable from a well-formed wire packet.
+        for code in 12u8..=15 {
+            let buf = build(code);
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.frame_rate_code, code);
+            assert_eq!(
+                fh.frame_rate(),
+                None,
+                "reserved code {code} must surface as outer-Option None",
+            );
+        }
+
+        // Hand-built struct path: same outer-Option `None` semantics
+        // when a downstream caller assembles a `FrameHeader` directly
+        // with a reserved code. Also exercises codes above the u4 width
+        // (`16..=255`) that a hand-built struct could carry even though
+        // `parse_frame_header` would never emit them.
+        for code in [0u8, 12, 13, 14, 15, 16, 100, 255] {
+            let fh = FrameHeader {
+                frame_size: 0,
+                frame_header_size: 20,
+                bitstream_version: 1,
+                width: 64,
+                height: 48,
+                chroma_format: ChromaFormat::Y444,
+                interlace_mode: 0,
+                aspect_ratio_information: 0,
+                frame_rate_code: code,
+                color_primaries: 0,
+                transfer_characteristic: 0,
+                matrix_coefficients: 0,
+                alpha_channel_type: 0,
+                luma_qmat: [4u8; 64],
+                chroma_qmat: [4u8; 64],
+            };
+            assert_eq!(
+                fh.frame_rate(),
+                None,
+                "code {code} must surface as outer-Option None on hand-built struct",
+            );
+        }
     }
 }
