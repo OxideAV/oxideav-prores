@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed accessor `FrameHeader::matrix_coefficients_kind()` for the
+  RDD 36 §6.1.1 Table 6 `matrix_coefficients` field.** The raw
+  `matrix_coefficients` u8 stays on the struct (wire-level fidelity);
+  the new accessor returns `Option<MatrixCoefficients>` so downstream
+  code can switch on the named variant (`Bt709` / `Bt601` /
+  `Bt2020Ncl`) without re-deriving Table 6 at every call site. The
+  returned variant carries the `(K_R, K_G, K_B)` luma-coefficient
+  triple via `MatrixCoefficients::luma_coefficients` so a Y'CbCr →
+  R'G'B' conversion stage can evaluate the §6.1.1 derivation formulas
+  straight off the accessor result. Outer-Option `None` for the
+  "unknown / unspecified" codes (0 and 2) plus every reserved code
+  (`[3, 4, 5, 7, 8, 10..=255]`) preserves the wire-level distinction
+  between "the stream pins BT.709" (`Some(MatrixCoefficients::Bt709)`)
+  and "the stream did not pin a known matrix" (`None`). Two unit
+  tests in `src/frame.rs`: all three named codes round-trip via
+  `parse_frame` over a `write_frame_with_meta`-emitted header, with
+  the variant's `code()` round-tripping back to the on-wire byte and
+  `luma_coefficients()` matching the direct enum-side call; every
+  other byte value `0..=255` surfaces as outer-Option `None`,
+  exercised both via `parse_frame` and on a hand-built `FrameHeader`.
+  Mirrors the proven `color_primaries_kind()` / `interlace_kind()` /
+  `alpha_kind()` accessor shape — same outer-Option discriminant,
+  same `code()` round-trip property — so a consumer reading a parsed
+  packet can call `fh.matrix_coefficients_kind()`,
+  `fh.color_primaries_kind()`, and `fh.alpha_kind()` in a single
+  read.
+
 - **Typed accessor `FrameHeader::color_primaries_kind()` for the RDD 36
   §6.1.1 Table 5 `color_primaries` field.** The raw `color_primaries`
   u8 stays on the struct (wire-level fidelity); the new accessor

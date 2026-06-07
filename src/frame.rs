@@ -317,10 +317,47 @@ impl FrameHeader {
     /// [`Self::interlace_kind`] and [`Self::alpha_kind`] surfaces: it
     /// returns `Option<ColorPrimaries>` with the same outer-Option
     /// discriminant, so a consumer reading a parsed packet can call
-    /// `fh.color_primaries_kind()` and `fh.matrix_coefficients` (raw)
+    /// `fh.color_primaries_kind()` and [`Self::matrix_coefficients_kind`]
     /// together without breaking up the read.
     pub fn color_primaries_kind(&self) -> Option<ColorPrimaries> {
         color_primaries_from_code(self.color_primaries)
+    }
+
+    /// Typed accessor for the RDD 36 §6.1.1 / Table 6
+    /// `matrix_coefficients` field. Returns the named variant when the
+    /// stream's u8 code matches one of the three nonreserved values
+    /// (`1` → [`MatrixCoefficients::Bt709`],
+    ///  `6` → [`MatrixCoefficients::Bt601`],
+    ///  `9` → [`MatrixCoefficients::Bt2020Ncl`]) and `None` for the
+    /// "unknown / unspecified" codes (`0` and `2`) plus every reserved
+    /// code in `[3, 4, 5, 7, 8, 10..=255]`.
+    ///
+    /// The raw `matrix_coefficients` field on this struct is the u8 code
+    /// as it appeared on the wire (Table 6 is a full-byte field, so
+    /// `parse_frame_header` reads it verbatim with the same width as
+    /// `color_primaries` and `transfer_characteristic`); call this
+    /// accessor when a downstream Y'CbCr → R'G'B' conversion stage
+    /// wants the named matrix rather than re-deriving Table 6 at every
+    /// call site. The returned variant carries the `(K_R, K_G, K_B)`
+    /// luma-coefficient triple via [`MatrixCoefficients::luma_coefficients`],
+    /// so the §6.1.1 derivation formulas can be evaluated directly off
+    /// the accessor result without a second table lookup.
+    ///
+    /// Returning the outer-Option `None` for unknown codes preserves
+    /// the wire-level distinction between "the stream pins BT.709"
+    /// (which is `Some(MatrixCoefficients::Bt709)`) and "the stream did
+    /// not pin a known matrix" (which is `None`) — a downstream
+    /// pipeline can then fall back to a project default rather than
+    /// silently re-interpreting an unknown stream as BT.709.
+    ///
+    /// The accessor mirrors [`Self::color_primaries_kind`] /
+    /// [`Self::interlace_kind`] / [`Self::alpha_kind`]: same
+    /// outer-Option discriminant, so a consumer reading a parsed packet
+    /// can call `fh.matrix_coefficients_kind()`,
+    /// `fh.color_primaries_kind()`, and `fh.alpha_kind()` in a single
+    /// read without breaking up the call chain.
+    pub fn matrix_coefficients_kind(&self) -> Option<MatrixCoefficients> {
+        matrix_coefficients_from_code(self.matrix_coefficients)
     }
 }
 
@@ -2260,5 +2297,156 @@ mod tests {
             chroma_qmat: [4u8; 64],
         };
         assert_eq!(fh_unknown.color_primaries_kind(), None);
+    }
+
+    /// `FrameHeader::matrix_coefficients_kind()` returns the named
+    /// Table 6 variant for each of the three defined codes (1/6/9)
+    /// after parsing a frame that was emitted with that wire field.
+    /// The raw `matrix_coefficients` u8 stays on the struct (wire-level
+    /// fidelity); the accessor folds the
+    /// `matrix_coefficients_from_code(fh.matrix_coefficients)`
+    /// boilerplate every call site previously needed into a single
+    /// method on `FrameHeader`. We exercise the writer/parser round
+    /// trip rather than constructing the struct directly so the test
+    /// also verifies that `write_frame_with_meta` lays the byte at the
+    /// right header offset and `parse_frame_header` reads it back at
+    /// full byte width (Table 6 is a full u8 field — no mask is
+    /// involved).
+    #[test]
+    fn matrix_coefficients_kind_accessor_recognises_all_three_named_codes() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |code: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                FrameMeta {
+                    matrix_coefficients: code,
+                    ..FrameMeta::default()
+                },
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        let cases = [
+            (1u8, MatrixCoefficients::Bt709),
+            (6u8, MatrixCoefficients::Bt601),
+            (9u8, MatrixCoefficients::Bt2020Ncl),
+        ];
+        for (code, named) in cases {
+            let buf = build(code);
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.matrix_coefficients, code);
+            assert_eq!(
+                fh.matrix_coefficients_kind(),
+                Some(named),
+                "code {code} should surface as {named:?} via the accessor",
+            );
+            // Symmetric: every named variant's `code()` round-trips
+            // back to the u8 the accessor read out of the wire.
+            assert_eq!(
+                fh.matrix_coefficients_kind().unwrap().code(),
+                fh.matrix_coefficients
+            );
+            // The accessor result carries the same K_R/K_G/K_B triple
+            // as the free reverse helper — confirms that a downstream
+            // Y'CbCr → R'G'B' stage can read the luma coefficients
+            // straight off the typed accessor.
+            assert_eq!(
+                fh.matrix_coefficients_kind().unwrap().luma_coefficients(),
+                named.luma_coefficients()
+            );
+        }
+    }
+
+    /// Accessor surfaces the outer-Option `None` for every "unknown /
+    /// unspecified" + reserved Table 6 code. The frame-header parser
+    /// reads `matrix_coefficients` as a verbatim u8 (no masking), so
+    /// any value `0..=255` is reachable from a well-formed wire packet.
+    /// We assert at the byte level rather than by hand-building the
+    /// struct: this exercises the same code path a real decoder would
+    /// hit when handed a stream that pinned "unknown" or one of the
+    /// reserved codes.
+    #[test]
+    fn matrix_coefficients_kind_accessor_returns_none_for_unknown_and_reserved_codes() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |code: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                FrameMeta {
+                    matrix_coefficients: code,
+                    ..FrameMeta::default()
+                },
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        // Every byte that is not one of the three named codes must
+        // surface as outer-Option `None` from the typed accessor. The
+        // helper [`matrix_coefficients_from_code`] already enumerates
+        // the reserved set; we cross-check via the FrameHeader path
+        // here.
+        for code in 0u8..=255 {
+            let is_named = matches!(code, 1 | 6 | 9);
+            if is_named {
+                continue;
+            }
+            let buf = build(code);
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.matrix_coefficients, code);
+            assert_eq!(
+                fh.matrix_coefficients_kind(),
+                None,
+                "unknown/reserved code {code} must surface as None via the accessor",
+            );
+        }
+
+        // Hand-built struct path: same outer-Option `None` semantics
+        // when a downstream caller assembles a `FrameHeader` directly
+        // (e.g. a probe stage that didn't go through `parse_frame`).
+        let fh_unknown = FrameHeader {
+            frame_size: 0,
+            frame_header_size: 20,
+            bitstream_version: 1,
+            width: 64,
+            height: 48,
+            chroma_format: ChromaFormat::Y444,
+            interlace_mode: 0,
+            aspect_ratio_information: 0,
+            frame_rate_code: 0,
+            color_primaries: 0,
+            transfer_characteristic: 0,
+            matrix_coefficients: 0, // unknown per Table 6
+            alpha_channel_type: 0,
+            luma_qmat: [4u8; 64],
+            chroma_qmat: [4u8; 64],
+        };
+        assert_eq!(fh_unknown.matrix_coefficients_kind(), None);
     }
 }

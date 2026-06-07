@@ -136,6 +136,18 @@ its siblings — `Some(_)` for every named Table 5 code (1/5/6/9/11/12),
 can call `fh.color_primaries_kind()` and `fh.alpha_kind()` together
 without breaking up the read.
 
+The same shape applies to the Table 6 matrix via
+[`FrameHeader::matrix_coefficients_kind`], which returns
+`Option<MatrixCoefficients>` — `Some(_)` for the three named codes
+(1/6/9, i.e. BT.709 / BT.601 / BT.2020 NCL), `None` for the "unknown"
+codes (0 and 2) plus every reserved code in `[3, 4, 5, 7, 8, 10..=255]`.
+A Y'CbCr → R'G'B' conversion stage can then evaluate the §6.1.1
+derivation formulas off `mc.luma_coefficients()` (the `(K_R, K_G, K_B)`
+triple straight from Table 6) without a second table lookup. Reading
+`fh.matrix_coefficients_kind()`, `fh.color_primaries_kind()`, and
+`fh.alpha_kind()` in one chain gives a downstream colour-management
+stage every named §6.1.1 field at once.
+
 ### Configurable quantisation index (RDD 36 §7.3 / Table 15)
 
 The encoder picks one `quantization_index` per profile by default
