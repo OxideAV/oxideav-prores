@@ -359,6 +359,51 @@ impl FrameHeader {
     pub fn matrix_coefficients_kind(&self) -> Option<MatrixCoefficients> {
         matrix_coefficients_from_code(self.matrix_coefficients)
     }
+
+    /// Typed accessor for the RDD 36 §6.1.1 `transfer_characteristic`
+    /// field. Returns the named variant when the stream's u8 code is
+    /// one of the three defined nonreserved values (`1` →
+    /// [`TransferCharacteristic::Bt1886`] — the BT.601 / BT.709 /
+    /// BT.2020 OETF; `16` → [`TransferCharacteristic::St2084`] — the
+    /// SMPTE ST 2084:2014 Inverse-EOTF, a.k.a. PQ; `18` →
+    /// [`TransferCharacteristic::Hlg`] — the BT.2100-2 HLG Reference
+    /// OETF) and `None` for the "unknown / unspecified" codes (`0`
+    /// and `2`) plus every reserved code in the remainder of
+    /// `[3..=255]`.
+    ///
+    /// Unlike `color_primaries` and `matrix_coefficients`, the spec
+    /// does not enumerate the named codes in a Table — §6.1.1 spells
+    /// out the three OETF formulas in prose ("the value 1 signifies
+    /// the function specified by ITU-R BT.601/BT.709/BT.2020 …", "the
+    /// value 16 signifies the Inverse-EOTF formula in Section 5.3 of
+    /// SMPTE ST 2084:2014 …", "the value 18 signifies the HLG
+    /// Reference OETF from Table 5 of ITU-R BT.2100-2 …"), with the
+    /// closing note that the named code numbers agree with Table 3 of
+    /// ITU-T H.273.
+    ///
+    /// The raw `transfer_characteristic` field on this struct is the
+    /// u8 code as it appeared on the wire (full byte width — no mask
+    /// is involved in `parse_frame_header`); call this accessor when
+    /// a downstream colour-management stage wants the named OETF
+    /// rather than re-deriving §6.1.1 at every call site. Returning
+    /// `None` for the unknown codes preserves the wire-level
+    /// distinction between "the stream pins ST 2084"
+    /// (`Some(TransferCharacteristic::St2084)`) and "the stream did
+    /// not pin a known transfer function" (`None`) — a downstream
+    /// pipeline can then fall back to a project default rather than
+    /// silently re-interpreting an unknown stream as BT.1886.
+    ///
+    /// The accessor is the natural mirror of
+    /// [`Self::color_primaries_kind`] and
+    /// [`Self::matrix_coefficients_kind`]: same outer-Option
+    /// discriminant, same `code()` round-trip property, so a consumer
+    /// reading a parsed packet can call
+    /// `fh.transfer_characteristic_kind()`,
+    /// `fh.color_primaries_kind()`, and
+    /// `fh.matrix_coefficients_kind()` in a single read.
+    pub fn transfer_characteristic_kind(&self) -> Option<TransferCharacteristic> {
+        transfer_characteristic_from_code(self.transfer_characteristic)
+    }
 }
 
 /// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
@@ -825,6 +870,75 @@ pub fn matrix_coefficients_from_code(code: u8) -> Option<MatrixCoefficients> {
         6 => Some(MatrixCoefficients::Bt601),
         9 => Some(MatrixCoefficients::Bt2020Ncl),
         // 0 + 2 = unknown/unspecified; 3..=5, 7..=8, 10..=255 = reserved.
+        _ => None,
+    }
+}
+
+/// Named values of the RDD 36 §6.1.1 `transfer_characteristic` field.
+///
+/// Unlike `color_primaries` (Table 5) and `matrix_coefficients`
+/// (Table 6), the spec lists the named transfer functions in prose
+/// rather than a numbered Table: §6.1.1 spells out each OETF formula
+/// and ends with the note that the nonreserved code numbers agree
+/// with Table 3 of ITU-T H.273. Three codes are named; everything
+/// else is either "unknown/unspecified" (0 and 2) or reserved.
+///
+/// Each variant carries the same numeric code value as written on the
+/// wire, so a downstream colour-management stage that wants to select
+/// an OETF can match on the typed enum rather than re-deriving the
+/// code-to-function mapping at every call site.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TransferCharacteristic {
+    /// Code 1 — the OETF specified by ITU-R BT.601 / BT.709 / BT.2020:
+    /// `V = α · L^0.45 − (α − 1)` for `β ≤ L ≤ 1` and `V = 4.5 · L`
+    /// for `0 ≤ L ≤ β`, with `α = 1.099_296_826_809_44…` and
+    /// `β = 0.018_053_968_510_807…`, per §6.1.1. Commonly referred
+    /// to in industry usage as "BT.1886" (the studio reference
+    /// display EOTF whose inverse coincides with this curve at the
+    /// receiving end).
+    Bt1886 = 1,
+    /// Code 16 — the Inverse-EOTF formula in Section 5.3 of
+    /// SMPTE ST 2084:2014 (commonly referred to as "PQ"):
+    /// `V = ((c1 + c2 · L^m1) / (1 + c3 · L^m1))^m2` with
+    /// `m1 = 0.25 · (2610 / 4096)`, `m2 = 128 · (2523 / 4096)`,
+    /// `c1 = c3 − c2 + 1 = 3424 / 4096`, `c2 = 32 · (2413 / 4096)`,
+    /// and `c3 = 32 · (2392 / 4096)`, where `L` is normalised so
+    /// that `L = 1` corresponds to an absolute optical intensity of
+    /// 10000 cd/m².
+    St2084 = 16,
+    /// Code 18 — the Reference OETF in Table 5 of ITU-R BT.2100-2
+    /// (the Hybrid Log-Gamma curve, "HLG"):
+    /// `V = sqrt(3 · L)` for `0 ≤ L ≤ 1/12` and
+    /// `V = a · ln(12 · L − b) + c` for `1/12 ≤ L ≤ 1`, with
+    /// `a = 0.178_832_77`, `b = 1 − 4a` (≈ 0.284_668_92), and
+    /// `c = 1/2 − a · ln(4a)` (≈ 0.559_910_73). `L` has no
+    /// prescribed normalisation under HLG.
+    Hlg = 18,
+}
+
+impl TransferCharacteristic {
+    /// The on-the-wire u8 code for this variant.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Map an RDD 36 §6.1.1 `transfer_characteristic` u8 code to the
+/// named OETF it identifies. Returns `None` for the
+/// "unknown/unspecified" codes (0 and 2) and every reserved code in
+/// the remainder of `[3..=255]` (specifically `3..=15`, `17`, and
+/// `19..=255`).
+///
+/// The three named codes are the only ones §6.1.1 spells out in
+/// prose; the spec explicitly notes that the named code numbers agree
+/// with ITU-T H.273 Table 3 to avoid inconsistency with that
+/// Recommendation.
+pub fn transfer_characteristic_from_code(code: u8) -> Option<TransferCharacteristic> {
+    match code {
+        1 => Some(TransferCharacteristic::Bt1886),
+        16 => Some(TransferCharacteristic::St2084),
+        18 => Some(TransferCharacteristic::Hlg),
+        // 0 + 2 = unknown/unspecified; 3..=15, 17, 19..=255 = reserved.
         _ => None,
     }
 }
@@ -2448,5 +2562,149 @@ mod tests {
             chroma_qmat: [4u8; 64],
         };
         assert_eq!(fh_unknown.matrix_coefficients_kind(), None);
+    }
+
+    /// `FrameHeader::transfer_characteristic_kind()` returns the
+    /// named §6.1.1 variant for each of the three defined codes
+    /// (1 / 16 / 18) after parsing a frame that was emitted with that
+    /// wire field. The raw `transfer_characteristic` u8 stays on the
+    /// struct (wire-level fidelity); the accessor folds the
+    /// `transfer_characteristic_from_code(fh.transfer_characteristic)`
+    /// boilerplate every call site previously needed into a single
+    /// method on `FrameHeader`. We exercise the writer/parser round
+    /// trip rather than constructing the struct directly so the test
+    /// also verifies that `write_frame_with_meta` lays the byte at
+    /// the right header offset and `parse_frame_header` reads it back
+    /// at full byte width (the field is a full u8 — no mask is
+    /// involved).
+    #[test]
+    fn transfer_characteristic_kind_accessor_recognises_all_three_named_codes() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |code: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                FrameMeta {
+                    transfer_characteristic: code,
+                    ..FrameMeta::default()
+                },
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        let cases = [
+            (1u8, TransferCharacteristic::Bt1886),
+            (16u8, TransferCharacteristic::St2084),
+            (18u8, TransferCharacteristic::Hlg),
+        ];
+        for (code, named) in cases {
+            let buf = build(code);
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.transfer_characteristic, code);
+            assert_eq!(
+                fh.transfer_characteristic_kind(),
+                Some(named),
+                "code {code} should surface as {named:?} via the accessor",
+            );
+            // Symmetric: every named variant's `code()` round-trips
+            // back to the u8 the accessor read out of the wire.
+            assert_eq!(
+                fh.transfer_characteristic_kind().unwrap().code(),
+                fh.transfer_characteristic
+            );
+        }
+    }
+
+    /// Accessor surfaces the outer-Option `None` for every
+    /// "unknown / unspecified" + reserved §6.1.1
+    /// `transfer_characteristic` code. The frame-header parser reads
+    /// the field as a verbatim u8 (no masking), so any value
+    /// `0..=255` is reachable from a well-formed wire packet. We
+    /// assert at the byte level rather than by hand-building the
+    /// struct: this exercises the same code path a real decoder would
+    /// hit when handed a stream that pinned "unknown" or one of the
+    /// reserved codes.
+    #[test]
+    fn transfer_characteristic_kind_accessor_returns_none_for_unknown_and_reserved_codes() {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let build = |code: u8| -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame_with_meta(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y422,
+                0,
+                &luma,
+                &chroma,
+                false,
+                false,
+                0,
+                FrameMeta {
+                    transfer_characteristic: code,
+                    ..FrameMeta::default()
+                },
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            buf
+        };
+
+        // Every byte that is not one of the three named codes must
+        // surface as outer-Option `None` from the typed accessor. The
+        // helper [`transfer_characteristic_from_code`] already
+        // enumerates the unknown + reserved set; we cross-check via
+        // the FrameHeader path here.
+        for code in 0u8..=255 {
+            let is_named = matches!(code, 1 | 16 | 18);
+            if is_named {
+                continue;
+            }
+            let buf = build(code);
+            let (fh, _) = parse_frame(&buf).unwrap();
+            assert_eq!(fh.transfer_characteristic, code);
+            assert_eq!(
+                fh.transfer_characteristic_kind(),
+                None,
+                "unknown/reserved code {code} must surface as None via the accessor",
+            );
+        }
+
+        // Hand-built struct path: same outer-Option `None` semantics
+        // when a downstream caller assembles a `FrameHeader` directly
+        // (e.g. a probe stage that didn't go through `parse_frame`).
+        let fh_unknown = FrameHeader {
+            frame_size: 0,
+            frame_header_size: 20,
+            bitstream_version: 1,
+            width: 64,
+            height: 48,
+            chroma_format: ChromaFormat::Y444,
+            interlace_mode: 0,
+            aspect_ratio_information: 0,
+            frame_rate_code: 0,
+            color_primaries: 0,
+            transfer_characteristic: 0, // unknown per §6.1.1
+            matrix_coefficients: 0,
+            alpha_channel_type: 0,
+            luma_qmat: [4u8; 64],
+            chroma_qmat: [4u8; 64],
+        };
+        assert_eq!(fh_unknown.transfer_characteristic_kind(), None);
     }
 }

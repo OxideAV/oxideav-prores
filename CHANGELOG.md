@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed accessor `FrameHeader::transfer_characteristic_kind()` for
+  the RDD 36 §6.1.1 `transfer_characteristic` field.** New fieldless
+  enum `TransferCharacteristic` names the three defined nonreserved
+  codes (`Bt1886` = 1 — the BT.601 / BT.709 / BT.2020 OETF; `St2084`
+  = 16 — the SMPTE ST 2084:2014 Inverse-EOTF, a.k.a. PQ; `Hlg` = 18 —
+  the BT.2100-2 HLG Reference OETF) with `code()` for the on-the-wire
+  byte. Unlike `color_primaries` and `matrix_coefficients`, the spec
+  does not enumerate these in a Table — §6.1.1 spells out each OETF
+  formula in prose and ends with the note that the nonreserved code
+  numbers agree with Table 3 of ITU-T H.273. The raw
+  `transfer_characteristic` u8 stays on the struct (wire-level
+  fidelity); the new accessor returns
+  `Option<TransferCharacteristic>` so downstream colour-management
+  code can switch on the named variant without re-deriving §6.1.1 at
+  every call site. Outer-Option `None` for the
+  "unknown / unspecified" codes (0 and 2) plus every reserved code
+  (`3..=15`, `17`, `19..=255`) preserves the wire-level distinction
+  between "the stream pins ST 2084"
+  (`Some(TransferCharacteristic::St2084)`) and "the stream did not
+  pin a known transfer function" (`None`). Two unit tests in
+  `src/frame.rs`: all three named codes round-trip via `parse_frame`
+  over a `write_frame_with_meta`-emitted header, with the variant's
+  `code()` round-tripping back to the on-wire byte; every other byte
+  value `0..=255` surfaces as outer-Option `None`, exercised both via
+  `parse_frame` and on a hand-built `FrameHeader`. Mirrors the proven
+  `matrix_coefficients_kind()` / `color_primaries_kind()` /
+  `alpha_kind()` accessor shape — same outer-Option discriminant,
+  same `code()` round-trip property — so a consumer reading a parsed
+  packet can call `fh.transfer_characteristic_kind()`,
+  `fh.color_primaries_kind()`, and `fh.matrix_coefficients_kind()`
+  in a single read.
+
 - **Typed accessor `FrameHeader::matrix_coefficients_kind()` for the
   RDD 36 §6.1.1 Table 6 `matrix_coefficients` field.** The raw
   `matrix_coefficients` u8 stays on the struct (wire-level fidelity);

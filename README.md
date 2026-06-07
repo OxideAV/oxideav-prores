@@ -120,9 +120,14 @@ P3D65 on the primaries side; Bt709 / Bt601 / Bt2020Ncl on the matrix
 side — and the spec's "unknown / unspecified" codes (0 and 2 for
 Tables 5, 6) cleanly surface as `None` so a colour-management stage
 can distinguish a stream that pins BT.2020 from one that says
-"unknown". `transfer_characteristic` (RDD 36 §6.1.1 names only three
-of the H.273 codes inline — BT.601/709/2020 EOTF, ST 2084 PQ, BT.2100
-HLG) stays exposed as a raw u8 in [`frame::FrameMeta`].
+"unknown". `transfer_characteristic` gets the same typed-accessor
+treatment via [`frame::TransferCharacteristic`] +
+[`frame::transfer_characteristic_from_code`] — RDD 36 §6.1.1 names
+only three nonreserved codes (1 = BT.601/709/2020 OETF, here
+`Bt1886`; 16 = SMPTE ST 2084 Inverse-EOTF, here `St2084`; 18 =
+BT.2100-2 HLG Reference OETF, here `Hlg`) and unlike the primary /
+matrix fields it does so in prose rather than a numbered Table. The
+raw u8 stays on [`frame::FrameMeta`] for wire-level callers.
 
 Downstream stages that prefer the typed-accessor surface (mirroring
 `alpha_kind()` / `interlace_kind()` on the same struct) call
@@ -143,7 +148,14 @@ The same shape applies to the Table 6 matrix via
 codes (0 and 2) plus every reserved code in `[3, 4, 5, 7, 8, 10..=255]`.
 A Y'CbCr → R'G'B' conversion stage can then evaluate the §6.1.1
 derivation formulas off `mc.luma_coefficients()` (the `(K_R, K_G, K_B)`
-triple straight from Table 6) without a second table lookup. Reading
+triple straight from Table 6) without a second table lookup.
+
+The transfer-function field follows the same pattern via
+[`FrameHeader::transfer_characteristic_kind`], which returns
+`Option<TransferCharacteristic>` — `Some(_)` for the three named
+codes (1 / 16 / 18, i.e. BT.1886 / ST 2084 / HLG), `None` for the
+"unknown" codes (0 and 2) plus every reserved code in `[3..=15]`,
+`17`, and `[19..=255]`. Reading `fh.transfer_characteristic_kind()`,
 `fh.matrix_coefficients_kind()`, `fh.color_primaries_kind()`, and
 `fh.alpha_kind()` in one chain gives a downstream colour-management
 stage every named §6.1.1 field at once.
