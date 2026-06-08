@@ -259,6 +259,19 @@ instead of silently defaulting. Packet sizes grow monotonically as
 `mbs_per_slice` shrinks (apcn: 6708 → 7106 bytes from 8 → 1
 MBs/slice; ~6%). See `tests/ffmpeg_cross_decode.rs`.
 
+The decoder side exposes the same `1 / 2 / 4 / 8` surface via the
+typed accessor [`frame::PictureHeader::mbs_per_slice`] —
+`Option<u8>` with `Some(_)` carrying the slice width in macroblocks
+for the four defined u2 codes (`0` → 1, `1` → 2, `2` → 4, `3` → 8)
+and `None` for any out-of-range value a hand-assembled
+`PictureHeader` could carry. The accessor folds the
+`1 << log2_desired_slice_size_in_mb` derivation that
+[`frame::compute_slice_sizes`] seeds with into a single method on
+the parsed header, so a transcode pipeline can forward
+`ph.mbs_per_slice()` straight into an
+`EncoderConfig::with_mbs_per_slice` chain without an intermediate
+shift.
+
 ### Explicit profile selection
 
 By default the encoder maps `CodecParameters::bit_rate` to one of the

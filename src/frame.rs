@@ -1251,6 +1251,62 @@ pub struct PictureHeader {
     pub log2_desired_slice_size_in_mb: u8,
 }
 
+impl PictureHeader {
+    /// Typed accessor for the RDD 36 §5.3 / §6.3 picture-header
+    /// `log2_desired_slice_size_in_mb` field. Returns the actual
+    /// macroblocks-per-slice value (`1`, `2`, `4`, or `8`) when the
+    /// stream's u2 code is one of the four defined values
+    /// (`0` → 1 MB, `1` → 2 MBs, `2` → 4 MBs, `3` → 8 MBs), and `None`
+    /// for any out-of-range value a hand-built `PictureHeader` could
+    /// carry (`4..=255`).
+    ///
+    /// The raw `log2_desired_slice_size_in_mb` field on this struct is
+    /// the u2 code as it appeared on the wire (masked to the two-bit
+    /// width by [`parse_picture_header`] — bits 4..=5 of byte 7 of the
+    /// picture header). Call this accessor when a downstream pipeline
+    /// stage wants the slice width directly (the same `1 / 2 / 4 / 8`
+    /// surface that the encoder side exposes through
+    /// [`crate::encoder::EncoderConfig::mbs_per_slice`] and the same
+    /// per-row template [`compute_slice_sizes`] consumes as its
+    /// `1 << log2_desired_slice_size_in_mb` seed value) rather than
+    /// re-deriving the `1 << code` shift at every call site.
+    ///
+    /// The u8 return mirrors the `Option<u8>` shape that
+    /// [`crate::encoder::EncoderConfig::mbs_per_slice`] already uses on
+    /// the encoder side: the inner value is the slice width in
+    /// macroblocks (always a power of two in `{1, 2, 4, 8}`), and the
+    /// outer-Option `None` carries the "the field carried an
+    /// out-of-range code that does not correspond to any defined slice
+    /// width" signal — distinct from `Some(1)` (which is the smallest
+    /// defined slice width and a legitimate wire value).
+    ///
+    /// Because `parse_picture_header` masks the field to two bits
+    /// before storing it, every successfully-parsed `PictureHeader`
+    /// satisfies `log2_desired_slice_size_in_mb in 0..=3` and the
+    /// accessor returns `Some(_)` unconditionally; the `None` arm only
+    /// fires for a hand-assembled struct (a downstream probe stage
+    /// that bypassed `parse_picture_header` could carry an
+    /// out-of-range value). The accessor is the natural mirror of the
+    /// [`FrameHeader::interlace_kind`] / [`FrameHeader::alpha_kind`]
+    /// surface: same outer-Option discriminant, same wire-faithful
+    /// `None` for out-of-range codes, and the returned slice width is
+    /// the exact same `1 / 2 / 4 / 8` surface
+    /// [`crate::encoder::EncoderConfig::mbs_per_slice`] consumes —
+    /// so a caller parsing a picture header can call
+    /// `ph.mbs_per_slice()` and forward the result straight into an
+    /// `EncoderConfig` for a transcode without an intermediate
+    /// `1 << code` conversion.
+    pub fn mbs_per_slice(&self) -> Option<u8> {
+        match self.log2_desired_slice_size_in_mb {
+            0 => Some(1),
+            1 => Some(2),
+            2 => Some(4),
+            3 => Some(8),
+            _ => None,
+        }
+    }
+}
+
 /// Parse a picture_header(). Returns the header and a slice that begins
 /// at the slice_table().
 pub fn parse_picture_header(data: &[u8]) -> Result<(PictureHeader, &[u8])> {
@@ -3112,6 +3168,78 @@ mod tests {
                 fh.aspect_ratio(),
                 None,
                 "code {code} must surface as outer-Option None on hand-built struct",
+            );
+        }
+    }
+
+    /// `PictureHeader::mbs_per_slice()` lifts the raw u2
+    /// `log2_desired_slice_size_in_mb` field into the actual
+    /// macroblocks-per-slice value (`1 << code`) for each of the four
+    /// defined codes. We exercise the writer/parser round trip rather
+    /// than constructing the struct directly so the test also verifies
+    /// that `write_picture_header` lays the field into bits 4..=5 of
+    /// byte 7 of the picture header and `parse_picture_header` reads
+    /// it back with the correct mask.
+    #[test]
+    fn mbs_per_slice_accessor_recognises_all_four_named_codes() {
+        let cases = [(0u8, 1u8), (1, 2), (2, 4), (3, 8)];
+        for (code, expected_mbs) in cases {
+            let mut buf = Vec::new();
+            write_picture_header(&mut buf, 4096, 1, code);
+            let (ph, _) = parse_picture_header(&buf).unwrap();
+            assert_eq!(ph.log2_desired_slice_size_in_mb, code);
+            assert_eq!(
+                ph.mbs_per_slice(),
+                Some(expected_mbs),
+                "code {code} should surface as {expected_mbs}-MBs-per-slice via the accessor",
+            );
+            // Cross-check: the accessor and the inverse
+            // `1 << log2_desired_slice_size_in_mb` derivation
+            // [`compute_slice_sizes`] seeds with must agree for every
+            // wire-reachable code (defends against a typo that would
+            // split the accessor from the slice-table derivation).
+            assert_eq!(
+                ph.mbs_per_slice().unwrap(),
+                1u8 << ph.log2_desired_slice_size_in_mb,
+                "accessor must agree with `1 << log2_desired_slice_size_in_mb` for code {code}",
+            );
+        }
+    }
+
+    /// Accessor surfaces the outer-Option `None` for any out-of-range
+    /// value a hand-assembled `PictureHeader` could carry. The
+    /// `parse_picture_header` path masks the field to two bits before
+    /// storing it, so a parsed struct always satisfies the `0..=3`
+    /// invariant and the accessor unconditionally returns `Some(_)`;
+    /// the `None` arm only fires when a downstream caller assembles a
+    /// `PictureHeader` directly with a code in `4..=255`.
+    #[test]
+    fn mbs_per_slice_accessor_returns_none_for_out_of_range_codes() {
+        for code in [4u8, 5, 7, 8, 15, 16, 100, 255] {
+            let ph = PictureHeader {
+                picture_header_size: 8,
+                picture_size: 0,
+                deprecated_number_of_slices: 0,
+                log2_desired_slice_size_in_mb: code,
+            };
+            assert_eq!(
+                ph.mbs_per_slice(),
+                None,
+                "code {code} must surface as outer-Option None on hand-built struct",
+            );
+        }
+
+        // Every parsed `PictureHeader` is wire-clean (the parser masks
+        // the field to two bits), so the accessor returns `Some(_)`
+        // for every value the parser can emit. This pin documents
+        // that invariant.
+        for code in 0u8..=3 {
+            let mut buf = Vec::new();
+            write_picture_header(&mut buf, 0, 0, code);
+            let (ph, _) = parse_picture_header(&buf).unwrap();
+            assert!(
+                ph.mbs_per_slice().is_some(),
+                "every parsed picture header should have a defined slice width (code {code})",
             );
         }
     }

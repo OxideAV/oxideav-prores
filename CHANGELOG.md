@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed accessor `PictureHeader::mbs_per_slice()` for the RDD 36 §5.3 /
+  §6.3 `log2_desired_slice_size_in_mb` field.** The raw u2 code stays
+  on the struct (wire-level fidelity); the new accessor returns
+  `Option<u8>` carrying the actual macroblocks-per-slice value
+  (`0` → 1, `1` → 2, `2` → 4, `3` → 8) for the four defined codes,
+  and `None` for any out-of-range value a hand-assembled
+  `PictureHeader` could carry (`4..=255`). The return mirrors the
+  `Option<u8>` shape the encoder side already uses on
+  `EncoderConfig::mbs_per_slice` and the slice width is the same
+  `1 / 2 / 4 / 8` surface `compute_slice_sizes` seeds with via its
+  `1 << log2_desired_slice_size_in_mb` derivation — so a transcode
+  pipeline can forward `ph.mbs_per_slice()` straight into an
+  `EncoderConfig::with_mbs_per_slice` chain without an intermediate
+  shift. Two unit tests in `src/frame.rs`: all four named codes
+  round-trip via `parse_picture_header` over a
+  `write_picture_header`-emitted header (with the accessor and the
+  `1 << ph.log2_desired_slice_size_in_mb` derivation cross-checked);
+  out-of-range hand-built codes (`4, 5, 7, 8, 15, 16, 100, 255`)
+  surface as outer-Option `None`, and the round-trip path pins the
+  invariant that every parsed header has `Some(_)` (the parser masks
+  the field to two bits).
 - **Typed accessor `FrameHeader::aspect_ratio()` for the RDD 36 §6.2 /
   Table 3 `aspect_ratio_information` field.** The raw
   `aspect_ratio_information` u4 stays on the struct (wire-level
