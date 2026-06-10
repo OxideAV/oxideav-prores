@@ -1346,6 +1346,27 @@ impl PictureHeader {
             _ => None,
         }
     }
+
+    /// The RDD 36 §6.3 picture_header `deprecated_number_of_slices`
+    /// field as it appeared on the wire.
+    ///
+    /// Per the RDD 36 corpus notes this field is computed by some
+    /// encoders but **ignored** by Apple's and other decoders, which
+    /// recompute the slice count from the picture geometry instead (see
+    /// [`slice_count`]). This crate's decode path likewise derives the
+    /// slice count from `width_in_mb` / `log2_desired_slice_size_in_mb`
+    /// / `height_in_mb` and never trusts this field; the accessor is
+    /// provided for callers that want to *inspect* the value a stream
+    /// declared — e.g. to flag an encoder whose declared count
+    /// disagrees with the geometry — without reading the raw struct
+    /// field. Pair it with [`slice_count`] to cross-check: a
+    /// well-formed stream satisfies `ph.deprecated_slice_count() as
+    /// usize == slice_count(width_in_mb, ph.log2_desired_slice_size_in_mb,
+    /// height_in_mb)`, but a stream that violates this is still decoded
+    /// correctly because the decoder uses the geometry, not this field.
+    pub fn deprecated_slice_count(&self) -> u16 {
+        self.deprecated_number_of_slices
+    }
 }
 
 /// Parse a picture_header(). Returns the header and a slice that begins
@@ -1492,6 +1513,38 @@ pub fn compute_slice_sizes(width_in_mb: usize, log2_desired_slice_size_in_mb: u8
     sizes
 }
 
+/// Total number of slices a single picture is partitioned into, per
+/// RDD 36 §7 (the slice partitioning the §6.3 `slice_table()` indexes).
+///
+/// A picture is `height_in_mb` macroblock rows tall, and every row is
+/// split into the same per-row template of widths produced by
+/// [`compute_slice_sizes`] (one slice per template entry). The total is
+/// therefore `compute_slice_sizes(width_in_mb, log2).len() * height_in_mb`.
+///
+/// This is the value the §6.3 picture_header's
+/// `deprecated_number_of_slices` field nominally carries, but RDD 36
+/// directs decoders to recompute it from the geometry rather than trust
+/// the wire field (which Apple's and other decoders ignore). Expose the
+/// recomputation here so a caller can cross-check
+/// [`PictureHeader::deprecated_slice_count`] against the geometry
+/// without re-deriving the per-row split, and so the decode path and any
+/// external probe stage share one source of truth for the count.
+///
+/// The worked geometries in the RDD 36 corpus notes hold:
+/// `1920×1080` progressive (`width_in_mb = 120`, `height_in_mb = 68`,
+/// 8-MB slices) → `15 * 68 = 1020`; `1280×720` (`80 × 45`) →
+/// `10 * 45 = 450`; `320×240` (`20 × 15`) → `3 * 15 = 45` (each row
+/// ends in an `8 + 8 + 4` tail per [`compute_slice_sizes`]); and each
+/// field of an interlaced `1920×1080` picture (`height_in_mb =
+/// (540 + 15) >> 4 = 34`) → `15 * 34 = 510`.
+pub fn slice_count(
+    width_in_mb: usize,
+    log2_desired_slice_size_in_mb: u8,
+    height_in_mb: usize,
+) -> usize {
+    compute_slice_sizes(width_in_mb, log2_desired_slice_size_in_mb).len() * height_in_mb
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1618,6 +1671,60 @@ mod tests {
         assert_eq!(compute_slice_sizes(1, 3), vec![1]);
         // log2=0 → all 1s
         assert_eq!(compute_slice_sizes(5, 0), vec![1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn slice_count_matches_rdd36_corpus_geometries() {
+        // The worked per-picture slice counts from the RDD 36 fixture
+        // corpus notes. width_in_mb = ceil(w/16), height_in_mb =
+        // ceil(picture_height/16); 8-MB slices (log2 = 3) everywhere.
+
+        // 1920×1080 progressive: 120 × 68 MBs → 15 slices/row × 68 = 1020.
+        assert_eq!(slice_count(120, 3, 68), 1020);
+        // 1280×720: 80 × 45 → 10 × 45 = 450.
+        assert_eq!(slice_count(80, 3, 45), 450);
+        // 320×240: 20 × 15 → each row is an 8+8+4 tail (3 slices) × 15 = 45.
+        assert_eq!(compute_slice_sizes(20, 3), vec![8, 8, 4]);
+        assert_eq!(slice_count(20, 3, 15), 45);
+        // Interlaced 1920×1080: each field picture is 540px tall →
+        // height_in_mb = ceil(540/16) = 34; 15 × 34 = 510 per field.
+        assert_eq!(slice_count(120, 3, 34), 510);
+        // The product is exactly compute_slice_sizes(...).len() × rows.
+        assert_eq!(
+            slice_count(120, 3, 68),
+            compute_slice_sizes(120, 3).len() * 68
+        );
+    }
+
+    #[test]
+    fn deprecated_slice_count_accessor_surfaces_wire_field() {
+        // Round-trip a picture header carrying a declared slice count
+        // and confirm the accessor surfaces the raw wire value verbatim.
+        let mut buf = Vec::new();
+        write_picture_header(
+            &mut buf, /* picture_size */ 64, /* slices */ 1020, /* log2 */ 3,
+        );
+        let (ph, _) = parse_picture_header(&buf).unwrap();
+        assert_eq!(ph.deprecated_slice_count(), 1020);
+        assert_eq!(ph.deprecated_number_of_slices, 1020);
+        // For a well-formed 1920×1080 progressive picture the declared
+        // count agrees with the geometry-derived count.
+        assert_eq!(
+            ph.deprecated_slice_count() as usize,
+            slice_count(120, ph.log2_desired_slice_size_in_mb, 68)
+        );
+
+        // A stream whose declared count *disagrees* with the geometry is
+        // still parsed (the decoder recomputes from geometry and ignores
+        // this field) — the accessor faithfully reports the bogus value.
+        let mut bogus = Vec::new();
+        write_picture_header(&mut bogus, 64, 7, 3);
+        let (ph2, _) = parse_picture_header(&bogus).unwrap();
+        assert_eq!(ph2.deprecated_slice_count(), 7);
+        assert_ne!(
+            ph2.deprecated_slice_count() as usize,
+            slice_count(120, ph2.log2_desired_slice_size_in_mb, 68)
+        );
     }
 
     #[test]

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Public `frame::slice_count` helper + `PictureHeader::deprecated_slice_count`
+  accessor (RDD 36 §6.3 / §7 slice partitioning).** `slice_count(width_in_mb,
+  log2_desired_slice_size_in_mb, height_in_mb)` returns the total number of
+  slices a single picture is partitioned into — `compute_slice_sizes(width,
+  log2).len() * height_in_mb` — the value the §6.3 picture_header's
+  `deprecated_number_of_slices` field nominally carries but which RDD 36
+  directs decoders to recompute from geometry (Apple's and other decoders
+  ignore the wire field). The decode path already derived this count inline;
+  the helper makes it a public single source of truth, verified against the
+  worked RDD 36 corpus geometries (1920×1080 progressive → 1020; 1280×720 →
+  450; 320×240 → 45 via the `8+8+4` per-row tail; each field of an interlaced
+  1920×1080 picture → 510). The companion `PictureHeader::deprecated_slice_count()`
+  typed accessor surfaces the parsed wire field so a caller can cross-check a
+  declared count against the geometry-derived one (e.g. flag an encoder whose
+  declaration disagrees) without reading the raw struct field — a stream that
+  violates the agreement is still decoded correctly because the decoder uses
+  the geometry, not this field. Two unit tests in `src/frame.rs` cover the
+  corpus geometries and the round-trip-through-writer accessor (including a
+  deliberately-bogus declared count that the accessor faithfully reports while
+  the geometry-derived `slice_count` diverges).
+
 - **Typed accessor `FrameHeader::meta()` folding the five descriptive
   RDD 36 §5.1.1 / §6.2 frame-header metadata bytes back into
   `FrameMeta`.** The per-field typed accessors added over the previous
