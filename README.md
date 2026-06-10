@@ -192,6 +192,22 @@ two §6.2-packed nibbles surface through symmetric outer-Option APIs.
 The accessor is the natural mirror of the existing reverse helper
 [`frame::aspect_ratio_from_code`].
 
+For the **re-encode** direction, [`FrameHeader::meta`] folds all five
+descriptive §5.1.1 / §6.2 metadata bytes of a parsed header back into
+the [`frame::FrameMeta`] struct the encoder consumes — a transcode
+pipeline parses an incoming packet via [`frame::parse_frame`] and
+forwards `EncoderConfig::default().with_meta(fh.meta())` so the
+outgoing stream carries the source's aspect / rate / colour metadata
+verbatim (the forwarded meta overrides the encoder's
+`CodecParameters::frame_rate` → Table 4 derivation), without copying
+the five fields by hand. The fold is verbatim — §5.1.1 documents these
+fields as descriptive hints a decoder passes through rather than
+validates, so reserved / unknown codes (which the per-field typed
+accessors above surface as `None`) survive the transcode bit-exactly,
+and an all-zero header folds to `FrameMeta::unknown()`, the encoder's
+no-op default. Same parsed-header → encoder-config forwarding shape as
+`ph.mbs_per_slice()` → `EncoderConfig::with_mbs_per_slice`.
+
 [`CodecParameters::frame_rate`]: https://docs.rs/oxideav-core/latest/oxideav_core/struct.CodecParameters.html#structfield.frame_rate
 
 ### Configurable quantisation index (RDD 36 §7.3 / Table 15)

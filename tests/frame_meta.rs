@@ -320,3 +320,60 @@ fn encoder_color_metadata_round_trips_through_decoder_helpers_bt2020_pq() {
     let (k_r, k_g, k_b) = MatrixCoefficients::Bt2020Ncl.luma_coefficients();
     assert_eq!((k_r, k_g, k_b), (0.2627, 0.6780, 0.0593));
 }
+
+/// The transcode-forwarding chain `parse_frame` → [`FrameHeader::meta`]
+/// → [`EncoderConfig::with_meta`] preserves every descriptive RDD 36
+/// §5.1.1 / §6.2 metadata byte across a full decode-side parse +
+/// re-encode, end-to-end through the high-level `Encoder` trait.
+/// Stream A pins a BT.2020 / ST 2084 PQ HDR profile (every field a
+/// named code); stream B is encoded from `fh_a.meta()` with
+/// *different* `CodecParameters::frame_rate` (25 fps would derive
+/// Table 4 code 3) — proving the forwarded meta overrides the
+/// derivation instead of being silently recomputed, exactly as a
+/// transcode pipeline needs.
+///
+/// [`FrameHeader::meta`]: oxideav_prores::frame::FrameHeader::meta
+#[test]
+fn parsed_header_meta_forwards_into_reencode_via_with_meta() {
+    let src = FrameMeta {
+        aspect_ratio_information: 3, // 16:9 (Table 3)
+        frame_rate_code: 8,          // 60 fps (Table 4)
+        color_primaries: 9,          // BT.2020 (Table 5)
+        transfer_characteristic: 16, // SMPTE ST 2084 PQ (§6.1.1)
+        matrix_coefficients: 9,      // BT.2020 NCL (Table 6)
+    };
+    let pkt_a = encode_with(
+        64,
+        48,
+        Some(Rational::new(60, 1)),
+        EncoderConfig::default().with_meta(src),
+    );
+    let (fh_a, _) = parse_frame(&pkt_a).expect("parse_frame A");
+    assert_eq!(fh_a.meta(), src, "stream A must carry the source meta");
+
+    // Re-encode forwarding the parsed header's folded meta. The 25 fps
+    // params rate would derive frame_rate_code 3 if the meta were
+    // dropped; the forwarded code 8 must win.
+    let pkt_b = encode_with(
+        64,
+        48,
+        Some(Rational::new(25, 1)),
+        EncoderConfig::default().with_meta(fh_a.meta()),
+    );
+    let (fh_b, _) = parse_frame(&pkt_b).expect("parse_frame B");
+    assert_eq!(
+        fh_b.meta(),
+        fh_a.meta(),
+        "re-encoded stream must carry the forwarded meta verbatim"
+    );
+    assert_eq!(fh_b.frame_rate_code, 8, "forwarded code beats derivation");
+
+    // Anti-coverage: the same re-encode WITHOUT forwarding derives
+    // code 3 from the 25 fps params and zeroes the colour fields —
+    // confirming the forwarding (not coincidence) preserved the meta.
+    let pkt_c = encode_with(64, 48, Some(Rational::new(25, 1)), EncoderConfig::default());
+    let (fh_c, _) = parse_frame(&pkt_c).expect("parse_frame C");
+    assert_eq!(fh_c.frame_rate_code, 3);
+    assert_eq!(fh_c.color_primaries, 0);
+    assert_ne!(fh_c.meta(), fh_b.meta());
+}

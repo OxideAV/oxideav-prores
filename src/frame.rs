@@ -494,6 +494,47 @@ impl FrameHeader {
     pub fn aspect_ratio(&self) -> Option<oxideav_core::Rational> {
         aspect_ratio_from_code(self.aspect_ratio_information)
     }
+
+    /// Typed accessor folding the five descriptive RDD 36 §5.1.1 / §6.2
+    /// frame-header metadata bytes — `aspect_ratio_information` (§6.2
+    /// Table 3), `frame_rate_code` (§6.2 Table 4), `color_primaries`
+    /// (§6.1.1 Table 5), `transfer_characteristic` (§6.1.1),
+    /// `matrix_coefficients` (§6.1.1 Table 6) — back into the
+    /// [`FrameMeta`] struct the encoder consumes.
+    ///
+    /// Each raw field stays on this struct individually (wire-level
+    /// fidelity; the per-field typed accessors
+    /// [`Self::aspect_ratio`] / [`Self::frame_rate`] /
+    /// [`Self::color_primaries_kind`] /
+    /// [`Self::transfer_characteristic_kind`] /
+    /// [`Self::matrix_coefficients_kind`] lift them to named values).
+    /// This accessor serves the *re-encode* direction instead: a
+    /// transcode pipeline that parses an incoming packet via
+    /// [`parse_frame`] can forward `fh.meta()` straight into
+    /// [`crate::encoder::EncoderConfig::with_meta`] so the outgoing
+    /// stream carries the same descriptive metadata, without copying
+    /// the five fields by hand at every call site — the same
+    /// parsed-header → encoder-config forwarding shape as
+    /// [`PictureHeader::mbs_per_slice`] →
+    /// [`crate::encoder::EncoderConfig::with_mbs_per_slice`].
+    ///
+    /// The returned value is the raw bytes verbatim (no named-value
+    /// filtering): §5.1.1 documents these fields as descriptive hints a
+    /// decoder passes through rather than validates, so even a
+    /// reserved / unknown code (which the per-field typed accessors
+    /// surface as `None`) is preserved bit-exactly across the
+    /// transcode. An all-zero header yields a value for which
+    /// [`FrameMeta::is_unknown`] is `true` — identical to
+    /// [`FrameMeta::unknown`], the encoder's no-op default.
+    pub fn meta(&self) -> FrameMeta {
+        FrameMeta {
+            aspect_ratio_information: self.aspect_ratio_information,
+            frame_rate_code: self.frame_rate_code,
+            color_primaries: self.color_primaries,
+            transfer_characteristic: self.transfer_characteristic,
+            matrix_coefficients: self.matrix_coefficients,
+        }
+    }
 }
 
 /// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
@@ -694,7 +735,7 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
 /// All fields are documented in RDD 36 §5.1.1 / §6.2 and default to 0
 /// (= "unknown / unspecified") so RDD 36 decoders treat them as a hint
 /// only.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameMeta {
     /// `aspect_ratio_information` per §6.2 / Table 3 (0 = unknown,
     /// 1 = square pixels, 2 = 4:3, 3 = 16:9, 4..=15 = reserved).
@@ -3242,5 +3283,118 @@ mod tests {
                 "every parsed picture header should have a defined slice width (code {code})",
             );
         }
+    }
+
+    /// Helper for the `FrameHeader::meta()` tests: emit a frame header
+    /// carrying `meta` via `write_frame_with_meta` (flat default qmats,
+    /// progressive 4:2:2, no alpha) and parse it back.
+    fn parse_header_with_meta(meta: FrameMeta) -> FrameHeader {
+        let luma = [4u8; 64];
+        let chroma = [4u8; 64];
+        let mut buf = Vec::new();
+        write_frame_with_meta(
+            &mut buf,
+            0,
+            64,
+            48,
+            ChromaFormat::Y422,
+            0,
+            &luma,
+            &chroma,
+            false,
+            false,
+            0,
+            meta,
+        );
+        let total = buf.len() as u32;
+        buf[0..4].copy_from_slice(&total.to_be_bytes());
+        let (fh, _) = parse_frame(&buf).unwrap();
+        fh
+    }
+
+    /// `FrameHeader::meta()` round-trips a fully-populated `FrameMeta`
+    /// (RDD 36 §5.1.1 / §6.2 Tables 3 + 4, §6.1.1 Tables 5 + 6) through
+    /// the writer + parser bit-exactly, and the lifted per-field typed
+    /// accessors stay consistent with the folded struct — so a
+    /// transcode pipeline can hand `fh.meta()` to
+    /// `EncoderConfig::with_meta` and lose nothing relative to copying
+    /// the five raw fields by hand.
+    #[test]
+    fn meta_accessor_round_trips_named_codes_through_parse() {
+        use oxideav_core::Rational;
+        // BT.2020 / ST 2084 PQ HDR profile at 16:9, 60 fps — every
+        // field a named (nonreserved) code: aspect 3 = 16:9 (Table 3),
+        // rate 8 = 60 fps (Table 4), primaries 9 = BT.2020 (Table 5),
+        // transfer 16 = SMPTE ST 2084 (§6.1.1), matrix 9 = BT.2020 NCL
+        // (Table 6).
+        let src = FrameMeta {
+            aspect_ratio_information: 3,
+            frame_rate_code: 8,
+            color_primaries: 9,
+            transfer_characteristic: 16,
+            matrix_coefficients: 9,
+        };
+        let fh = parse_header_with_meta(src);
+        let meta = fh.meta();
+        assert_eq!(meta, src, "fh.meta() must equal the written FrameMeta");
+        // The folded struct and the raw wire-level fields must agree
+        // field-by-field (defends against a typo that swaps two arms
+        // of the fold).
+        assert_eq!(meta.aspect_ratio_information, fh.aspect_ratio_information);
+        assert_eq!(meta.frame_rate_code, fh.frame_rate_code);
+        assert_eq!(meta.color_primaries, fh.color_primaries);
+        assert_eq!(meta.transfer_characteristic, fh.transfer_characteristic);
+        assert_eq!(meta.matrix_coefficients, fh.matrix_coefficients);
+        // Consistency with the per-field typed accessors: the lifted
+        // named values must match what the folded raw bytes lift to.
+        assert_eq!(fh.aspect_ratio(), Some(Rational::new(16, 9)));
+        assert_eq!(fh.frame_rate(), Some(Rational::new(60, 1)));
+        assert_eq!(fh.color_primaries_kind(), Some(ColorPrimaries::Bt2020));
+        assert_eq!(
+            fh.transfer_characteristic_kind(),
+            Some(TransferCharacteristic::St2084)
+        );
+        assert_eq!(
+            fh.matrix_coefficients_kind(),
+            Some(MatrixCoefficients::Bt2020Ncl)
+        );
+        assert!(!meta.is_unknown());
+    }
+
+    /// `FrameHeader::meta()` is a verbatim fold: reserved / unknown
+    /// codes (which the per-field typed accessors surface as `None`)
+    /// are preserved bit-exactly, and the all-zero header folds to the
+    /// encoder's `FrameMeta::unknown()` no-op default. §5.1.1 documents
+    /// these fields as descriptive hints a decoder passes through
+    /// rather than validates, so the re-encode direction must not
+    /// filter them.
+    #[test]
+    fn meta_accessor_preserves_unknown_and_reserved_codes_verbatim() {
+        // All-zero header — "unknown / unspecified" on every field.
+        let fh = parse_header_with_meta(FrameMeta::default());
+        assert_eq!(fh.meta(), FrameMeta::unknown());
+        assert!(fh.meta().is_unknown());
+
+        // Reserved codes on every field: aspect 15 (Table 3 reserves
+        // 4..=15), rate 12 (Table 4 reserves 12..=15), primaries 3
+        // (reserved per Table 5), transfer 17 (reserved per §6.1.1),
+        // matrix 4 (reserved per Table 6). Each per-field typed
+        // accessor lifts to `None`, yet the fold must carry the raw
+        // bytes through unchanged.
+        let src = FrameMeta {
+            aspect_ratio_information: 15,
+            frame_rate_code: 12,
+            color_primaries: 3,
+            transfer_characteristic: 17,
+            matrix_coefficients: 4,
+        };
+        let fh = parse_header_with_meta(src);
+        assert_eq!(fh.meta(), src, "reserved codes must fold through verbatim",);
+        assert_eq!(fh.aspect_ratio(), None);
+        assert_eq!(fh.frame_rate(), None);
+        assert_eq!(fh.color_primaries_kind(), None);
+        assert_eq!(fh.transfer_characteristic_kind(), None);
+        assert_eq!(fh.matrix_coefficients_kind(), None);
+        assert!(!fh.meta().is_unknown());
     }
 }

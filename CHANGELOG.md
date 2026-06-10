@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed accessor `FrameHeader::meta()` folding the five descriptive
+  RDD 36 §5.1.1 / §6.2 frame-header metadata bytes back into
+  `FrameMeta`.** The per-field typed accessors added over the previous
+  rounds (`aspect_ratio()` / `frame_rate()` / `color_primaries_kind()`
+  / `transfer_characteristic_kind()` / `matrix_coefficients_kind()`)
+  serve the *read* direction — lifting each raw byte to a named value.
+  This accessor serves the **re-encode** direction: a transcode
+  pipeline that parses an incoming packet via `parse_frame` forwards
+  `EncoderConfig::default().with_meta(fh.meta())` so the outgoing
+  stream carries the source's `aspect_ratio_information` (§6.2
+  Table 3), `frame_rate_code` (§6.2 Table 4), `color_primaries`
+  (§6.1.1 Table 5), `transfer_characteristic` (§6.1.1), and
+  `matrix_coefficients` (§6.1.1 Table 6) without copying the five
+  fields by hand at every call site — the same parsed-header →
+  encoder-config forwarding shape as the previous round's
+  `ph.mbs_per_slice()` → `EncoderConfig::with_mbs_per_slice`. The fold
+  is verbatim (no named-value filtering): §5.1.1 documents these
+  fields as descriptive hints a decoder passes through rather than
+  validates, so reserved / unknown codes — which the per-field typed
+  accessors surface as outer-Option `None` — survive the transcode
+  bit-exactly, and an all-zero header folds to `FrameMeta::unknown()`
+  (the encoder's no-op default, `is_unknown() == true`). `FrameMeta`
+  additionally derives `PartialEq` / `Eq` (additive) so the fold is
+  directly assertable. Two unit tests in `src/frame.rs` (a
+  fully-named BT.2020 / ST 2084 PQ profile round-trips through
+  writer + parser with the folded struct cross-checked field-by-field
+  against the raw header and the per-field typed accessors; reserved
+  codes on every field fold through verbatim while every per-field
+  accessor returns `None`) + one integration test in
+  `tests/frame_meta.rs` driving the full transcode chain through the
+  high-level `Encoder` trait — stream A pins the HDR profile, stream
+  B re-encodes from `fh_a.meta()` with conflicting
+  `CodecParameters::frame_rate` (25 fps would derive Table 4 code 3)
+  proving the forwarded meta overrides the derivation, and an
+  unforwarded anti-coverage encode confirms the preservation is the
+  forwarding's doing. 319 → 322 tests.
+
 - **Typed accessor `PictureHeader::mbs_per_slice()` for the RDD 36 §5.3 /
   §6.3 `log2_desired_slice_size_in_mb` field.** The raw u2 code stays
   on the struct (wire-level fidelity); the new accessor returns
