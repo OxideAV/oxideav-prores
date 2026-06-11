@@ -770,6 +770,31 @@ progressive Standard cost since total coefficient work is unchanged.
 cargo bench --bench encode -- --warm-up-time 1 --measurement-time 3
 ```
 
+### IDCT accuracy qualification (RDD 36 §7.4 + Annex A)
+
+RDD 36 §7.4 permits any IDCT implementation — fixed- or floating-point —
+provided it complies with Annex A, "IDCT Implementation Accuracy
+Qualification". `tests/idct_annex_a.rs` runs the full Annex A procedure
+against this crate's production [`dct::idct8x8`]: three data sets of
+10,000 random 8×8 blocks each at the spec's `(L, H)` amplitude ranges
+(`(2048, 2047)` full-range, `(40, 40)` low-amplitude, `(2400, 2400)`
+output-clip overdrive), forward-transformed at reference (f64)
+precision, rounded to quarter-integers and clipped to
+`-2048.0..=+2047.75` per step 3, then inverse-transformed by both the
+f64 reference and the f32 production IDCT (outputs clipped to
+`-256.0..=+256.0`), with the step-7 sign-flipped rerun. All five
+acceptance criteria hold with large margin — worst measured: ppe
+7.1e-4 (limit 0.15), pmse 2.8e-8 (0.002), omse 7.1e-9 (0.001), pme
+2.9e-6 (0.0015), |ome| 5.4e-8 (0.00015). The quarter-integer inputs
+are exactly representable in f32 (≤ 13 significand bits), so both
+transforms see bit-identical inputs; a companion test pins that
+exactness. Annex A's random source ("the random number generator in
+the appendix of IEEE Std 1180-1990") is not staged under `docs/`, so a
+seeded crate-local LCG with rejection sampling substitutes — the
+generator affects only run-to-run reproducibility, not the validity of
+the measured error terms; every range, count, rounding rule, clip
+bound, and threshold is verbatim from Annex A.
+
 ### Fast paths in the DCT module
 
 Both the decoder and the encoder probe the 8x8 block before invoking

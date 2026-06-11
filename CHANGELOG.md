@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **RDD 36 Annex A IDCT accuracy qualification harness
+  (`tests/idct_annex_a.rs`).** §7.4 permits any IDCT implementation —
+  fixed- or floating-point — but requires it to "comply with Annex A,
+  'IDCT Implementation Accuracy Qualification'"; the crate's f32
+  `dct::idct8x8` had never been qualified. The new harness implements
+  the full seven-step Annex A procedure: three data sets of 10,000
+  random 8×8 blocks at the spec's `(L, H)` amplitude ranges
+  (`(2048, 2047)` full 12-bit signed range, `(40, 40)` low-amplitude,
+  `(2400, 2400)` overdriving the ±256 output clip), reference-precision
+  (f64) forward DCT built as the transpose of the §7.4 IDCT kernel the
+  spec prints in full, step-3 quarter-integer rounding (×4, round,
+  ÷4) with the `-2048.0..=+2047.75` clip, f64 reference IDCT vs. the
+  f32 production IDCT (both outputs clipped to `-256.0..=+256.0`),
+  per-pixel-position error accumulation, and the step-7 sign-flipped
+  rerun over the same integer sequence. All five acceptance criteria
+  pass with 2-5 orders of magnitude of headroom — worst measured
+  across all six runs: ppe 7.1e-4 (limit 0.15), pmse 2.8e-8 (0.002),
+  omse 7.1e-9 (0.001), pme 2.9e-6 (0.0015), |ome| 5.4e-8 (0.00015) —
+  and the per-run figures are printed for inspection. A companion test
+  pins the harness's f64 → f32 demotion claim (every step-3
+  quarter-integer needs ≤ 13 significand bits, so both transforms see
+  bit-identical inputs). Docs note: Annex A's step-1 random source
+  defers to "the random number generator in the appendix of IEEE Std
+  1180-1990", which is not staged under `docs/video/prores/` — a
+  seeded crate-local LCG with power-of-two rejection sampling
+  (unbiased uniform over `-L..=+H`) substitutes, affecting only
+  run-to-run reproducibility, not the statistical validity of the
+  measured error terms; every range, block count, rounding rule, clip
+  bound, and threshold is verbatim from Annex A. The stale
+  `src/dct.rs` module comment (claiming the spec mandates an integer
+  DCT) is corrected to cite §7.4's fixed-or-floating-point allowance +
+  the Annex A qualification. 324 → 328 tests.
+
 - **Public `frame::slice_count` helper + `PictureHeader::deprecated_slice_count`
   accessor (RDD 36 §6.3 / §7 slice partitioning).** `slice_count(width_in_mb,
   log2_desired_slice_size_in_mb, height_in_mb)` returns the total number of
