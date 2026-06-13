@@ -821,9 +821,10 @@ Y-plane byte round-trips to `v` exactly.
 
 ## Fuzzing
 
-A `cargo-fuzz` harness lives under `fuzz/` with three panic-free
+A `cargo-fuzz` harness lives under `fuzz/` with five panic-free
 targets that drive arbitrary attacker-controlled bytes through
-ProRes's public decode entry points and header parsers:
+ProRes's public decode entry points, header parsers, and entropy
+coders:
 
 * `decode_packet` — feeds bytes into [`decoder::decode_packet`]. Covers
   the RDD 36 §5.1 frame() outer framing, §6.1.1 frame_header() (`shall
@@ -851,13 +852,32 @@ ProRes's public decode entry points and header parsers:
   to drive than the full decode chain, so libFuzzer can explore the
   header arithmetic and quant-matrix loading branches at a higher
   rate per second.
+* `decode_entropy` — feeds bytes *directly* into
+  [`entropy::decode_scanned_coefficients`], the RDD 36 §7.1.1
+  run/level/sign DC + AC coder, with no §5.1 framing or §6.1.1 header
+  gating in front of it. The per-call `num_blocks` is derived from the
+  input's own first byte (capped to a slice-sized envelope so a worker
+  never commits a multi-gigabyte allocation). This drives the §7.1.1.1
+  Rice / exp-Golomb combo reader and the DC-difference / AC-run codebook
+  adaptation across far more of their input space per second than the
+  header-gated harnesses reach. This campaign surfaced (and the round
+  fixed) five panic / debug-overflow / silent-truncation paths reachable
+  only from a malformed bitstream — see the CHANGELOG `Fixed` section.
+* `decode_alpha` — feeds bytes directly into
+  [`alpha::decode_scanned_alpha`], the §7.1.2 / Table 12-14 alpha
+  run-length + difference VLC coder used by ap4h / ap4x. The per-call
+  `num_values` (BE u16, capped) and the 8-/16-bit `AlphaChannelType` are
+  derived from the input's own bytes so libFuzzer covers both alpha
+  encodings and the run-overrun arm.
 
 The two decode-pipeline harnesses peek at the wire-stream width /
 height (bytes 16..18 and 18..20, BE u16) and bail out if `width ×
 height` exceeds 65 536 pixels, so libFuzzer doesn't waste cycles on
-inputs that the upstream OOM cap would reject anyway. A daily 30-minute
-GitHub Actions run is scheduled under `.github/workflows/fuzz.yml`,
-splitting the budget across the three targets.
+inputs that the upstream OOM cap would reject anyway; the two
+entropy-coder harnesses cap the declared `num_blocks` / `num_values`
+for the same reason. A daily 30-minute GitHub Actions run is scheduled
+under `.github/workflows/fuzz.yml`, splitting the budget across the five
+targets.
 
 ```sh
 # nightly toolchain required by libfuzzer-sys

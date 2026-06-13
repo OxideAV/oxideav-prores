@@ -69,7 +69,12 @@ pub fn read_combo(
         } else {
             br.read_bits(k_rice)?
         };
-        Ok((q << k_rice) + tail)
+        // Compose in `u64` so a corrupt `(q, k_rice)` pair cannot overflow
+        // the shift/add; a value beyond `u32::MAX` is not a legal symbol.
+        let value = (((q as u64) << k_rice) + tail as u64)
+            .try_into()
+            .map_err(|_| Error::invalid("prores entropy: combo rice value out of range"))?;
+        Ok(value)
     } else {
         // Exp-Golomb branch. Already consumed `q` zeros + one 1 bit.
         // We need to redo the exp-Golomb decode from scratch starting
@@ -81,6 +86,16 @@ pub fn read_combo(
         // length = q' + 1 + (q' + k_exp), where q' = code level.
         let q_exp = q - (last_rice_q + 1);
         let suffix_bits = q_exp + k_exp;
+        // A spec-legal symbol fits in 32 bits, so its order-`k_exp`
+        // exp-Golomb suffix is at most 32 bits wide. A wider suffix can
+        // only arise from a corrupt unary prefix; reject it rather than
+        // calling `read_bits` outside its `1..=32` contract (and rather
+        // than shifting `1u64 << q_exp` off the end of a `u64`).
+        if suffix_bits > 32 {
+            return Err(Error::invalid(
+                "prores entropy: combo exp-golomb suffix too wide",
+            ));
+        }
         let suffix = if suffix_bits == 0 {
             0
         } else {
@@ -88,7 +103,14 @@ pub fn read_combo(
         };
         // Order-k_exp exp-Golomb decoded value is `(2^q_exp << k_exp) - 2^k_exp + suffix`.
         let exp_val = ((1u64 << q_exp) << k_exp) - (1u64 << k_exp) + suffix as u64;
-        Ok(((last_rice_q + 1) << k_rice) + exp_val as u32)
+        // Compose the final symbol in `u64` and reject anything that would
+        // not fit `u32` — a corrupt codeword can drive this past the
+        // 32-bit symbol range, which the old `as u32` truncation papered
+        // over (and the surrounding `+` overflowed in a debug build).
+        let value = (((last_rice_q as u64 + 1) << k_rice) + exp_val)
+            .try_into()
+            .map_err(|_| Error::invalid("prores entropy: combo exp value out of range"))?;
+        Ok(value)
     }
 }
 
@@ -143,11 +165,22 @@ pub fn read_exp_golomb(br: &mut BitReader<'_>, k: u32) -> Result<u32> {
         }
     }
     let bits = q + k;
+    // A spec-legal value fits in 32 bits, so the order-`k` exp-Golomb
+    // suffix is at most 32 bits wide. A wider suffix can only come from a
+    // corrupt unary prefix; reject it rather than calling `read_bits`
+    // outside its `1..=32` contract (and rather than shifting `1u64 << q`
+    // off the end of a `u64`).
+    if bits > 32 {
+        return Err(Error::invalid("prores entropy: exp-golomb suffix too wide"));
+    }
     let suffix = if bits == 0 { 0 } else { br.read_bits(bits)? };
     // n + 2^k = 2^(q+k), zero-extended by q bits.
     // value = (2^q << k) - 2^k + suffix.
     let val = ((1u64 << q) << k) - (1u64 << k) + suffix as u64;
-    Ok(val as u32)
+    // Reject (rather than silently truncate via `as u32`) a corrupt
+    // codeword whose value exceeds the 32-bit symbol range.
+    val.try_into()
+        .map_err(|_| Error::invalid("prores entropy: exp-golomb value out of range"))
 }
 
 pub fn write_exp_golomb(bw: &mut BitWriter, n: u32, k: u32) {
@@ -293,6 +326,14 @@ pub fn decode_scanned_coefficients(data: &[u8], num_blocks: usize) -> Result<Vec
         .checked_mul(64)
         .ok_or_else(|| Error::invalid("prores entropy: num_blocks overflow"))?;
     let mut coeffs = vec![0i32; total];
+
+    // A slice carrying zero blocks has no DC/AC syntax at all per §7.1.1:
+    // the first-DC read below would otherwise index an empty `coeffs`.
+    // Return the empty scan array without consuming any bitstream bits.
+    if num_blocks == 0 {
+        return Ok(coeffs);
+    }
+
     let mut br = BitReader::new(data);
 
     // ---- DC coefficients (one per block) ----
@@ -307,9 +348,15 @@ pub fn decode_scanned_coefficients(data: &[u8], num_blocks: usize) -> Result<Vec
         let s = cb.read(&mut br)?;
         let mut diff = inv_signed_mapping(s);
         if previous_dc_diff < 0 {
-            diff = -diff;
+            // `wrapping_neg` guards the `-i32::MIN` corner a corrupt
+            // symbol can hand us; legal DC diffs are tiny so the result
+            // is identical for any valid stream.
+            diff = diff.wrapping_neg();
         }
-        let dc = previous_dc_coeff + diff;
+        // Wrapping accumulation: legal DC values stay well within `i32`,
+        // but an adversarial difference chain could otherwise drive the
+        // running sum past `i32::MAX` and panic in a debug build.
+        let dc = previous_dc_coeff.wrapping_add(diff);
         coeffs[n] = dc;
         previous_dc_coeff = dc;
         previous_dc_diff = diff;
@@ -343,10 +390,13 @@ pub fn decode_scanned_coefficients(data: &[u8], num_blocks: usize) -> Result<Vec
         let lvl_cb = level_codebook(previous_level_symbol);
         let abs_minus_1 = lvl_cb.read(&mut br)?;
         previous_level_symbol = abs_minus_1;
-        let abs_level = abs_minus_1 as i32 + 1;
+        // Wrapping arithmetic guards the corners a corrupt `abs_minus_1`
+        // symbol can reach (`i32::MAX + 1`, `i32::MIN * -1`); legal AC
+        // levels are small so valid streams are unaffected.
+        let abs_level = (abs_minus_1 as i32).wrapping_add(1);
         // sign bit
         let sign = br.read_bit()?;
-        let level = abs_level * (1 - 2 * sign as i32);
+        let level = abs_level.wrapping_mul(1 - 2 * sign as i32);
         coeffs[n] = level;
         n += 1;
     }
@@ -368,6 +418,13 @@ pub fn encode_scanned_coefficients(coeffs: &[i32], num_blocks: usize) -> Result<
         ));
     }
     let mut bw = BitWriter::new();
+
+    // Symmetric with `decode_scanned_coefficients`: a zero-block slice
+    // emits no DC/AC syntax. Return an empty payload before the first-DC
+    // read below would index an empty `coeffs`.
+    if num_blocks == 0 {
+        return Ok(bw.finish());
+    }
 
     // ---- DC ----
     let first_dc = coeffs[0];
@@ -436,13 +493,39 @@ pub fn inv_signed_mapping(s: u32) -> i32 {
     if (s & 1) == 0 {
         (s >> 1) as i32
     } else {
-        -(((s + 1) >> 1) as i32)
+        // `wrapping_add(1)` guards the `s == u32::MAX` corner (which a
+        // corrupt symbol can reach) from panicking in a debug build; for
+        // every legal symbol `s + 1` does not overflow.
+        -((s.wrapping_add(1) >> 1) as i32)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_block_slice_decodes_to_empty_without_reading_bits() {
+        // A slice carrying zero blocks has no DC/AC syntax (§7.1.1). The
+        // decoder must return an empty scan array without indexing the
+        // empty `coeffs` Vec or consuming any payload bits — regardless of
+        // what (if anything) follows. Exercise both an empty payload and a
+        // non-empty one to confirm no bits are read.
+        for payload in [&[][..], &[0x88][..], &[0xff, 0x00, 0x13][..]] {
+            let out = decode_scanned_coefficients(payload, 0).expect("zero-block decode");
+            assert!(out.is_empty(), "zero-block scan array must be empty");
+        }
+    }
+
+    #[test]
+    fn zero_block_slice_encodes_to_empty_payload() {
+        // Symmetric encoder behaviour: a zero-block slice emits no syntax.
+        let out = encode_scanned_coefficients(&[], 0).expect("zero-block encode");
+        assert!(out.is_empty(), "zero-block payload must be empty");
+        // And the round-trip stays consistent.
+        let back = decode_scanned_coefficients(&out, 0).expect("zero-block decode");
+        assert!(back.is_empty());
+    }
 
     #[test]
     fn signed_mapping_roundtrip() {

@@ -7,7 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Five panic / debug-overflow / silent-truncation hardening fixes in the
+  RDD 36 §7.1.1 coefficient entropy coder, all found by a new direct
+  `cargo-fuzz` ASan campaign against
+  `entropy::decode_scanned_coefficients` (≈72 M executions to clean).**
+  Every fix preserves bit-exact behaviour for spec-legal streams (the
+  full round-trip + decode test suite is unchanged) and only changes how
+  a malformed bitstream is rejected — from a process-killing panic to a
+  clean `Err`:
+  - **`num_blocks == 0` indexed an empty scan array.** A slice declaring
+    zero blocks carries no DC/AC syntax (§7.1.1), but the first-DC read
+    ran unconditionally and `coeffs[0] = first_dc` indexed the empty
+    `Vec`. Now returns the empty array without consuming any bits;
+    `encode_scanned_coefficients` gets the symmetric zero-block early-out
+    so the round-trip stays consistent.
+  - **`read_combo` / `read_exp_golomb` drove `BitReader::read_bits`
+    outside its `1..=32` contract.** A corrupt unary prefix made the
+    computed exp-Golomb suffix width exceed 32 bits, tripping a
+    `debug_assert!` (panic in the debug/fuzz build) and risking a
+    `1u64 << q` shift off the end of a `u64`. Both readers now reject a
+    suffix wider than 32 bits before reading.
+  - **Symbol composition overflowed `u32` / silently truncated.** The
+    final `(last_rice_q + 1) << k_rice + exp_val` (and the Rice-branch
+    `(q << k_rice) + tail`, and `read_exp_golomb`'s `val as u32`) could
+    exceed the 32-bit symbol range; the addition panicked in debug and
+    the cast silently truncated in release. All three now compose in
+    `u64` and reject (via `try_into`) any value beyond `u32::MAX`.
+  - **DC/AC reconstruction overflowed `i32`.** The running DC
+    accumulator (`previous_dc_coeff + diff`), the `-diff` sign carry, the
+    `abs_minus_1 as i32 + 1` level, the `abs_level * sign` product, and
+    `inv_signed_mapping`'s `(s + 1)` for `s == u32::MAX` could all
+    overflow on a corrupt symbol. Switched to `wrapping_*` arithmetic —
+    behaviourally identical for the tiny values a legal stream produces.
+  - Two regression unit tests in `src/entropy.rs` pin the zero-block
+    decode/encode behaviour. 120 → 122 lib tests.
+
+  The companion `alpha::decode_scanned_alpha` (§7.1.2 / Table 12-14)
+  coder was fuzzed to ≈113 M executions with no findings — its run /
+  difference readers use fixed-width `read_bits` and mask-bounded
+  accumulation, so it was robust by construction.
+
 ### Added
+
+- **Two direct-entropy-coder `cargo-fuzz` targets
+  (`fuzz/fuzz_targets/decode_entropy.rs`, `decode_alpha.rs`).** Where the
+  existing `decode_packet` / `parse_headers` harnesses reach the entropy
+  coders only behind the §5.1 framing + §6.1.1 header gating, these feed
+  adversarial bytes *straight* into `entropy::decode_scanned_coefficients`
+  (§7.1.1 run/level/sign DC + AC coder) and `alpha::decode_scanned_alpha`
+  (§7.1.2 / Table 12-14 alpha run-length VLC), with the per-call
+  `num_blocks` / `num_values` and the 8-/16-bit `AlphaChannelType` derived
+  from the input's own bytes (capped to a slice-sized envelope so a worker
+  never commits a multi-gigabyte allocation). This widens the §7.1.1.1
+  Rice / exp-Golomb combo-reader and DC-difference / AC-run codebook
+  coverage far past what the header-gated harnesses reach per second. Both
+  are seeded from valid encoder output (`encode_scanned_coefficients` /
+  `encode_scanned_alpha`) across a spread of block / value counts. The
+  daily `fuzz.yml` workflow auto-discovers them (now 5 targets, budget
+  split evenly).
 
 - **RDD 36 Annex A IDCT accuracy qualification harness
   (`tests/idct_annex_a.rs`).** §7.4 permits any IDCT implementation —
