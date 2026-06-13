@@ -120,9 +120,9 @@ pub struct EncoderConfig {
     /// smaller slices; the per-slice fixed-cost (`slice_header` + per-
     /// component entropy coder reset + `slice_size_table` entry) is
     /// amortised over fewer macroblocks, so the encoded packet grows
-    /// modestly. The control surface is the same knob ffmpeg's
-    /// `prores_ks` exposes through `-mbs_per_slice {1,2,4,8}` and lets
-    /// callers trade rate for finer error resilience.
+    /// modestly. The control surface is the per-slice macroblock count
+    /// RDD 36 §7.2 admits (`{1, 2, 4, 8}`), letting callers trade rate
+    /// for finer error resilience.
     ///
     /// Validated at encoder construction; non-power-of-two or values
     /// outside `{1, 2, 4, 8}` return `Error::invalid`. The bitstream
@@ -1135,8 +1135,7 @@ fn encode_one_picture(
                 // sample rows) regardless of visible picture clipping.
                 // Decoders MUST allocate the padded MB-aligned plane
                 // and crop after decode (RDD 36 §7.5.2 — alphaValues is
-                // the padded picture size); ffmpeg's prores_ks behaves
-                // the same way. Edge-pixels for the partially-visible
+                // the padded picture size). Edge-pixels for the partially-visible
                 // last MB row are clamped to the last visible row so
                 // the stream stays self-roundtrippable.
                 let slice_vertical_size = MB_SIDE_PX;

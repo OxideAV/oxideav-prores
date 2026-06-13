@@ -2,10 +2,10 @@
 //!
 //! Per RDD 36 §7.3, when `load_luma_quantization_matrix` /
 //! `load_chroma_quantization_matrix` are both 0 the default 8x8
-//! all-4s matrix is used for both components — that is what `prores_ks`
-//! emits for `apcn` (Standard) and `apch` (HQ) when no custom matrix is
-//! requested. Tools that want non-flat matrices include them in the
-//! frame header explicitly.
+//! all-4s matrix is used for both components — this flat default
+//! applies to `apcn` (Standard) and `apch` (HQ) streams that carry no
+//! custom matrix. Streams that want non-flat matrices include them in
+//! the frame header explicitly.
 //!
 //! Two perceptual presets are provided. [`QuantMatrices::perceptual`]
 //! is the JPEG K.1/K.2 matrix normalised to DC=2 and used directly —
