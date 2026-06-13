@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/OxideAV/oxideav-prores/compare/v0.0.9...v0.0.10) - 2026-06-13
+
+### Other
+
+- state slice-count / matrix / alpha-padding provenance positively
+- direct §7.1.1/§7.1.2 entropy-coder targets + 5 decode-hardening fixes
+- RDD 36 Annex A IDCT accuracy qualification harness
+- public slice_count helper + PictureHeader::deprecated_slice_count accessor
+- typed accessor FrameHeader::meta() for the RDD 36 §5.1.1 / §6.2 metadata fold
+- typed accessor PictureHeader::mbs_per_slice() for RDD 36 §5.3
+- typed accessor FrameHeader::aspect_ratio() for RDD 36 §6.2 Table 3
+- typed accessor FrameHeader::frame_rate() for RDD 36 §6.2 Table 4
+- typed accessor transfer_characteristic_kind() for §6.1.1 OETF
+- drop release-plz.toml — use release-plz defaults across the workspace
+- typed FrameHeader::matrix_coefficients_kind() accessor (RDD 36 §6.1.1 Table 6)
+- typed FrameHeader::color_primaries_kind() accessor (RDD 36 §6.1.1 Table 5)
+- typed FrameHeader::interlace_kind() accessor (RDD 36 §6.1.1 Table 2)
+- typed FrameHeader::alpha_kind() accessor (RDD 36 §6.1.1 Table 7)
+- reverse helpers for RDD 36 §6.1.1 Tables 5, 6, 7 (color metadata)
+- reverse helpers for RDD 36 §6.2 Tables 3 + 4 (decoder side)
+- SHA-256 pin on the 10-bit + 12-bit forward level-shift paths (RDD 36 §7.5.1)
+- document the new encoder-output SHA-256 lockstep pin
+- SHA-256 lockstep pin across every public encoder entry point (RDD 36 §5 + §7)
+- SHA-256 lockstep pin on both frames of the 128x128 interlaced apcn fixture (RDD 36 §5.1 + §6.2 Table 2 + §7.5.3)
+- SHA-256 lockstep pin on the 7 progressive corpus fixtures (RDD 36 §5.1 + §5.3 + §7.2 + §7.5.1)
+- SHA-256 lockstep pin on the two 1920x1080 interlaced fixtures (RDD 36 §5.1 + §6.2 + §7.5.3)
+- ffmpeg cross-decode acceptance for the mbs_per_slice knob (RDD 36 §5.3)
+
 ### Fixed
 
 - **Five panic / debug-overflow / silent-truncation hardening fixes in the
