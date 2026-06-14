@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`stuffing()` emission (RDD 36 §5.1.2 + §6.1.2) for constant-frame-size
+  carriage.** The encoder can now pad a coded frame up to a caller-specified
+  minimum on-wire `frame_size` by appending a run of `zero_byte` (`0x00`)
+  values after the last `picture()` and rewriting the leading `frame_size`
+  u32 to the padded total (§6.1.1: `frame_size` "includes the frame_size
+  element itself and, if present, stuffing"). Two entry points:
+  - `encoder::pad_frame_to_size(frame_bytes, min_frame_size)` — a
+    post-process pad over any assembled `frame()`. A frame already at or
+    above the target is returned unchanged (§6.1.2 `stuffing_size =
+    frame_size − frameDataSize` is non-negative by construction), so
+    stuffing only ever grows a short frame.
+  - `EncoderConfig::with_min_frame_size(n)` / `EncoderConfig::min_frame_size`
+    — threaded through `make_encoder_with_config` → `send_frame` so a
+    registry-built encoder pads every emitted packet (after rate control,
+    if enabled) up to `n`.
+  The decoder already consumes only the coded picture(s) per §5.1 and
+  discards the trailing bytes, so a padded frame decodes bit-identically
+  to its unpadded twin (`tests/frame_stuffing.rs`, 6 cases).
+
 ### Fixed
 
 - **Five panic / debug-overflow / silent-truncation hardening fixes in the

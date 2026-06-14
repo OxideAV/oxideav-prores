@@ -131,6 +131,28 @@ pub struct EncoderConfig {
     /// decoder (including this crate's [`crate::decoder`]) recovers the
     /// per-row template via the same `compute_slice_sizes` derivation.
     pub mbs_per_slice: Option<u8>,
+    /// Minimum on-wire `frame_size` in bytes (RDD 36 §5.1.2 stuffing +
+    /// §6.1.2 `stuffing_size`).
+    ///
+    /// `None` (the default) emits exactly the coded bytes — `frame_size`
+    /// equals the size of `frame_header()` + the picture(s), with no
+    /// trailing padding. `Some(n)` pads every emitted frame whose coded
+    /// size is below `n` up to `n` bytes by appending `stuffing()` (a run
+    /// of `0x00` zero bytes) after the last `picture()`, and writes the
+    /// padded total into the leading `frame_size` u32 per §6.1.2
+    /// (`frame_size` "includes the frame_size element itself and, if
+    /// present, stuffing").
+    ///
+    /// A frame whose coded size already meets or exceeds `n` is emitted
+    /// unchanged — stuffing only ever grows a short frame, never shrinks
+    /// a long one (the spec's `stuffing_size = frame_size − frameDataSize`
+    /// is non-negative by construction). Useful for constant-frame-size
+    /// carriage (e.g. a fixed-rate VBV-style budget or a container that
+    /// reserves a fixed sample slot) where the picture coder underruns
+    /// the budget on low-entropy content. Decoders ignore the trailing
+    /// zero bytes (this crate's [`crate::decoder`] already consumes only
+    /// the coded picture(s) and discards the remainder).
+    pub min_frame_size: Option<u32>,
 }
 
 /// Maximum number of trial encodes per frame when rate control is active.
@@ -259,6 +281,17 @@ impl EncoderConfig {
     /// [`Self::mbs_per_slice`] for the rate-vs-resilience tradeoff.
     pub fn with_mbs_per_slice(mut self, mbs_per_slice: u8) -> Self {
         self.mbs_per_slice = Some(mbs_per_slice);
+        self
+    }
+
+    /// Pad every emitted frame whose coded size is below `min_frame_size`
+    /// up to `min_frame_size` bytes with RDD 36 §5.1.2 `stuffing()` (a run
+    /// of `0x00` bytes after the last `picture()`), rewriting the leading
+    /// `frame_size` u32 to the padded total per §6.1.2. A frame already at
+    /// or above the target is emitted unchanged. See
+    /// [`Self::min_frame_size`].
+    pub fn with_min_frame_size(mut self, min_frame_size: u32) -> Self {
+        self.min_frame_size = Some(min_frame_size);
         self
     }
 }
@@ -533,6 +566,13 @@ impl Encoder for ProResEncoder {
                         self.log2_slice_mb_width,
                     )?
                 };
+                // RDD 36 §5.1.2 / §6.1.2: pad up to the configured
+                // minimum on-wire frame_size with stuffing() when the
+                // coded frame underran the budget.
+                let data = match self.config.min_frame_size {
+                    Some(min) => pad_frame_to_size(&data, min)?,
+                    None => data,
+                };
                 let mut pkt = Packet::new(0, self.time_base, data);
                 pkt.pts = v.pts;
                 pkt.dts = v.pts;
@@ -736,6 +776,52 @@ pub fn encode_frame_interlaced(
         FrameMeta::default(),
         3, // log2(8) — default slice width matches every reference encoder
     )
+}
+
+/// Pad an already-assembled RDD 36 `frame()` up to `min_frame_size` bytes
+/// with `stuffing()` (RDD 36 §5.1.2) and rewrite the leading `frame_size`
+/// u32 to the padded total (§6.1.2).
+///
+/// `frame_bytes` must be a complete `frame()`: a 4-byte big-endian
+/// `frame_size`, the 4-byte `frame_identifier` (`'icpf'`), `frame_header()`,
+/// and the picture(s). Per §5.1 the only element that may follow the last
+/// `picture()` is `stuffing()`, a run of `zero_byte` (`0x00`) values, so
+/// padding is appended at the tail and the leading length field is
+/// incremented to match.
+///
+/// Semantics (§6.1.2): `stuffing_size = frame_size − frameDataSize`, where
+/// `frameDataSize` is the coded size already present in `frame_bytes`.
+/// Because `stuffing_size` is non-negative by construction, a frame whose
+/// coded size already meets or exceeds `min_frame_size` is returned
+/// **unchanged** — stuffing only grows a short frame.
+///
+/// Returns `Error::invalid` if `frame_bytes` is shorter than the 8-byte
+/// `frame_size` + `frame_identifier` preamble, or if the requested
+/// `min_frame_size` would not fit in the `frame_size` u32 (i.e. exceeds
+/// `u32::MAX`). The function does not re-validate the picture payload — it
+/// is a post-processing pad over bytes this module produced.
+pub fn pad_frame_to_size(frame_bytes: &[u8], min_frame_size: u32) -> Result<Vec<u8>> {
+    if frame_bytes.len() < 8 {
+        return Err(Error::invalid(
+            "prores encoder: frame too short to pad (missing frame_size + 'icpf')",
+        ));
+    }
+    let coded_len = frame_bytes.len();
+    // §6.1.2: stuffing_size is non-negative — a frame already at/over the
+    // target keeps its bytes verbatim, no padding, no frame_size rewrite.
+    if (min_frame_size as usize) <= coded_len {
+        return Ok(frame_bytes.to_vec());
+    }
+    let target = min_frame_size as usize;
+    let stuffing_size = target - coded_len;
+    let mut out = Vec::with_capacity(target);
+    out.extend_from_slice(frame_bytes);
+    // §5.1.2 stuffing(): stuffing_size zero_byte (0x00) values.
+    out.resize(coded_len + stuffing_size, 0u8);
+    // §6.1.2 frame_size "includes the frame_size element itself and, if
+    // present, stuffing" — rewrite the leading u32 to the padded total.
+    out[0..4].copy_from_slice(&min_frame_size.to_be_bytes());
+    Ok(out)
 }
 
 /// Two-pass per-frame rate control: binary-search `quantization_index` to

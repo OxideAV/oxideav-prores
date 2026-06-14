@@ -288,6 +288,46 @@ the parsed header, so a transcode pipeline can forward
 `EncoderConfig::with_mbs_per_slice` chain without an intermediate
 shift.
 
+### Constant-frame-size stuffing (RDD 36 §5.1.2 + §6.1.2)
+
+RDD 36 §5.1 allows exactly one optional element after the last `picture()`
+in a `frame()`: `stuffing()`, a run of `zero_byte` (`0x00`) values used to
+"pad the compressed frame up to a desired size". §6.1.1 makes `frame_size`
+"the total size of the compressed frame in bytes (including the frame_size
+element itself and, if present, stuffing)", and §6.1.2 fixes
+`stuffing_size = frame_size − frameDataSize` (non-negative by
+construction). This is the mechanism a fixed-rate or fixed-slot carriage
+uses when the picture coder underruns its byte budget on low-entropy
+content.
+
+Set [`encoder::EncoderConfig::with_min_frame_size`] to pad every emitted
+packet up to a minimum on-wire `frame_size`; the encoder appends the
+`stuffing_size` zero bytes after the picture(s) and rewrites the leading
+`frame_size` u32 to the padded total. A frame whose coded size already
+meets or exceeds the target is emitted unchanged — stuffing only grows a
+short frame, never shrinks a long one.
+
+```rust
+use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+
+// Pad every frame up to at least 64 KiB on the wire.
+let cfg = EncoderConfig::default().with_min_frame_size(65_536);
+let enc = make_encoder_with_config(&params, cfg)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The padding runs after two-pass rate control (if enabled), so a frame that
+the rate controller leaves below the slot size is still topped up. For
+callers assembling frames outside the `Encoder` trait, the free function
+[`encoder::pad_frame_to_size`] applies the same §5.1.2 / §6.1.2 pad to any
+already-assembled `frame()` byte buffer. Because the decoder consumes only
+the coded picture(s) per §5.1 and discards the trailing bytes, a padded
+frame decodes bit-identically to its unpadded twin — `tests/frame_stuffing.rs`
+pins this (the cropped Y/Cb/Cr planes of a padded and an unpadded encode of
+the same source compare byte-equal) along with the `frame_size`-rewrite,
+zero-byte-tail, no-op-when-target-below-coded, and truncation-rejection
+properties.
+
 ### Explicit profile selection
 
 By default the encoder maps `CodecParameters::bit_rate` to one of the
