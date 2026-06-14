@@ -1478,6 +1478,51 @@ pub struct SliceHeader {
     pub coded_size_of_cr_data: Option<u16>,
 }
 
+impl SliceHeader {
+    /// Typed accessor for the quantisation scale factor `qScale` this
+    /// slice's `quantization_index` selects, per RDD 36 §7.3 Table 15.
+    ///
+    /// The raw `quantization_index` field on this struct is the u8 code
+    /// as it appeared on the wire. §6.3.1 restricts it to `1..=224` (all
+    /// other values are reserved), and §7.3 derives `qScale` from it by
+    /// the two-segment piecewise map of Table 15: `qScale =
+    /// quantization_index` for `1 ≤ quantization_index ≤ 128`, and
+    /// `qScale = 128 + 4 * (quantization_index − 128)` for
+    /// `129 ≤ quantization_index ≤ 224` (so the index range `1..=224`
+    /// spans `qScale` values `1..=512`). `qScale` is the per-slice
+    /// overall quantisation level that §7.3's dequantisation formula
+    /// `F[v][u] = (QF[v][u] * W[v][u] * qScale) ÷ 8` scales every
+    /// coefficient by.
+    ///
+    /// Returns `Some(qScale)` for the defined index range and `None`
+    /// for the reserved range (`0` and `225..=255`) a hand-assembled
+    /// `SliceHeader` could carry — mirroring the outer-Option
+    /// discriminant of [`PictureHeader::mbs_per_slice`] /
+    /// [`FrameHeader::interlace_kind`]: `None` carries the "the field
+    /// held a reserved code with no defined `qScale`" signal, distinct
+    /// from `Some(1)` (the finest defined scale and a legitimate wire
+    /// value). Because [`parse_slice_header`] already rejects any
+    /// out-of-range `quantization_index` at parse time, every
+    /// successfully-parsed `SliceHeader` returns `Some(_)`; the `None`
+    /// arm only fires for a struct built by hand outside the parser.
+    ///
+    /// This folds the Table 15 derivation that the dequantisation path
+    /// ([`crate::quant::qscale`], used by the decoder per block) seeds
+    /// with into a single method on the parsed header, so a
+    /// stream-inspection or rate-analysis stage reading a parsed slice
+    /// header can read the effective scale directly off
+    /// `sh.qscale()` without re-deriving the piecewise map — the
+    /// natural mirror of [`PictureHeader::mbs_per_slice`] on the slice
+    /// header.
+    pub fn qscale(&self) -> Option<i32> {
+        if (1..=224).contains(&self.quantization_index) {
+            Some(crate::quant::qscale(self.quantization_index))
+        } else {
+            None
+        }
+    }
+}
+
 /// Parse one slice_header(). `has_alpha` controls whether the
 /// `coded_size_of_cr_data` field is present.
 pub fn parse_slice_header(data: &[u8], has_alpha: bool) -> Result<(SliceHeader, &[u8])> {
@@ -1711,6 +1756,60 @@ mod tests {
         assert_eq!(sh.coded_size_of_y_data, 100);
         assert_eq!(sh.coded_size_of_cb_data, 50);
         assert!(sh.coded_size_of_cr_data.is_none());
+    }
+
+    #[test]
+    fn slice_header_qscale_accessor_matches_table15() {
+        // RDD 36 §7.3 Table 15: the two-segment piecewise map, folded
+        // onto a parsed slice header. Identity segment 1..=128, then
+        // 128 + 4 * (i - 128) up to 224 (so 1..=224 spans qScale
+        // 1..=512). A parsed header always has an in-range index, so
+        // qscale() is always Some(_).
+        for (qi, want) in [
+            (1u8, 1i32),
+            (2, 2),
+            (128, 128),
+            (129, 132),
+            (130, 136),
+            (223, 508),
+            (224, 512),
+        ] {
+            let mut buf = Vec::new();
+            write_slice_header(&mut buf, qi, 100, 50, None);
+            let (sh, _) = parse_slice_header(&buf, false).unwrap();
+            assert_eq!(sh.quantization_index, qi);
+            assert_eq!(sh.qscale(), Some(want), "qi={qi}");
+            // The accessor folds the same Table 15 map the decode-side
+            // dequantisation seeds with.
+            assert_eq!(sh.qscale(), Some(crate::quant::qscale(qi)));
+        }
+    }
+
+    #[test]
+    fn slice_header_qscale_none_for_reserved_codes() {
+        // A hand-assembled SliceHeader can carry a reserved
+        // quantization_index (0 or 225..=255) that parse_slice_header
+        // would reject; the accessor surfaces that as None (the
+        // wire-faithful "no defined qScale" signal), distinct from
+        // Some(1) at the finest defined scale.
+        for qi in [0u8, 225, 255] {
+            let sh = SliceHeader {
+                slice_header_size: 6,
+                quantization_index: qi,
+                coded_size_of_y_data: 0,
+                coded_size_of_cb_data: 0,
+                coded_size_of_cr_data: None,
+            };
+            assert_eq!(sh.qscale(), None, "qi={qi}");
+        }
+        let sh = SliceHeader {
+            slice_header_size: 6,
+            quantization_index: 1,
+            coded_size_of_y_data: 0,
+            coded_size_of_cb_data: 0,
+            coded_size_of_cr_data: None,
+        };
+        assert_eq!(sh.qscale(), Some(1));
     }
 
     #[test]

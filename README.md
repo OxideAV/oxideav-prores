@@ -302,6 +302,25 @@ the parsed header, so a transcode pipeline can forward
 `EncoderConfig::with_mbs_per_slice` chain without an intermediate
 shift.
 
+The per-slice `quantization_index` field of the parsed
+[`frame::SliceHeader`] gets the same typed-accessor treatment via
+[`frame::SliceHeader::qscale`], which folds the RDD 36 §7.3 Table 15
+derivation onto the header — `Some(qScale)` for the defined index
+range (`qScale = quantization_index` for `1..=128`; `qScale = 128 + 4
+* (quantization_index − 128)` for `129..=224`, so the index range
+`1..=224` spans `qScale` values `1..=512`), `None` for the reserved
+range (`0`, `225..=255`) a hand-assembled header could carry. `qScale`
+is the per-slice overall quantisation level §7.3's dequant formula
+`F[v][u] = (QF[v][u] * W[v][u] * qScale) ÷ 8` scales every coefficient
+by; the accessor lets a stream-inspection or rate-analysis stage read
+the effective scale straight off `sh.qscale()` without re-deriving the
+piecewise map (the same Table 15 fold the decode-side dequantiser
+seeds with via [`quant::qscale`]). Because [`frame::parse_slice_header`]
+already rejects any out-of-range `quantization_index` at parse time
+(§6.3.1 restricts it to `1..=224`), every parsed slice header returns
+`Some(_)`; the outer-Option `None` mirrors `ph.mbs_per_slice()` /
+`fh.interlace_kind()` and only fires for a struct built by hand.
+
 ### Constant-frame-size stuffing (RDD 36 §5.1.2 + §6.1.2)
 
 RDD 36 §5.1 allows exactly one optional element after the last `picture()`
