@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`encoder_identifier` (RDD 36 §6.1.1) is now surfaced on the parsed
+  `FrameHeader`.** The f(32) four-character vendor / product code at
+  frame-header bytes 4..8 was previously read and discarded by
+  `parse_frame_header`; it is now retained on the `FrameHeader` struct
+  and exposed through two typed accessors:
+  - `FrameHeader::encoder_identifier()` returns the raw `[u8; 4]`.
+  - `FrameHeader::encoder_identifier_str()` returns `Some(&str)` when all
+    four bytes are printable ASCII (`0x20..=0x7E`), else `None` —
+    matching the `None`-for-out-of-range shape of the other §6.1.1
+    typed accessors.
+  The spec marks the element "Decoders should ignore", so it carries no
+  decode semantics and is not validated; it is a pure pass-through for
+  stream-inspection and transcode-provenance callers. Every byte of the
+  fixed-size frame header is now both parsed and exposed. Two new lib
+  tests (`encoder_identifier_round_trips_through_parse`,
+  `encoder_identifier_str_rejects_non_printable_bytes`) pin the
+  round-trip from the writer's `ENCODER_IDENTIFIER` (`oxav`) and the
+  printable-ASCII gating. 122 → 124 lib tests.
+
 - **`stuffing()` emission (RDD 36 §5.1.2 + §6.1.2) for constant-frame-size
   carriage.** The encoder can now pad a coded frame up to a caller-specified
   minimum on-wire `frame_size` by appending a run of `zero_byte` (`0x00`)

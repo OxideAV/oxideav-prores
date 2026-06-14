@@ -208,6 +208,20 @@ and an all-zero header folds to `FrameMeta::unknown()`, the encoder's
 no-op default. Same parsed-header → encoder-config forwarding shape as
 `ph.mbs_per_slice()` → `EncoderConfig::with_mbs_per_slice`.
 
+The remaining §6.1.1 frame-header element — `encoder_identifier`, the
+f(32) four-character code at frame-header bytes 4..8 naming the
+encoder vendor / product — is now surfaced on the parsed header too
+(it was previously read and discarded). RDD 36 marks it "Decoders
+should ignore this element", so it carries no decode semantics; it is
+exposed verbatim for stream-inspection and transcode-provenance
+callers via [`FrameHeader::encoder_identifier`] (the raw `[u8; 4]`) and
+[`FrameHeader::encoder_identifier_str`] (the bytes as a `&str` when all
+four are printable ASCII, else `None` — mirroring the `None`-for-
+out-of-range shape of the colour-metadata typed accessors). With this
+every byte of the fixed-size frame header is now both parsed and
+exposed. This crate's encoder writes the constant
+[`frame::ENCODER_IDENTIFIER`] (`oxav`).
+
 [`CodecParameters::frame_rate`]: https://docs.rs/oxideav-core/latest/oxideav_core/struct.CodecParameters.html#structfield.frame_rate
 
 ### Configurable quantisation index (RDD 36 §7.3 / Table 15)

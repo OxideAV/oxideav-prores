@@ -216,6 +216,14 @@ pub struct FrameHeader {
     pub frame_size: u32,
     pub frame_header_size: u16,
     pub bitstream_version: u8,
+    /// RDD 36 §6.1.1 `encoder_identifier` — the f(32) four-character
+    /// code at frame-header bytes 4..8 naming the encoder vendor /
+    /// product that produced the frame (Apple maintains a registry of
+    /// licensee codes). The spec marks it "Decoders should ignore this
+    /// element", so it carries no decode semantics; it is surfaced here
+    /// verbatim for stream-inspection and transcode-provenance callers
+    /// (see [`FrameHeader::encoder_identifier_str`]).
+    pub encoder_identifier: [u8; 4],
     pub width: u16,
     pub height: u16,
     pub chroma_format: ChromaFormat,
@@ -535,6 +543,45 @@ impl FrameHeader {
             matrix_coefficients: self.matrix_coefficients,
         }
     }
+
+    /// The raw four bytes of the RDD 36 §6.1.1 `encoder_identifier`
+    /// frame-header field (bytes 4..8 of `frame_header()`), as they
+    /// appeared on the wire. The spec marks this element "Decoders
+    /// should ignore" — it names the encoder vendor / product (Apple
+    /// maintains a registry of licensee codes) and carries no decode
+    /// semantics — so this is a pure pass-through for stream-inspection
+    /// and transcode-provenance callers. The bytes are not validated as
+    /// printable ASCII; use [`Self::encoder_identifier_str`] when a
+    /// human-readable form is wanted.
+    pub fn encoder_identifier(&self) -> [u8; 4] {
+        self.encoder_identifier
+    }
+
+    /// The RDD 36 §6.1.1 `encoder_identifier` rendered as a string when
+    /// all four bytes are printable ASCII (`0x20..=0x7E`), else `None`.
+    ///
+    /// `encoder_identifier` is documented as a four-character code, and
+    /// in practice every encoder writes a printable FourCC (this crate
+    /// writes [`ENCODER_IDENTIFIER`]). The `Option` discriminant lets a
+    /// caller distinguish a conventional printable vendor tag from a
+    /// non-printable / binary value some non-conforming encoder might
+    /// have written, without panicking on invalid UTF-8 — mirroring the
+    /// `None`-for-out-of-range shape of the other §6.1.1 typed
+    /// accessors on this struct ([`Self::color_primaries_kind`] et al.).
+    /// Callers wanting the raw bytes regardless take
+    /// [`Self::encoder_identifier`].
+    pub fn encoder_identifier_str(&self) -> Option<&str> {
+        if self
+            .encoder_identifier
+            .iter()
+            .all(|&b| (0x20..=0x7E).contains(&b))
+        {
+            // All four bytes are printable ASCII → valid UTF-8.
+            std::str::from_utf8(&self.encoder_identifier).ok()
+        } else {
+            None
+        }
+    }
 }
 
 /// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
@@ -607,7 +654,11 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
              (RDD 36 specifies versions 0 and 1)"
         )));
     }
-    let _enc_id = &data[4..8];
+    // RDD 36 §6.1.1 encoder_identifier: f(32) vendor/product code at
+    // bytes 4..8. "Decoders should ignore this element" — we do not
+    // validate it, but surface the raw bytes on the parsed header for
+    // inspection / transcode-provenance callers.
+    let encoder_identifier: [u8; 4] = data[4..8].try_into().unwrap();
     let width = u16::from_be_bytes(data[8..10].try_into().unwrap());
     let height = u16::from_be_bytes(data[10..12].try_into().unwrap());
     // byte 12: chroma_format (u2) + reserved (u2) + interlace_mode (u2) + reserved (u2)
@@ -714,6 +765,7 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
             frame_size: 0,
             frame_header_size,
             bitstream_version,
+            encoder_identifier,
             width,
             height,
             chroma_format,
@@ -2374,6 +2426,7 @@ mod tests {
             frame_size: 0,
             frame_header_size: 20,
             bitstream_version: 1,
+            encoder_identifier: *ENCODER_IDENTIFIER,
             width: 64,
             height: 48,
             chroma_format: ChromaFormat::Y444,
@@ -2501,6 +2554,7 @@ mod tests {
             frame_size: 0,
             frame_header_size: 20,
             bitstream_version: 1,
+            encoder_identifier: *ENCODER_IDENTIFIER,
             width: 64,
             height: 48,
             chroma_format: ChromaFormat::Y444,
@@ -2691,6 +2745,7 @@ mod tests {
             frame_size: 0,
             frame_header_size: 20,
             bitstream_version: 1,
+            encoder_identifier: *ENCODER_IDENTIFIER,
             width: 64,
             height: 48,
             chroma_format: ChromaFormat::Y444,
@@ -2842,6 +2897,7 @@ mod tests {
             frame_size: 0,
             frame_header_size: 20,
             bitstream_version: 1,
+            encoder_identifier: *ENCODER_IDENTIFIER,
             width: 64,
             height: 48,
             chroma_format: ChromaFormat::Y444,
@@ -2986,6 +3042,7 @@ mod tests {
             frame_size: 0,
             frame_header_size: 20,
             bitstream_version: 1,
+            encoder_identifier: *ENCODER_IDENTIFIER,
             width: 64,
             height: 48,
             chroma_format: ChromaFormat::Y444,
@@ -3142,6 +3199,7 @@ mod tests {
                 frame_size: 0,
                 frame_header_size: 20,
                 bitstream_version: 1,
+                encoder_identifier: *ENCODER_IDENTIFIER,
                 width: 64,
                 height: 48,
                 chroma_format: ChromaFormat::Y444,
@@ -3299,6 +3357,7 @@ mod tests {
                 frame_size: 0,
                 frame_header_size: 20,
                 bitstream_version: 1,
+                encoder_identifier: *ENCODER_IDENTIFIER,
                 width: 64,
                 height: 48,
                 chroma_format: ChromaFormat::Y444,
@@ -3503,5 +3562,86 @@ mod tests {
         assert_eq!(fh.transfer_characteristic_kind(), None);
         assert_eq!(fh.matrix_coefficients_kind(), None);
         assert!(!fh.meta().is_unknown());
+    }
+
+    /// The RDD 36 §6.1.1 `encoder_identifier` (frame-header bytes 4..8)
+    /// round-trips from the writer through `parse_frame_header`: a frame
+    /// emitted by [`write_frame_with_meta`] carries the crate's
+    /// [`ENCODER_IDENTIFIER`] (`b"oxav"`), and the parsed header surfaces
+    /// it byte-exactly through both [`FrameHeader::encoder_identifier`]
+    /// and the printable-ASCII [`FrameHeader::encoder_identifier_str`]
+    /// accessor. This pins that the field — previously read and
+    /// discarded by the parser — is now exposed; a regression that
+    /// dropped it (or read the wrong four bytes) flips the test red.
+    #[test]
+    fn encoder_identifier_round_trips_through_parse() {
+        let fh = parse_header_with_meta(FrameMeta::default());
+        assert_eq!(
+            fh.encoder_identifier(),
+            *ENCODER_IDENTIFIER,
+            "parsed header must surface the written encoder_identifier verbatim"
+        );
+        assert_eq!(
+            fh.encoder_identifier_str(),
+            Some("oxav"),
+            "printable-ASCII encoder_identifier lifts to its FourCC string"
+        );
+        // The field sits at frame-header bytes 4..8, distinct from the
+        // descriptive §6.2 metadata bytes — populating those must not
+        // perturb it.
+        let fh2 = parse_header_with_meta(FrameMeta {
+            aspect_ratio_information: 3,
+            frame_rate_code: 8,
+            color_primaries: 9,
+            transfer_characteristic: 16,
+            matrix_coefficients: 9,
+        });
+        assert_eq!(fh2.encoder_identifier(), *ENCODER_IDENTIFIER);
+        assert_eq!(fh2.encoder_identifier_str(), Some("oxav"));
+    }
+
+    /// [`FrameHeader::encoder_identifier_str`] returns the raw bytes only
+    /// when all four are printable ASCII (`0x20..=0x7E`); a header
+    /// carrying a non-printable byte (some non-conforming encoder could
+    /// write binary here — the spec only says decoders *should ignore*
+    /// the field, not that it must be printable) yields `None` from the
+    /// string accessor while [`FrameHeader::encoder_identifier`] still
+    /// returns the raw four bytes. Drives `parse_frame_header` directly
+    /// over a hand-built header so the four `encoder_identifier` bytes
+    /// can be set independently of [`write_frame_with_meta`], which only
+    /// ever emits the printable [`ENCODER_IDENTIFIER`] constant.
+    #[test]
+    fn encoder_identifier_str_rejects_non_printable_bytes() {
+        // Minimal 20-byte frame_header() with a non-printable byte
+        // (0x00) inside the encoder_identifier at bytes 4..8.
+        let mut hdr = vec![0u8; 20];
+        hdr[0] = 0; // frame_header_size hi
+        hdr[1] = 20; // frame_header_size lo = 20
+        hdr[2] = 0; // reserved
+        hdr[3] = 0; // bitstream_version 0 (4:2:2, no alpha — §6.4 legal)
+        hdr[4] = b'A';
+        hdr[5] = 0x00; // non-printable
+        hdr[6] = b'p';
+        hdr[7] = b'l';
+        // width/height (bytes 8..12)
+        hdr[8] = 0;
+        hdr[9] = 64;
+        hdr[10] = 0;
+        hdr[11] = 48;
+        // byte 12: chroma_format=2 (4:2:2) in bits 7..6 → 0b10_00_00_00
+        hdr[12] = 0b1000_0000;
+        // bytes 13..20 already zero (descriptive meta + reserved +
+        // load flags = 0). load_luma = load_chroma = 0 → flat matrices.
+        let (fh, _) = parse_frame_header(&hdr).unwrap();
+        assert_eq!(
+            fh.encoder_identifier(),
+            [b'A', 0x00, b'p', b'l'],
+            "raw encoder_identifier bytes are surfaced even when non-printable"
+        );
+        assert_eq!(
+            fh.encoder_identifier_str(),
+            None,
+            "a non-printable byte makes the string accessor return None"
+        );
     }
 }
