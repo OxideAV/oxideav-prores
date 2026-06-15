@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Crate-root `fourcc_for_profile()` — the inverse of `profile_for_fourcc()`.**
+  The FourCC routing surface at the crate root previously went only one way:
+  `profile_for_fourcc(&[u8; 4]) -> Option<Profile>` (the demuxer/dispatcher
+  direction, mapping an on-wire MP4/MOV `VisualSampleEntry` FourCC to a
+  profile). The muxer direction — mapping an encoder-selected profile back to
+  the canonical FourCC a QuickTime `stsd` / MXF Picture Essence Descriptor
+  must carry — had no crate-root entry point (callers had to reach for the
+  `frame::Profile::fourcc()` method on a different module level). The new
+  `fourcc_for_profile(Profile) -> &'static [u8; 4]` completes the pair: a
+  muxer picks a profile via `encoder::pick_profile(pixel_format, bit_rate)`
+  (or an explicit `EncoderConfig::with_profile` override) and writes
+  `fourcc_for_profile(profile)` into the sample entry. The returned bytes are
+  the canonical lowercase form (identical to `Profile::fourcc()` and the
+  entries of `PRORES_FOURCCS`), and round-trip back through the
+  case-insensitive `profile_for_fourcc` for every one of the six profiles.
+  Two unit tests pin the inverse property (`fourcc_for_profile` →
+  `profile_for_fourcc` round-trips for all six profiles, and every returned
+  FourCC is one of the six carriage codes) and the exact lowercase bytes per
+  profile (apco / apcs / apcn / apch / ap4h / ap4x). 126 → 128 lib tests. No
+  external library consulted (clean-room; the six FourCCs are the carriage
+  codes documented in `docs/video/prores/prores-fixtures-and-traces.md` and
+  RDD 36).
+
 - **`encoder_identifier` (RDD 36 §6.1.1) is now surfaced on the parsed
   `FrameHeader`.** The f(32) four-character vendor / product code at
   frame-header bytes 4..8 was previously read and discarded by

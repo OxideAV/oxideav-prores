@@ -153,6 +153,26 @@ pub fn profile_for_fourcc(fourcc: &[u8; 4]) -> Option<frame::Profile> {
     })
 }
 
+/// Returns the canonical (lowercase) MP4/MOV `VisualSampleEntry` FourCC for
+/// a given [`frame::Profile`] — the exact inverse of [`profile_for_fourcc`].
+///
+/// This completes the FourCC routing surface at the crate root: where a
+/// demuxer/dispatcher maps an on-wire FourCC to a profile via
+/// [`profile_for_fourcc`], a muxer assembling a sample entry (QuickTime
+/// `stsd` / MXF Picture Essence Descriptor) maps an encoder-selected
+/// profile back to the FourCC it must write. The encoder picks a profile
+/// from `(pixel_format, bit_rate)` via [`encoder::pick_profile`] (or an
+/// explicit [`encoder::EncoderConfig::with_profile`] override); the FourCC
+/// the wrapper carries is then `fourcc_for_profile(profile)`.
+///
+/// The six FourCCs are the same canonical-lowercase byte strings listed in
+/// [`PRORES_FOURCCS`] (and returned by [`frame::Profile::fourcc`]); pass
+/// the result through [`profile_for_fourcc`] — which is case-insensitive —
+/// to round-trip back to the original profile.
+pub fn fourcc_for_profile(profile: frame::Profile) -> &'static [u8; 4] {
+    profile.fourcc()
+}
+
 /// Register the ProRes decoder + encoder for all six profiles
 /// (422 Proxy/LT/Standard/HQ and 4444 / 4444 XQ).
 pub fn register_codecs(reg: &mut CodecRegistry) {
@@ -421,6 +441,46 @@ mod tests {
             assert_eq!(profile_for_fourcc(&up), Some(p));
         }
         assert_eq!(profile_for_fourcc(b"mp4v"), None);
+    }
+
+    #[test]
+    fn fourcc_for_profile_inverts_profile_for_fourcc() {
+        // Every profile maps to a FourCC that maps back to that profile —
+        // `fourcc_for_profile` is the exact inverse of `profile_for_fourcc`.
+        for p in [
+            frame::Profile::Proxy,
+            frame::Profile::Lt,
+            frame::Profile::Standard,
+            frame::Profile::Hq,
+            frame::Profile::Prores4444,
+            frame::Profile::Prores4444Xq,
+        ] {
+            let fc = fourcc_for_profile(p);
+            // Canonical (lowercase) form, identical to `Profile::fourcc()`
+            // and to the entries of `PRORES_FOURCCS`.
+            assert_eq!(fc, p.fourcc(), "canonical fourcc for {p:?}");
+            assert!(
+                PRORES_FOURCCS.contains(&fc),
+                "{fc:?} must be one of the six carriage FourCCs"
+            );
+            assert_eq!(
+                profile_for_fourcc(fc),
+                Some(p),
+                "fourcc_for_profile -> profile_for_fourcc round-trip for {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fourcc_for_profile_returns_lowercase_canonical_bytes() {
+        // The six canonical FourCCs are the lowercase byte strings the MOV
+        // sample entry / MXF descriptor carry (the corpus wrapper FourCCs).
+        assert_eq!(fourcc_for_profile(frame::Profile::Proxy), b"apco");
+        assert_eq!(fourcc_for_profile(frame::Profile::Lt), b"apcs");
+        assert_eq!(fourcc_for_profile(frame::Profile::Standard), b"apcn");
+        assert_eq!(fourcc_for_profile(frame::Profile::Hq), b"apch");
+        assert_eq!(fourcc_for_profile(frame::Profile::Prores4444), b"ap4h");
+        assert_eq!(fourcc_for_profile(frame::Profile::Prores4444Xq), b"ap4x");
     }
 
     #[test]

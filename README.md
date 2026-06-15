@@ -791,6 +791,29 @@ let mut enc = reg.make_encoder(&params)?;
 - Codec: `"prores"`; accepted pixel formats `Yuv422P`, `Yuv444P`.
 - Keyframe-only (all ProRes frames are intra).
 
+### FourCC routing helpers
+
+The crate root exposes the FourCC ⇄ profile mapping in both directions so a
+demuxer and a muxer share one source of truth for the six carriage codes
+(`apco` / `apcs` / `apcn` / `apch` / `ap4h` / `ap4x`):
+
+- [`profile_for_fourcc`] maps an on-wire MP4/MOV `VisualSampleEntry` FourCC
+  (case-insensitive) to a [`frame::Profile`] — the demuxer/dispatcher
+  direction. [`codec_id_for_fourcc`] is the analogous FourCC → [`CodecId`]
+  lookup, and [`is_prores_raw_fourcc`] flags the out-of-scope ProRes RAW
+  codes (`aprn` / `aprh`) so they are refused rather than mis-routed.
+- [`fourcc_for_profile`] is the exact inverse of [`profile_for_fourcc`]: it
+  maps an encoder-selected profile back to the canonical (lowercase) FourCC a
+  QuickTime `stsd` / MXF Picture Essence Descriptor must carry. A muxer picks
+  a profile with [`encoder::pick_profile`] (or an explicit
+  [`encoder::EncoderConfig::with_profile`] override) and writes
+  `fourcc_for_profile(profile)` into the sample entry. The bytes match
+  [`frame::Profile::fourcc`] and the entries of [`PRORES_FOURCCS`], and
+  round-trip back through `profile_for_fourcc` for every profile.
+
+Per crate-purpose discipline ProRes owns only the codec-tag declaration; the
+QuickTime / MXF sample-table assembly itself lives in the container crate.
+
 ## Performance
 
 A Criterion benchmark covers the decode hot path. Inputs are
