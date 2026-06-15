@@ -33,6 +33,27 @@ for 10-bit planar output (LE u16, range `0..=1023`), `Yuv422P12Le` /
 `Yuv444P12Le` for 12-bit (`0..=4095`), or `Yuv422P` / `Yuv444P` (or omit
 `pixel_format`) for 8-bit.
 
+## Output range (RDD 36 §7.5.1)
+
+The reconstructed-value → pixel-sample conversion `s = clamp(round(2^b *
+(v + 256) / 512))` of §7.5.1 offers two clamp choices. The decoder
+exposes both through [`decoder::OutputRange`]:
+
+- **`Full`** (default) — `nmin = 0`, `nmax = 2^b − 1`; samples utilise
+  all available quantization levels. Byte-identical to the prior
+  behaviour, so [`decoder::decode_packet_with_depth`] and the registry
+  path are unchanged.
+- **`Video`** — `nmin = 1`, `nmax = 2^b − 2`; confines colour samples to
+  the permissible video quantization levels, avoiding the BT.601/BT.709
+  synchronization/timing reference codes (the extreme codes `0` and
+  `2^b − 1`).
+
+Select it via [`decoder::decode_packet_with_options`] or
+`ProResDecoder::set_output_range` on the direct API. The choice affects
+only the Y/Cb/Cr clamp bounds; entropy decode, inverse quantisation, the
+IDCT, and the alpha plane (§7.5.2 always maps the full opacity range) are
+unaffected.
+
 ## Alpha plane
 
 The 4444 / 4444 XQ profiles support a per-pixel alpha channel coded

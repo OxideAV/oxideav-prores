@@ -97,6 +97,52 @@ impl BitDepth {
     }
 }
 
+/// Selects the clamping bounds `(nmin, nmax)` of RDD 36 §7.5.1 for the
+/// reconstructed-value → pixel-sample conversion
+/// `s = clamp(round(2^b * (v + 256) / 512))`.
+///
+/// §7.5.1 offers two choices for the clamp limits:
+///
+/// - **Full** — `nmin = 0`, `nmax = 2^b − 1`; "produce pixel component
+///   samples that utilize all available quantization levels". This is
+///   the default and matches the planar ranges named in [`BitDepth`]
+///   (`0..=255` / `0..=1023` / `0..=4095`).
+/// - **Video** — `nmin`/`nmax` set to "the smallest and largest
+///   permissible video quantization levels for b-bit samples if
+///   avoidance of ITU-R BT.601/BT.709 synchronization/timing reference
+///   quantization levels is desired". Those reserved timing-reference
+///   levels are the extreme codes `0` and `2^b − 1` (the SAV/EAV
+///   excursions of the BT.601/BT.709 digital interface), so the
+///   permissible video levels span `1 ..= 2^b − 2`.
+///
+/// Both options round identically; they differ only in whether the two
+/// extreme codes may appear in the output. The choice is purely an
+/// output-formatting decision and does not affect entropy decoding,
+/// inverse quantisation, or the IDCT.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum OutputRange {
+    /// Clamp to `0 ..= 2^b − 1` (all quantization levels). Default.
+    #[default]
+    Full,
+    /// Clamp to `1 ..= 2^b − 2`, avoiding the BT.601/BT.709
+    /// synchronization/timing reference quantization levels.
+    Video,
+}
+
+impl OutputRange {
+    /// The `(nmin, nmax)` clamp bounds of RDD 36 §7.5.1 for bit depth
+    /// `bd`.
+    pub fn bounds(self, bd: BitDepth) -> (u32, u32) {
+        let max = bd.max_value();
+        match self {
+            Self::Full => (0, max),
+            // 2^b − 2 is `max - 1`; `max` is always ≥ 255 so this never
+            // underflows.
+            Self::Video => (1, max - 1),
+        }
+    }
+}
+
 /// Resolve the requested output bit depth + chroma format from a caller's
 /// `CodecParameters::pixel_format`. Returns `Ok(None)` if no pixel
 /// format was set — caller defaults to 8-bit at decode time, derives
@@ -126,18 +172,38 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     Ok(Box::new(ProResDecoder {
         codec_id: params.codec_id.clone(),
         requested,
+        range: OutputRange::Full,
         pending: None,
         eof: false,
     }))
 }
 
-struct ProResDecoder {
+/// Concrete ProRes decoder produced by [`make_decoder`]. Exposed so a
+/// caller using the direct (non-registry) path can opt into the RDD 36
+/// §7.5.1 video-range clamp via [`ProResDecoder::set_output_range`]
+/// before driving the [`Decoder`] trait.
+pub struct ProResDecoder {
     codec_id: CodecId,
     /// Caller-requested output (bit-depth, chroma) pair. `None` means
     /// "infer from the frame header, default to 8-bit".
     requested: Option<(BitDepth, ChromaFormat)>,
+    /// RDD 36 §7.5.1 clamp range applied during sample generation.
+    range: OutputRange,
     pending: Option<Packet>,
     eof: bool,
+}
+
+impl ProResDecoder {
+    /// Select the RDD 36 §7.5.1 output clamp `range` for subsequent
+    /// frames. Defaults to [`OutputRange::Full`].
+    pub fn set_output_range(&mut self, range: OutputRange) {
+        self.range = range;
+    }
+
+    /// The currently configured §7.5.1 clamp range.
+    pub fn output_range(&self) -> OutputRange {
+        self.range
+    }
 }
 
 impl Decoder for ProResDecoder {
@@ -163,7 +229,7 @@ impl Decoder for ProResDecoder {
                 Err(Error::NeedMore)
             };
         };
-        let vf = decode_packet_with_depth(&pkt.data, pkt.pts, self.requested)?;
+        let vf = decode_packet_with_options(&pkt.data, pkt.pts, self.requested, self.range)?;
         Ok(Frame::Video(vf))
     }
 
@@ -182,10 +248,31 @@ pub fn decode_packet(data: &[u8], pts: Option<i64>) -> Result<VideoFrame> {
 /// Decode a packet, emitting the requested `(BitDepth, ChromaFormat)` if
 /// supplied. When `requested` is `None`, the chroma format is taken from
 /// the frame header and the output is 8-bit.
+///
+/// Equivalent to [`decode_packet_with_options`] with
+/// [`OutputRange::Full`].
 pub fn decode_packet_with_depth(
     data: &[u8],
     pts: Option<i64>,
     requested: Option<(BitDepth, ChromaFormat)>,
+) -> Result<VideoFrame> {
+    decode_packet_with_options(data, pts, requested, OutputRange::Full)
+}
+
+/// Decode a packet with explicit control over both the output
+/// `(BitDepth, ChromaFormat)` and the RDD 36 §7.5.1 clamp `range`.
+///
+/// `range` chooses whether reconstructed color component samples may use
+/// all available quantization levels ([`OutputRange::Full`]) or are
+/// confined to the permissible video levels that avoid the
+/// BT.601/BT.709 synchronization/timing reference codes
+/// ([`OutputRange::Video`]). The alpha plane is unaffected — §7.5.2
+/// always maps decoded alpha across the full opacity range.
+pub fn decode_packet_with_options(
+    data: &[u8],
+    pts: Option<i64>,
+    requested: Option<(BitDepth, ChromaFormat)>,
+    range: OutputRange,
 ) -> Result<VideoFrame> {
     let (fh, after_frame) = parse_frame(data)?;
 
@@ -284,6 +371,7 @@ pub fn decode_packet_with_depth(
             first_h,
             chroma,
             bit_depth,
+            range,
             alpha_kind,
             true,
             FieldStride::new(2, first_field_offset),
@@ -302,6 +390,7 @@ pub fn decode_packet_with_depth(
             second_h,
             chroma,
             bit_depth,
+            range,
             alpha_kind,
             true,
             FieldStride::new(2, second_field_offset),
@@ -321,6 +410,7 @@ pub fn decode_packet_with_depth(
             height,
             chroma,
             bit_depth,
+            range,
             alpha_kind,
             false,
             FieldStride::progressive(),
@@ -405,6 +495,7 @@ fn decode_picture_into_planes<'a>(
     picture_height: usize,
     chroma: ChromaFormat,
     bit_depth: BitDepth,
+    range: OutputRange,
     alpha_kind: Option<AlphaChannelType>,
     interlaced: bool,
     field: FieldStride,
@@ -530,6 +621,7 @@ fn decode_picture_into_planes<'a>(
                         my * MB_SIDE_PX + by * 8,
                         &blk_f,
                         bit_depth,
+                        range,
                         field,
                     );
                 }
@@ -550,7 +642,16 @@ fn decode_picture_into_planes<'a>(
                             (mb_x * MB_SIDE_PX + bx * 8, my * MB_SIDE_PX + by * 8)
                         }
                     };
-                    paste_block(cb_plane, c_byte_stride, x0, y0, &blk_f, bit_depth, field);
+                    paste_block(
+                        cb_plane,
+                        c_byte_stride,
+                        x0,
+                        y0,
+                        &blk_f,
+                        bit_depth,
+                        range,
+                        field,
+                    );
                 }
                 for (i, (bx, by)) in chroma_offsets.iter().enumerate() {
                     let mut blk_f = dequant_to_f32(
@@ -569,7 +670,16 @@ fn decode_picture_into_planes<'a>(
                             (mb_x * MB_SIDE_PX + bx * 8, my * MB_SIDE_PX + by * 8)
                         }
                     };
-                    paste_block(cr_plane, c_byte_stride, x0, y0, &blk_f, bit_depth, field);
+                    paste_block(
+                        cr_plane,
+                        c_byte_stride,
+                        x0,
+                        y0,
+                        &blk_f,
+                        bit_depth,
+                        range,
+                        field,
+                    );
                 }
             }
             if let Some(act) = alpha_kind {
@@ -632,6 +742,11 @@ fn dequant_to_f32(blk: &[i32; 64], qmat: &[u8; 64], quantization_index: u8) -> [
 /// `s = clamp(round(2^b * (v + 256) / 512))`. For 8-bit that simplifies
 /// to `s = clamp(round((v + 256) / 2))`; for 10-bit `s = (v+256) * 2`;
 /// for 12-bit `s = (v+256) * 8`.
+///
+/// `range` selects the §7.5.1 clamp bounds `(nmin, nmax)`: `Full`
+/// (`0 ..= 2^b − 1`) or `Video` (`1 ..= 2^b − 2`, avoiding the
+/// BT.601/BT.709 sync/timing reference levels).
+#[allow(clippy::too_many_arguments)]
 fn paste_block(
     plane: &mut [u8],
     byte_stride: usize,
@@ -639,6 +754,7 @@ fn paste_block(
     y0: usize,
     blk: &[f32; 64],
     bit_depth: BitDepth,
+    range: OutputRange,
     field: FieldStride,
 ) {
     let scale = match bit_depth {
@@ -646,17 +762,19 @@ fn paste_block(
         BitDepth::Ten => 2.0,
         BitDepth::Twelve => 8.0,
     };
-    let max_u32 = bit_depth.max_value();
+    let (nmin, nmax) = range.bounds(bit_depth);
+    let nmin_f = nmin as f32;
+    let nmax_f = nmax as f32;
     match bit_depth {
         BitDepth::Eight => {
             for j in 0..8 {
                 let row = field.map(y0 + j);
                 for i in 0..8 {
                     let v = (blk[j * 8 + i] + 256.0) * scale;
-                    let px = if v <= 0.0 {
-                        0
-                    } else if v >= max_u32 as f32 {
-                        max_u32 as u8
+                    let px = if v <= nmin_f {
+                        nmin as u8
+                    } else if v >= nmax_f {
+                        nmax as u8
                     } else {
                         v.round() as u8
                     };
@@ -665,15 +783,14 @@ fn paste_block(
             }
         }
         BitDepth::Ten | BitDepth::Twelve => {
-            let max = max_u32 as f32;
             for j in 0..8 {
                 let row = field.map(y0 + j);
                 for i in 0..8 {
                     let v = (blk[j * 8 + i] + 256.0) * scale;
-                    let px: u16 = if v <= 0.0 {
-                        0
-                    } else if v >= max {
-                        max_u32 as u16
+                    let px: u16 = if v <= nmin_f {
+                        nmin as u16
+                    } else if v >= nmax_f {
+                        nmax as u16
                     } else {
                         v.round() as u16
                     };

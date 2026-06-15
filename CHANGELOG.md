@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- RDD 36 §7.5.1 output-range clamp: `decoder::OutputRange` (`Full` =
+  `0..=2^b-1`, `Video` = `1..=2^b-2`, avoiding the BT.601/BT.709
+  synchronization/timing reference codes) selectable via
+  `decoder::decode_packet_with_options` or
+  `ProResDecoder::set_output_range`. `Full` is the default and is
+  byte-identical to the prior `decode_packet_with_depth` path.
+
 ## [0.0.10](https://github.com/OxideAV/oxideav-prores/compare/v0.0.9...v0.0.10) - 2026-06-15
 
 ### Other
