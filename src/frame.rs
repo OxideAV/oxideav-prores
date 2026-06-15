@@ -234,8 +234,41 @@ pub struct FrameHeader {
     pub transfer_characteristic: u8,
     pub matrix_coefficients: u8,
     pub alpha_channel_type: u8,
+    /// RDD 36 §5.1.1 / §6.1.1 `load_luma_quantization_matrix` flag, as it
+    /// appeared on the wire. When `true`, [`Self::luma_qmat`] is the custom
+    /// matrix carried in the frame header; when `false`, it is the default
+    /// matrix (all 64 weights = 4 per §7.2). Surfaced for stream-inspection
+    /// and transcode-provenance callers — see
+    /// [`Self::quantization_matrix_source`].
+    pub load_luma_quantization_matrix: bool,
+    /// RDD 36 §5.1.1 / §6.1.1 `load_chroma_quantization_matrix` flag, as it
+    /// appeared on the wire. When `false`, the §6.1.1 rule applies and
+    /// [`Self::chroma_qmat`] mirrors [`Self::luma_qmat`] (which is itself
+    /// the custom luma matrix if `load_luma_quantization_matrix` is `true`,
+    /// otherwise the default). See [`Self::quantization_matrix_source`].
+    pub load_chroma_quantization_matrix: bool,
     pub luma_qmat: [u8; 64],
     pub chroma_qmat: [u8; 64],
+}
+
+/// Provenance of a [`FrameHeader`]'s effective chroma quantization weight
+/// matrix, per RDD 36 §6.1.1 / §7.2. The two `load_*_quantization_matrix`
+/// wire flags allow three distinct derivations of the matrix actually used
+/// to inverse-quantize the chroma (Cb, Cr) components.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuantizationMatrixSource {
+    /// `load_chroma_quantization_matrix == 1`: the chroma matrix is the
+    /// custom `chroma_quantization_matrix` carried in the frame header,
+    /// independent of the luma flag (§6.1.1).
+    CustomChroma,
+    /// `load_chroma_quantization_matrix == 0` and
+    /// `load_luma_quantization_matrix == 1`: the §6.1.1 fallback applies
+    /// and the chroma matrix is a copy of the custom luma matrix.
+    LumaCustom,
+    /// `load_chroma_quantization_matrix == 0` and
+    /// `load_luma_quantization_matrix == 0`: both fall through to the §7.2
+    /// default matrix (all 64 weights = 4).
+    Default,
 }
 
 impl FrameHeader {
@@ -582,6 +615,32 @@ impl FrameHeader {
             None
         }
     }
+
+    /// Typed accessor for the §6.1.1 / §7.2 derivation of the effective
+    /// **chroma** quantization weight matrix, decoded from the two
+    /// `load_*_quantization_matrix` wire flags
+    /// ([`Self::load_luma_quantization_matrix`] /
+    /// [`Self::load_chroma_quantization_matrix`]).
+    ///
+    /// The wire carries no chroma matrix at all when
+    /// `load_chroma_quantization_matrix == 0`; in that case §6.1.1 says the
+    /// luma matrix is used for chroma as well. This accessor distinguishes
+    /// the three resulting cases — [`QuantizationMatrixSource::CustomChroma`],
+    /// [`QuantizationMatrixSource::LumaCustom`], and
+    /// [`QuantizationMatrixSource::Default`] — so stream-inspection and
+    /// transcode-provenance callers can tell whether [`Self::chroma_qmat`]
+    /// originated from a header-carried chroma matrix, a copied custom luma
+    /// matrix, or the §7.2 default. The luma side is the simpler binary
+    /// [`Self::load_luma_quantization_matrix`] (custom vs default).
+    pub fn quantization_matrix_source(&self) -> QuantizationMatrixSource {
+        if self.load_chroma_quantization_matrix {
+            QuantizationMatrixSource::CustomChroma
+        } else if self.load_luma_quantization_matrix {
+            QuantizationMatrixSource::LumaCustom
+        } else {
+            QuantizationMatrixSource::Default
+        }
+    }
 }
 
 /// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
@@ -776,6 +835,8 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
             transfer_characteristic,
             matrix_coefficients,
             alpha_channel_type,
+            load_luma_quantization_matrix: load_luma == 1,
+            load_chroma_quantization_matrix: load_chroma == 1,
             luma_qmat,
             chroma_qmat,
         },
@@ -2536,6 +2597,8 @@ mod tests {
             transfer_characteristic: 0,
             matrix_coefficients: 0,
             alpha_channel_type: 7, // reserved per Table 7
+            load_luma_quantization_matrix: false,
+            load_chroma_quantization_matrix: false,
             luma_qmat: [4u8; 64],
             chroma_qmat: [4u8; 64],
         };
@@ -2664,6 +2727,8 @@ mod tests {
             transfer_characteristic: 0,
             matrix_coefficients: 0,
             alpha_channel_type: 0,
+            load_luma_quantization_matrix: false,
+            load_chroma_quantization_matrix: false,
             luma_qmat: [4u8; 64],
             chroma_qmat: [4u8; 64],
         };
@@ -2855,6 +2920,8 @@ mod tests {
             transfer_characteristic: 0,
             matrix_coefficients: 0,
             alpha_channel_type: 0,
+            load_luma_quantization_matrix: false,
+            load_chroma_quantization_matrix: false,
             luma_qmat: [4u8; 64],
             chroma_qmat: [4u8; 64],
         };
@@ -3007,6 +3074,8 @@ mod tests {
             transfer_characteristic: 0,
             matrix_coefficients: 0, // unknown per Table 6
             alpha_channel_type: 0,
+            load_luma_quantization_matrix: false,
+            load_chroma_quantization_matrix: false,
             luma_qmat: [4u8; 64],
             chroma_qmat: [4u8; 64],
         };
@@ -3152,6 +3221,8 @@ mod tests {
             transfer_characteristic: 0, // unknown per §6.1.1
             matrix_coefficients: 0,
             alpha_channel_type: 0,
+            load_luma_quantization_matrix: false,
+            load_chroma_quantization_matrix: false,
             luma_qmat: [4u8; 64],
             chroma_qmat: [4u8; 64],
         };
@@ -3309,6 +3380,8 @@ mod tests {
                 transfer_characteristic: 0,
                 matrix_coefficients: 0,
                 alpha_channel_type: 0,
+                load_luma_quantization_matrix: false,
+                load_chroma_quantization_matrix: false,
                 luma_qmat: [4u8; 64],
                 chroma_qmat: [4u8; 64],
             };
@@ -3467,6 +3540,8 @@ mod tests {
                 transfer_characteristic: 0,
                 matrix_coefficients: 0,
                 alpha_channel_type: 0,
+                load_luma_quantization_matrix: false,
+                load_chroma_quantization_matrix: false,
                 luma_qmat: [4u8; 64],
                 chroma_qmat: [4u8; 64],
             };
@@ -3742,5 +3817,76 @@ mod tests {
             None,
             "a non-printable byte makes the string accessor return None"
         );
+    }
+
+    /// `FrameHeader::quantization_matrix_source()` distinguishes the three
+    /// §6.1.1 / §7.2 chroma-matrix derivations from the two
+    /// `load_*_quantization_matrix` wire flags, and the raw flags are
+    /// surfaced on the parsed struct. We round-trip through the writer /
+    /// parser so the test also pins that the flags survive the bit
+    /// packing in byte 19 of the frame header.
+    #[test]
+    fn quantization_matrix_source_reflects_load_flags() {
+        // A custom matrix distinct from the §7.2 default (all 4s) so the
+        // copy-from-luma case is observable in chroma_qmat too.
+        let mut custom_luma = [4u8; 64];
+        for (i, w) in custom_luma.iter_mut().enumerate() {
+            *w = 2 + (i as u8 % 62); // every entry in 2..=63
+        }
+        let mut custom_chroma = [4u8; 64];
+        for (i, w) in custom_chroma.iter_mut().enumerate() {
+            *w = 63 - (i as u8 % 62); // distinct from luma, still 2..=63
+        }
+        let build = |load_luma: bool, load_chroma: bool| -> FrameHeader {
+            let mut buf = Vec::new();
+            write_frame(
+                &mut buf,
+                0,
+                64,
+                48,
+                ChromaFormat::Y444,
+                0,
+                &custom_luma,
+                &custom_chroma,
+                load_luma,
+                load_chroma,
+            );
+            let total = buf.len() as u32;
+            buf[0..4].copy_from_slice(&total.to_be_bytes());
+            parse_frame(&buf).expect("parse").0
+        };
+
+        // Both custom → CustomChroma; chroma_qmat is the header chroma matrix.
+        let fh = build(true, true);
+        assert!(fh.load_luma_quantization_matrix);
+        assert!(fh.load_chroma_quantization_matrix);
+        assert_eq!(
+            fh.quantization_matrix_source(),
+            QuantizationMatrixSource::CustomChroma
+        );
+        assert_eq!(fh.chroma_qmat, custom_chroma);
+        assert_eq!(fh.luma_qmat, custom_luma);
+
+        // Custom luma, no chroma flag → LumaCustom; chroma copies luma (§6.1.1).
+        let fh = build(true, false);
+        assert!(fh.load_luma_quantization_matrix);
+        assert!(!fh.load_chroma_quantization_matrix);
+        assert_eq!(
+            fh.quantization_matrix_source(),
+            QuantizationMatrixSource::LumaCustom
+        );
+        assert_eq!(fh.chroma_qmat, custom_luma);
+        assert_eq!(fh.luma_qmat, custom_luma);
+
+        // Neither flag → Default; both matrices are the §7.2 all-4s default.
+        let fh = build(false, false);
+        assert!(!fh.load_luma_quantization_matrix);
+        assert!(!fh.load_chroma_quantization_matrix);
+        assert_eq!(
+            fh.quantization_matrix_source(),
+            QuantizationMatrixSource::Default
+        );
+        assert_eq!(fh.luma_qmat, [4u8; 64]);
+        assert_eq!(fh.chroma_qmat, [4u8; 64]);
     }
 }

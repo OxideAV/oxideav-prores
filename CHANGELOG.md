@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RDD 36 §6.1.1 quantization-matrix provenance: the parsed `FrameHeader`
+  now surfaces the two wire flags `load_luma_quantization_matrix` /
+  `load_chroma_quantization_matrix`, and a typed accessor
+  `FrameHeader::quantization_matrix_source()` returns the new
+  `frame::QuantizationMatrixSource` enum (`CustomChroma` / `LumaCustom` /
+  `Default`) describing whether the effective chroma matrix came from a
+  header-carried chroma matrix, the §6.1.1 copy-from-custom-luma
+  fallback, or the §7.2 default (all weights = 4). Purely additive; no
+  wire or decode-output change.
 - RDD 36 §7.5.1 output-range clamp: `decoder::OutputRange` (`Full` =
   `0..=2^b-1`, `Video` = `1..=2^b-2`, avoiding the BT.601/BT.709
   synchronization/timing reference codes) selectable via

@@ -112,6 +112,24 @@ verbatim.
 
 [`CodecParameters::frame_rate`]: https://docs.rs/oxideav-core/latest/oxideav_core/struct.CodecParameters.html#structfield.frame_rate
 
+## Quantization-matrix provenance (RDD 36 §6.1.1 / §7.2)
+
+The frame header carries two flags, `load_luma_quantization_matrix` and
+`load_chroma_quantization_matrix`, that select whether each component's
+quantization weight matrix is custom (carried inline) or the §7.2
+default (all 64 weights = 4). The chroma side has a §6.1.1 wrinkle: when
+its flag is `0`, the *luma* matrix is reused for chroma — which is itself
+the custom luma matrix if that flag is `1`, else the default.
+
+Both raw flags are now surfaced on the parsed [`frame::FrameHeader`]
+(`load_luma_quantization_matrix` / `load_chroma_quantization_matrix`),
+and [`FrameHeader::quantization_matrix_source`] folds the chroma
+derivation into the [`frame::QuantizationMatrixSource`] enum
+(`CustomChroma` / `LumaCustom` / `Default`) for stream-inspection and
+transcode-provenance callers. The decoder already applies the §6.1.1
+fallback when reconstructing `chroma_qmat`; this only exposes which of
+the three cases produced it.
+
 ## Encoder controls
 
 All controls flow through [`encoder::EncoderConfig`] +
