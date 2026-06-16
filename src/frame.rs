@@ -641,6 +641,136 @@ impl FrameHeader {
             QuantizationMatrixSource::Default
         }
     }
+
+    /// Derive the RDD 36 §6.2 picture geometry implied by this frame
+    /// header's `width` / `height` / `interlace_mode`.
+    ///
+    /// The frame header carries the source-picture luma dimensions
+    /// (`horizontal_size` / `vertical_size`), but the decode loop works
+    /// in macroblocks against the *encoded* picture, whose width/height
+    /// are rounded up to whole 16×16 macroblocks. §6.2 fixes every step
+    /// of that derivation:
+    ///
+    /// * `width_in_mb = (horizontal_size + 15) / 16` — the same for every
+    ///   picture in the frame.
+    /// * For an interlaced frame the §6.2 `picture_vertical_size` split
+    ///   gives `topFieldVerticalSize = (vertical_size + 1) / 2` and
+    ///   `bottomFieldVerticalSize = vertical_size / 2` (so an odd height
+    ///   puts the extra row in the top field); a progressive frame's sole
+    ///   picture has `picture_vertical_size = vertical_size`.
+    /// * `height_in_mb = (picture_vertical_size + 15) / 16` per picture.
+    /// * §6.2 / §7.5.3 cropping: when `16 * width_in_mb > horizontal_size`
+    ///   the rightmost `16 * width_in_mb − horizontal_size` columns of the
+    ///   decoded picture are discarded, and when `16 * height_in_mb >
+    ///   picture_vertical_size` the bottom `16 * height_in_mb −
+    ///   picture_vertical_size` rows are discarded.
+    ///
+    /// This is the geometry the decode path computes internally; surfacing
+    /// it as a typed value lets a stream-inspection / muxer / transcode
+    /// caller size buffers, cross-check the §6.3 `deprecated_number_of_slices`
+    /// field (via [`PictureGeometry::slice_count`]), or validate a
+    /// container's declared frame dimensions without re-deriving the §6.2
+    /// rounding and field-split rules.
+    pub fn picture_geometry(&self) -> PictureGeometry {
+        let horizontal_size = self.width as usize;
+        let vertical_size = self.height as usize;
+        let width_in_mb = horizontal_size.div_ceil(MB_SIDE_PX);
+
+        // §6.2 picture_vertical_size: progressive → full height; the two
+        // interlaced modes each carry one field, the leading field (the
+        // first picture() in the frame) being the named one. The top
+        // field is the taller of the two when the frame height is odd.
+        let (picture_vertical_size, second_picture_vertical_size) = if self.interlace_mode == 0 {
+            (vertical_size, None)
+        } else {
+            let top = vertical_size.div_ceil(2); // (vertical_size + 1) / 2
+            let bottom = vertical_size / 2;
+            match self.interlace_mode {
+                // TopFieldFirst: first picture is the top field.
+                1 => (top, Some(bottom)),
+                // BottomFieldFirst: first picture is the bottom field.
+                _ => (bottom, Some(top)),
+            }
+        };
+
+        let height_in_mb = picture_vertical_size.div_ceil(MB_SIDE_PX);
+        let coded_width = width_in_mb * MB_SIDE_PX;
+        let coded_height = height_in_mb * MB_SIDE_PX;
+
+        PictureGeometry {
+            width_in_mb,
+            height_in_mb,
+            picture_vertical_size,
+            second_picture_vertical_size,
+            picture_count: self.picture_count(),
+            right_crop: coded_width - horizontal_size,
+            bottom_crop: coded_height - picture_vertical_size,
+        }
+    }
+}
+
+/// Luma side length of a ProRes macroblock in pixels (16×16), per
+/// RDD 36 §6.2. The encoded picture is an integral number of these.
+const MB_SIDE_PX: usize = 16;
+
+/// RDD 36 §6.2 picture geometry derived from a [`FrameHeader`] — the
+/// macroblock dimensions of the *encoded* picture(s) plus the
+/// source-picture cropping that §6.2 / §7.5.3 mandate on decode.
+///
+/// All macroblock dimensions are per single picture. For an interlaced
+/// frame both field pictures share [`Self::width_in_mb`]; the leading
+/// field's [`Self::picture_vertical_size`] / [`Self::height_in_mb`] are
+/// reported in the named fields and the trailing field's luma height in
+/// [`Self::second_picture_vertical_size`]. See
+/// [`FrameHeader::picture_geometry`] for the full derivation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PictureGeometry {
+    /// `width_in_mb = (horizontal_size + 15) / 16` — the encoded picture
+    /// width in macroblocks; identical for every picture in the frame.
+    pub width_in_mb: usize,
+    /// `height_in_mb = (picture_vertical_size + 15) / 16` for the leading
+    /// (or sole) picture.
+    pub height_in_mb: usize,
+    /// The leading (or sole) picture's luma-sample height after the §6.2
+    /// `picture_vertical_size` field split.
+    pub picture_vertical_size: usize,
+    /// The trailing field picture's luma-sample height for an interlaced
+    /// frame; `None` for a progressive frame (one picture only).
+    pub second_picture_vertical_size: Option<usize>,
+    /// Number of pictures in the frame — `1` progressive, `2` interlaced
+    /// (mirrors [`FrameHeader::picture_count`]).
+    pub picture_count: u32,
+    /// §6.2 / §7.5.3 right-edge crop: columns of the decoded picture to
+    /// discard because `16 * width_in_mb` exceeds `horizontal_size`. `0`
+    /// when the frame width is already a multiple of 16.
+    pub right_crop: usize,
+    /// §6.2 / §7.5.3 bottom-edge crop for the leading picture: rows to
+    /// discard because `16 * height_in_mb` exceeds `picture_vertical_size`.
+    /// `0` when the picture height is already a multiple of 16.
+    pub bottom_crop: usize,
+}
+
+impl PictureGeometry {
+    /// Number of slices the leading picture is partitioned into, given the
+    /// picture header's `log2_desired_slice_size_in_mb` (§6.2 / §6.3).
+    ///
+    /// Bridges the frame-header-only geometry to the slice partitioning,
+    /// which depends on the per-picture `log2_desired_slice_size_in_mb`
+    /// carried in the picture header rather than the frame header. Equal to
+    /// [`slice_count`]`(self.width_in_mb, log2, self.height_in_mb)`.
+    pub fn slice_count(&self, log2_desired_slice_size_in_mb: u8) -> usize {
+        slice_count(
+            self.width_in_mb,
+            log2_desired_slice_size_in_mb,
+            self.height_in_mb,
+        )
+    }
+
+    /// `number_of_slices_per_mb_row` (§6.2) — the count of entries in the
+    /// `slice_size_in_mb` array, the same for every macroblock row.
+    pub fn slices_per_mb_row(&self, log2_desired_slice_size_in_mb: u8) -> usize {
+        compute_slice_sizes(self.width_in_mb, log2_desired_slice_size_in_mb).len()
+    }
 }
 
 /// Parse the frame() syntax (frame_size + 'icpf' + frame_header()).
@@ -1906,6 +2036,110 @@ mod tests {
             slice_count(120, 3, 68),
             compute_slice_sizes(120, 3).len() * 68
         );
+    }
+
+    /// Minimal `FrameHeader` for geometry tests — only the fields
+    /// [`FrameHeader::picture_geometry`] consults (`width`, `height`,
+    /// `interlace_mode`) matter; the rest take inert defaults.
+    fn geom_header(width: u16, height: u16, interlace_mode: u8) -> FrameHeader {
+        FrameHeader {
+            frame_size: 0,
+            frame_header_size: 20,
+            bitstream_version: if interlace_mode == 0 { 0 } else { 1 },
+            encoder_identifier: *b"oxav",
+            width,
+            height,
+            chroma_format: ChromaFormat::Y422,
+            interlace_mode,
+            aspect_ratio_information: 0,
+            frame_rate_code: 0,
+            color_primaries: 0,
+            transfer_characteristic: 0,
+            matrix_coefficients: 0,
+            alpha_channel_type: 0,
+            load_luma_quantization_matrix: false,
+            load_chroma_quantization_matrix: false,
+            luma_qmat: [4u8; 64],
+            chroma_qmat: [4u8; 64],
+        }
+    }
+
+    #[test]
+    fn picture_geometry_progressive_corpus() {
+        // 1920×1080 progressive: 120 × 68 MBs. Width is flush to 16 but
+        // 1080 is not (67.5 → 68 MB rows = 1088 coded), so the bottom 8
+        // rows are §6.2 padding to be cropped on decode. One picture,
+        // 1020 8-MB slices.
+        let g = geom_header(1920, 1080, 0).picture_geometry();
+        assert_eq!(g.width_in_mb, 120);
+        assert_eq!(g.height_in_mb, 68);
+        assert_eq!(g.picture_vertical_size, 1080);
+        assert_eq!(g.second_picture_vertical_size, None);
+        assert_eq!(g.picture_count, 1);
+        assert_eq!(g.right_crop, 0);
+        assert_eq!(g.bottom_crop, 68 * 16 - 1080); // 1088 − 1080 = 8
+        assert_eq!(g.slices_per_mb_row(3), 15);
+        assert_eq!(g.slice_count(3), 1020);
+
+        // 1280×720: 80 × 45, also flush to 16.
+        let g = geom_header(1280, 720, 0).picture_geometry();
+        assert_eq!((g.width_in_mb, g.height_in_mb), (80, 45));
+        assert_eq!((g.right_crop, g.bottom_crop), (0, 0));
+        assert_eq!(g.slice_count(3), 450);
+
+        // 320×240: 20 × 15, each row an 8+8+4 tail (3 slices/row).
+        let g = geom_header(320, 240, 0).picture_geometry();
+        assert_eq!(g.slices_per_mb_row(3), 3);
+        assert_eq!(g.slice_count(3), 45);
+    }
+
+    #[test]
+    fn picture_geometry_interlaced_field_split() {
+        // 1920×1080 TFF: each field is 540 luma rows → height_in_mb =
+        // ceil(540/16) = 34; bottom crop = 34*16 − 540 = 4; 510 slices.
+        let g = geom_header(1920, 1080, 1).picture_geometry();
+        assert_eq!(g.width_in_mb, 120);
+        assert_eq!(g.height_in_mb, 34);
+        assert_eq!(g.picture_vertical_size, 540); // top field (= bottom here, even height)
+        assert_eq!(g.second_picture_vertical_size, Some(540));
+        assert_eq!(g.picture_count, 2);
+        assert_eq!(g.right_crop, 0);
+        assert_eq!(g.bottom_crop, 34 * 16 - 540);
+        assert_eq!(g.slice_count(3), 510);
+
+        // BFF on the same frame: leading picture is the bottom field, but
+        // for an even height both fields are 540 so the split is symmetric.
+        let g = geom_header(1920, 1080, 2).picture_geometry();
+        assert_eq!(g.picture_vertical_size, 540);
+        assert_eq!(g.second_picture_vertical_size, Some(540));
+    }
+
+    #[test]
+    fn picture_geometry_odd_height_puts_extra_row_in_top_field() {
+        // §6.2: topFieldVerticalSize = (vertical_size + 1) / 2,
+        // bottomFieldVerticalSize = vertical_size / 2. For an odd height
+        // (e.g. 487) the top field gets the extra row (244 vs 243).
+        let g = geom_header(640, 487, 1).picture_geometry(); // TFF → top leads
+        assert_eq!(g.picture_vertical_size, 244); // (487 + 1) / 2
+        assert_eq!(g.second_picture_vertical_size, Some(243)); // 487 / 2
+
+        let g = geom_header(640, 487, 2).picture_geometry(); // BFF → bottom leads
+        assert_eq!(g.picture_vertical_size, 243); // 487 / 2
+        assert_eq!(g.second_picture_vertical_size, Some(244)); // (487 + 1) / 2
+    }
+
+    #[test]
+    fn picture_geometry_crops_non_multiple_of_16() {
+        // 1920×1088 is the classic "1080 padded to 1088" capture height,
+        // but a genuinely odd progressive frame — say 1366×766 — exercises
+        // both right and bottom crop. width_in_mb = ceil(1366/16) = 86
+        // (→ 1376 coded, crop 10); height_in_mb = ceil(766/16) = 48
+        // (→ 768 coded, crop 2).
+        let g = geom_header(1366, 766, 0).picture_geometry();
+        assert_eq!(g.width_in_mb, 86);
+        assert_eq!(g.height_in_mb, 48);
+        assert_eq!(g.right_crop, 86 * 16 - 1366);
+        assert_eq!(g.bottom_crop, 48 * 16 - 766);
     }
 
     #[test]

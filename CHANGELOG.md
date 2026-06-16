@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RDD 36 §6.2 picture geometry: `FrameHeader::picture_geometry()` returns
+  a new `frame::PictureGeometry` folding the §6.2 derivation of the
+  *encoded* picture geometry from the header's source dimensions —
+  `width_in_mb = ceil(horizontal_size/16)`, the interlaced
+  `picture_vertical_size` field split (`top = (h+1)/2`, `bottom = h/2`,
+  with TFF/BFF leading-field ordering), per-picture
+  `height_in_mb = ceil(picture_vertical_size/16)`, the trailing field
+  height, and the §6.2 / §7.5.3 right/bottom crop amounts. Bridging
+  helpers `PictureGeometry::slice_count(log2)` /
+  `slices_per_mb_row(log2)` connect to the picture-header slice
+  partitioning. Surfaces the geometry the decode path computes
+  internally for stream-inspection / muxer / transcode callers; purely
+  additive, no wire or decode-output change.
 - RDD 36 §6.1.1 quantization-matrix provenance: the parsed `FrameHeader`
   now surfaces the two wire flags `load_luma_quantization_matrix` /
   `load_chroma_quantization_matrix`, and a typed accessor

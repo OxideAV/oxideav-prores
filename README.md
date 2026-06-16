@@ -130,6 +130,24 @@ transcode-provenance callers. The decoder already applies the §6.1.1
 fallback when reconstructing `chroma_qmat`; this only exposes which of
 the three cases produced it.
 
+## Picture geometry (RDD 36 §6.2)
+
+[`FrameHeader::picture_geometry`] folds the §6.2 derivation of the
+*encoded* picture geometry out of the header's source dimensions into a
+[`frame::PictureGeometry`]: `width_in_mb` (`ceil(horizontal_size / 16)`,
+identical for both fields), the per-picture `picture_vertical_size` field
+split for interlaced frames (`top = (h + 1) / 2`, `bottom = h / 2`, with
+the leading field selected by the TFF/BFF `interlace_mode`),
+`height_in_mb`, the trailing field height, and the §6.2 / §7.5.3
+right/bottom crop amounts a decoder discards when the source size is not a
+multiple of 16. The slice-partitioning bridges
+`PictureGeometry::slice_count(log2)` /
+`slices_per_mb_row(log2)` take the picture header's
+`log2_desired_slice_size_in_mb`. This is the geometry the decode loop
+computes internally, surfaced for stream-inspection / muxer / transcode
+callers to size buffers or cross-check container-declared dimensions
+without re-deriving the rounding and field-split rules.
+
 ## Encoder controls
 
 All controls flow through [`encoder::EncoderConfig`] +
