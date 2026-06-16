@@ -525,14 +525,32 @@ fn decode_picture_into_planes<'a>(
         slice_sizes.push(u16::from_be_bytes(after_pic[off..off + 2].try_into().unwrap()) as usize);
     }
     let mut cursor = &after_pic[slice_table_bytes..];
-    let total_picture_bytes: usize =
+    // The bytes occupied by the defined picture syntax this decoder
+    // consumes: the picture header, the slice table, and every slice
+    // payload. RDD 36 §6.2.1 makes `picture_size` (which "includes the
+    // picture header") the authoritative total — and §6.4 permits a
+    // *version variant* to append informative bytes after the defined
+    // syntax, inflating `picture_size` beyond this consumed total.
+    let consumed_picture_bytes: usize =
         ph.picture_header_size as usize + slice_table_bytes + slice_sizes.iter().sum::<usize>();
-    if (total_picture_bytes as u32) != ph.picture_size {
+    let declared_picture_bytes = ph.picture_size as usize;
+    // The defined syntax can never claim more space than the picture
+    // declares; if it does the slice table / sizes are corrupt.
+    if consumed_picture_bytes > declared_picture_bytes {
         return Err(Error::invalid(
-            "prores: picture_size mismatch with header + slice table + payloads",
+            "prores: header + slice table + payloads exceed declared picture_size",
         ));
     }
-    if data.len() < total_picture_bytes {
+    // RDD 36 §6.2.1 / §6.4: "decoders shall use the specified size —
+    // rather than inference from the syntax itself — to determine the
+    // start of the immediately following syntax structure." Advance past
+    // the *declared* `picture_size` (which equals the consumed total for
+    // a base bitstream, or exceeds it by the trailing version-variant
+    // bytes a forward-compatible stream may carry) so that, for an
+    // interlaced frame, the second field's `picture()` starts at the
+    // correct offset even when version-variant data sits after the first
+    // field's slices.
+    if data.len() < declared_picture_bytes {
         return Err(Error::invalid("prores: picture overruns buffer"));
     }
 
@@ -720,7 +738,7 @@ fn decode_picture_into_planes<'a>(
             mx += mbs_this_slice;
         }
     }
-    Ok(&data[total_picture_bytes..])
+    Ok(&data[declared_picture_bytes..])
 }
 
 fn dequant_to_f32(blk: &[i32; 64], qmat: &[u8; 64], quantization_index: u8) -> [f32; 64] {

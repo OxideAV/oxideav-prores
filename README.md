@@ -190,6 +190,22 @@ no-alpha; v1 otherwise). Typed accessors `FrameHeader::interlace_kind`,
 `PictureHeader::mbs_per_slice`, and `SliceHeader::qscale` fold the
 respective reverse mappings onto the parsed headers.
 
+### Version-variant forward compatibility (RDD 36 §6.4)
+
+§6.4 lets a future *version variant* append informative bytes after a
+structure's defined syntax without breaking existing decoders, and
+mandates that "decoders shall use the specified size — rather than
+inference from the syntax itself — to determine the start of the
+immediately following syntax structure." The decoder therefore locates
+the next `picture()` (the second field of an interlaced frame) from the
+first picture's **declared** `picture_size` (§6.2.1) rather than from the
+sum of the picture header, slice table, and slice payloads it parsed: a
+stream that carries `picture_size > header + slice_table + Σslice` (the
+trailing variant bytes) decodes identically to its base-bitstream twin,
+while a stream whose parsed payload *exceeds* its declared `picture_size`
+is refused as corrupt. Base bitstreams (where the two totals are equal)
+are byte-unaffected.
+
 ## ProRes RAW is detected and refused
 
 Apple **ProRes RAW** (`aprn` / `aprh`) is a separate format outside the

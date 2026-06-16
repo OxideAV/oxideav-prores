@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RDD 36 §6.4 version-variant forward compatibility on the decode path:
+  the picture loop now advances to the **declared** `picture_size`
+  (§6.2.1) when locating the next `picture()` — the second field of an
+  interlaced frame — rather than to the sum of the picture header, slice
+  table, and slice payloads it parsed. §6.4 permits a future version
+  variant to append informative bytes after a picture's defined syntax;
+  such a stream (where `picture_size > header + slice_table + Σslice`)
+  now decodes identically to its base-bitstream twin instead of being
+  rejected by the prior strict-equality check. A stream whose parsed
+  payload *exceeds* its declared `picture_size` is still refused as
+  corrupt. Base bitstreams (the two totals equal) are byte-unaffected;
+  the SHA-locked decode fixtures are unchanged. New
+  `tests/version_variant_picture.rs` covers progressive trailing-variant
+  bytes, interlaced first-field trailing-variant bytes (second field
+  still located correctly), and the payload-exceeds-declared rejection.
 - RDD 36 §6.2 picture geometry: `FrameHeader::picture_geometry()` returns
   a new `frame::PictureGeometry` folding the §6.2 derivation of the
   *encoded* picture geometry from the header's source dimensions —
