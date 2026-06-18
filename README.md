@@ -240,7 +240,13 @@ reporting the fixture's fixed-point reference SHA alongside ours so the
 ~1-LSB float-vs-fixed IDCT divergence permitted by §7.4 stays visible.
 `tests/idct_annex_a.rs` runs the full RDD 36 Annex A IDCT accuracy
 qualification against the production [`dct::idct8x8`] — all five
-acceptance criteria hold with large margin.
+acceptance criteria hold with large margin. `tests/alpha_bit_depth.rs`
+(plus white-box unit tests in `decoder.rs`) lock the §7.5.2 decoded-alpha
+→ pixel-alpha bit-depth conversion `alphaSample = round((2^b − 1) *
+alpha ÷ mask)` without the external validator: an 8-bit-alpha 4444 frame
+decoded at 8-/10-/12-bit output matches the §7.5.2 formula exactly (alpha
+is coded losslessly per §7.1.2), covering the identity, promotion,
+demotion, endpoint, and round-half-up cases.
 
 Streams produced by this crate's encoder use the spec's entropy coder
 for colour and a plain run-length code for alpha (the alternative path

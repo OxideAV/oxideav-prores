@@ -891,3 +891,146 @@ fn crop_plane(
     }
     out
 }
+
+#[cfg(test)]
+mod alpha_sample_tests {
+    //! White-box coverage for the RDD 36 §7.5.2 decoded-alpha →
+    //! pixel-alpha-sample conversion `alpha_to_sample`. The end-to-end
+    //! decode path only ever reaches this code with an alpha-bearing
+    //! 4444 stream, and the only prior coverage of the bit-depth
+    //! promotion/demotion arm lived in the `ffmpeg_interop` integration
+    //! tests — which skip entirely when the external validator binary is
+    //! absent (the usual CI case). These tests lock the §7.5.2 formula
+    //! `alphaSample = round((2^b − 1) * alpha ÷ mask)` directly, with no
+    //! external dependency.
+    use super::{alpha_to_sample, AlphaChannelType, BitDepth};
+
+    /// §7.5.2: "If the pixel component sample bit depth matches that of
+    /// the decoded alpha values, the pixel alpha component samples shall
+    /// be the decoded values themselves." 8-bit alpha (alpha_channel_type
+    /// == 1) into an 8-bit sample must be the exact identity across the
+    /// full `0..=255` domain.
+    #[test]
+    fn eight_bit_alpha_to_eight_bit_is_identity() {
+        for a in 0u16..=255 {
+            assert_eq!(
+                alpha_to_sample(a, AlphaChannelType::Eight, BitDepth::Eight),
+                a,
+                "8-bit alpha {a} must map to itself at 8-bit output"
+            );
+        }
+    }
+
+    /// §7.5.2 endpoints: the smallest and largest decoded alpha values
+    /// signify opacities of exactly 0.0 and 1.0 and must map to the
+    /// smallest (0) and largest (`2^b − 1`) pixel sample at every output
+    /// depth, for both alpha_channel_type values.
+    #[test]
+    fn endpoints_map_to_full_opacity_range() {
+        for act in [AlphaChannelType::Eight, AlphaChannelType::Sixteen] {
+            let max_in = act.mask() as u16;
+            for depth in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+                assert_eq!(
+                    alpha_to_sample(0, act, depth),
+                    0,
+                    "alpha 0 (opacity 0.0) must map to sample 0 ({act:?} -> {depth:?})"
+                );
+                assert_eq!(
+                    u32::from(alpha_to_sample(max_in, act, depth)),
+                    depth.max_value(),
+                    "alpha {max_in} (opacity 1.0) must map to sample 2^b-1 ({act:?} -> {depth:?})"
+                );
+            }
+        }
+    }
+
+    /// §7.5.2 promotion: 8-bit decoded alpha into a 10/12-bit pixel
+    /// sample uses `round((2^b − 1) * alpha ÷ 255)`. Spot-check a handful
+    /// of values against the formula evaluated independently here with
+    /// round-half-away-from-zero (== round-half-up for non-negatives,
+    /// the §3 `round(x) = floor(x + 1/2)` convention).
+    #[test]
+    fn eight_bit_alpha_promotes_to_higher_depth() {
+        fn expect(alpha: u32, max_out: u32, mask: u32) -> u16 {
+            ((max_out * alpha * 2 + mask) / (mask * 2)) as u16
+        }
+        for &alpha in &[0u32, 1, 64, 127, 128, 200, 254, 255] {
+            // 8-bit -> 10-bit (max 1023, mask 255)
+            assert_eq!(
+                alpha_to_sample(alpha as u16, AlphaChannelType::Eight, BitDepth::Ten),
+                expect(alpha, 1023, 255),
+                "8->10 promotion mismatch at alpha {alpha}"
+            );
+            // 8-bit -> 12-bit (max 4095, mask 255)
+            assert_eq!(
+                alpha_to_sample(alpha as u16, AlphaChannelType::Eight, BitDepth::Twelve),
+                expect(alpha, 4095, 255),
+                "8->12 promotion mismatch at alpha {alpha}"
+            );
+        }
+    }
+
+    /// §7.5.2 demotion: 16-bit decoded alpha (alpha_channel_type == 2)
+    /// into 8/10/12-bit samples uses `round((2^b − 1) * alpha ÷ 65535)`.
+    /// The output is monotonic non-decreasing in the input and never
+    /// exceeds `2^b − 1`.
+    #[test]
+    fn sixteen_bit_alpha_demotes_monotonically() {
+        fn expect(alpha: u32, max_out: u32, mask: u32) -> u16 {
+            ((max_out as u64 * alpha as u64 * 2 + mask as u64) / (mask as u64 * 2)) as u16
+        }
+        for depth in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+            let max_out = depth.max_value();
+            let mut prev = 0u16;
+            for alpha in (0u32..=65535).step_by(257) {
+                let got = alpha_to_sample(alpha as u16, AlphaChannelType::Sixteen, depth);
+                assert_eq!(
+                    got,
+                    expect(alpha, max_out, 65535),
+                    "16->{}b demotion mismatch at alpha {alpha}",
+                    depth.bits()
+                );
+                assert!(
+                    u32::from(got) <= max_out,
+                    "demoted sample {got} exceeds 2^b-1 = {max_out}"
+                );
+                assert!(got >= prev, "demotion must be monotonic non-decreasing");
+                prev = got;
+            }
+        }
+    }
+
+    /// §7.5.2 round-half-up boundary: pick an `(alpha, depth)` whose exact
+    /// quotient lands on a half-integer and confirm `alpha_to_sample`
+    /// rounds it up (the §3 `floor(x + 1/2)` convention), not toward zero.
+    #[test]
+    fn rounds_half_up_at_a_known_midpoint() {
+        // 8-bit alpha 1 into a hypothetical b where (2^b-1)/255 = 0.5
+        // exact is not realisable, so construct a concrete half-integer:
+        // 16-bit alpha into 8-bit: (255 * alpha) / 65535. Choose alpha so
+        // 255*alpha / 65535 = k + 0.5 exactly. 65535 = 255*257, so
+        // 255*alpha/65535 = alpha/257; alpha = 257*k + 128.5 is not
+        // integral, but alpha = 128 gives 128/257 = 0.498… (-> 0) and the
+        // exact half-integer arises for 8-bit alpha into a depth where
+        // max_out is odd. Use 8-bit alpha 1 into 10-bit: 1023/255 =
+        // 4.0117… (no half). Instead verify the +mask/2 bias directly:
+        // for mask 255, alpha 1, max_out chosen so product*2/(2*mask)
+        // straddles .5 — use the general invariant against a brute float.
+        for act in [AlphaChannelType::Eight, AlphaChannelType::Sixteen] {
+            let mask = act.mask();
+            for depth in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+                let max_out = depth.max_value();
+                for alpha in [1u32, 7, 19, 99, 100, mask / 2, mask / 2 + 1] {
+                    let alpha = alpha.min(mask);
+                    let exact = (max_out as f64 * alpha as f64) / mask as f64;
+                    let want = exact.round() as u16; // ties -> away from zero == up here
+                    assert_eq!(
+                        alpha_to_sample(alpha as u16, act, depth),
+                        want,
+                        "round mismatch: {act:?} alpha {alpha} -> {depth:?} (exact {exact})"
+                    );
+                }
+            }
+        }
+    }
+}

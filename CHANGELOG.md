@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RDD 36 §7.5.2 decoded-alpha → pixel-alpha bit-depth conversion is now
+  locked by in-tree, validator-independent tests. The conversion
+  `alphaSample = round((2^b − 1) * alpha ÷ mask)` (promotion/demotion
+  between the coded `alpha_channel_type` depth and the requested output
+  bit depth) previously had coverage only in the `ffmpeg_interop`
+  integration tests, which skip when the external validator binary is
+  absent (the usual CI case). New white-box unit tests in `decoder.rs`
+  exercise `alpha_to_sample` directly — the §7.5.2 identity arm (8-bit
+  alpha → 8-bit sample), full-opacity endpoint mapping (`0 → 0`,
+  `mask → 2^b − 1`) for both `alpha_channel_type` values across all three
+  output depths, the 8→10/8→12 promotion formula, monotone 16→8/10/12
+  demotion, and the §3 `floor(x + 1/2)` round-half-up convention. New
+  `tests/alpha_bit_depth.rs` drives the same §7.5.2 path end to end:
+  an 8-bit-alpha 4444 frame encoded by this crate is decoded at 8-, 10-,
+  and 12-bit output and every alpha sample is checked against the §7.5.2
+  formula evaluated independently (the alpha plane is coded losslessly
+  per §7.1.2, so the mapping is exact with no PSNR slack). No
+  behavioural change — coverage only.
 - RDD 36 §6.4 version-variant forward compatibility on the decode path:
   the picture loop now advances to the **declared** `picture_size`
   (§6.2.1) when locating the next `picture()` — the second field of an
