@@ -66,6 +66,24 @@ so pixel-format reporting stays `Yuv4(2|4)4P*` — the caller checks
 `frame.planes.len() == 4` to detect alpha. `FrameHeader::alpha_kind()`
 returns the named Table 7 variant (`None` / `Bits8` / `Bits16`).
 
+### §7.5.3 scanned-alpha array length (reference-bitstream note)
+
+A literal reading of RDD 36 §7.5.3 — the per-slice scanned-alpha array
+"does not include alpha values for the excess row(s) of pixels at the
+bottom of slices with `i = height_in_mb − 1`" — suggests sizing the
+bottom macroblock row's alpha array to the *visible* row count. Real
+ProRes 4444 bitstreams (including the in-tree `4444-with-alpha`
+1920×1080 reference fixture, whose bottom MB row spans only 8 visible
+rows) instead carry the **full 16-row** array and let the decoder
+discard the excess rows on paste, exactly as it already discards the
+excess right-edge *columns*. The §7.5.3 exclusion therefore governs
+which rows a decoder writes to the frame buffer, not the coded array
+length; the codec reads/writes the full 16-row array to stay
+bit-compatible with the reference. `tests/alpha_bit_depth.rs` and
+`tests/interlaced_alpha_partial_field.rs` lock this against
+non-MB-aligned progressive heights and non-MB-aligned interlaced field
+heights respectively (8-bit and 16-bit coded alpha, 8/10/12-bit output).
+
 ## Frame-header metadata (RDD 36 §5.1.1 / §6.2)
 
 The encoder fills the descriptive frame-header fields
@@ -246,7 +264,12 @@ acceptance criteria hold with large margin. `tests/alpha_bit_depth.rs`
 alpha ÷ mask)` without the external validator: an 8-bit-alpha 4444 frame
 decoded at 8-/10-/12-bit output matches the §7.5.2 formula exactly (alpha
 is coded losslessly per §7.1.2), covering the identity, promotion,
-demotion, endpoint, and round-half-up cases.
+demotion, endpoint, and round-half-up cases — including non-MB-aligned
+progressive heights (the §7.5.3 partial-bottom-MB-row alpha array) and,
+in `tests/interlaced_alpha_partial_field.rs`, non-MB-aligned interlaced
+field heights that combine the §6.2 field split, the §7.5.3 top/bottom
+deinterleave, and the partial-row alpha array across TFF/BFF at
+8/10/12-bit output.
 
 Streams produced by this crate's encoder use the spec's entropy coder
 for colour and a plain run-length code for alpha (the alternative path

@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RDD 36 §7.5.3 partial-bottom-MB-row scanned-alpha array length is now
+  pinned by validator-independent regression tests. A literal reading of
+  §7.5.3 suggests sizing the bottom macroblock row's alpha array to the
+  visible row count, but real ProRes 4444 bitstreams (the in-tree
+  `4444-with-alpha` 1920×1080 reference fixture, whose bottom MB row has
+  only 8 visible rows) carry the full 16-row array and the decoder
+  discards the excess rows on paste. The encoder and decoder alpha paths
+  now document this reference-bitstream behaviour inline (DOCS-GAP
+  candidate: §7.5.3 wording vs. reference bitstream). `tests/alpha_bit_depth.rs`
+  gains four cases at a non-MB-aligned progressive height (32×24, bottom
+  MB row = 8 visible rows): 8-bit alpha roundtrips losslessly at 8/10/12-bit
+  output, and a 16-bit-alpha case locks the §7.5.2 16→12-bit demotion arm.
+  `tests/interlaced_alpha_partial_field.rs` adds the interlaced
+  counterpart at a non-MB-aligned field height (32×36, each field 18 rows →
+  2-row partial bottom MB row), combining the §6.2 field split, the §7.5.3
+  top/bottom deinterleave, and the partial-row alpha array across TFF/BFF
+  and 8/10/12-bit output — previously interlaced-alpha coverage existed
+  only in the `ffmpeg_cross_decode` suite at MB-aligned field heights. No
+  behavioural change — coverage and documentation only.
 - RDD 36 §7.5.2 decoded-alpha → pixel-alpha bit-depth conversion is now
   locked by in-tree, validator-independent tests. The conversion
   `alphaSample = round((2^b − 1) * alpha ÷ mask)` (promotion/demotion
