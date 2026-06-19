@@ -154,3 +154,208 @@ fn alpha8_endpoints_exact_each_depth() {
         assert_eq!(u32::from(expected_sample(255, out)), out.max_value());
     }
 }
+
+// ───────── partial bottom-MB-row alpha (RDD 36 §7.5.3) ─────────
+//
+// Regression lock for the per-slice scanned-alpha array length on the
+// bottom macroblock row of a picture whose height is NOT a multiple of
+// 16. RDD 36 §7.5.3 says the alpha array "does not include alpha values
+// for the excess row(s) of pixels at the bottom of slices with
+// i = height_in_mb − 1", which reads as "size the bottom-row array to the
+// visible row count". Empirically that is wrong: reference ProRes 4444
+// streams (and this crate, to stay bit-compatible) encode the FULL 16
+// rows of the bottom MB row and the decoder discards the excess rows on
+// paste. Sizing the coded array to the visible row count instead raises
+// "run overruns alphaValues array" against real bitstreams. This test
+// pins the working behaviour so a future "spec-literal" refactor that
+// truncates the bottom-row array length is caught immediately, while also
+// proving the *visible* alpha is recovered losslessly through the partial
+// bottom row.
+
+/// Width is MB-aligned (multiple of 16) but height is not: 32×24 yields a
+/// 2-MB-row picture (padded height 32) whose bottom MB row carries only
+/// 24 − 16 = 8 visible rows. Exercises the §7.5.3 partial-row path.
+const WP: usize = 32;
+const HP: usize = 24;
+
+fn ramp_alpha(x: usize, y: usize) -> u8 {
+    let v = (x * 255) / (WP - 1);
+    let w = (y * 255) / (HP - 1);
+    ((v + w) / 2) as u8
+}
+
+fn source_partial_height_alpha() -> VideoFrame {
+    let mut y = vec![0u8; WP * HP];
+    let mut cb = vec![128u8; WP * HP];
+    let cr = vec![128u8; WP * HP];
+    let mut a = vec![0u8; WP * HP];
+    for j in 0..HP {
+        for i in 0..WP {
+            y[j * WP + i] = ((i + j) as u16 % 256) as u8;
+            cb[j * WP + i] = 128;
+            a[j * WP + i] = ramp_alpha(i, j);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: WP,
+                data: y,
+            },
+            VideoPlane {
+                stride: WP,
+                data: cb,
+            },
+            VideoPlane {
+                stride: WP,
+                data: cr,
+            },
+            VideoPlane {
+                stride: WP,
+                data: a,
+            },
+        ],
+    }
+}
+
+fn partial_roundtrip_at_depth(out: BitDepth) {
+    let src = source_partial_height_alpha();
+    let pkt = encode_frame_with_alpha(
+        &src,
+        WP as u32,
+        HP as u32,
+        ChromaFormat::Y444,
+        BitDepth::Eight,
+        Profile::Prores4444,
+        4,
+        Some(AlphaChannelType::Eight),
+    )
+    .expect("encode 4444 + 8-bit alpha at non-MB-aligned height");
+
+    let frame = decode_packet_with_depth(&pkt, Some(0), Some((out, ChromaFormat::Y444)))
+        .unwrap_or_else(|e| panic!("decode at {out:?} failed: {e:?}"));
+
+    let got = read_alpha_plane(&frame, out);
+    assert_eq!(
+        got.len(),
+        WP * HP,
+        "alpha plane must crop to the visible {WP}x{HP} image (including the partial bottom MB row)"
+    );
+    // The whole visible image — including rows 16..24 in the partial
+    // bottom MB row — must recover the §7.5.2 sample exactly (alpha is
+    // lossless per §7.1.2).
+    for j in 0..HP {
+        for i in 0..WP {
+            let a = ramp_alpha(i, j);
+            let want = expected_sample(a, out);
+            assert_eq!(
+                got[j * WP + i],
+                want,
+                "§7.5.2/§7.5.3 mismatch at ({i},{j}) out={out:?} \
+                 (partial bottom MB row begins at j=16): alpha {a} -> got {} want {want}",
+                got[j * WP + i]
+            );
+        }
+    }
+}
+
+/// Partial bottom-MB-row alpha roundtrips losslessly at 8-bit output.
+#[test]
+fn alpha8_partial_bottom_row_identity_8bit() {
+    partial_roundtrip_at_depth(BitDepth::Eight);
+}
+
+/// Partial bottom-MB-row alpha roundtrips through §7.5.2 promotion at
+/// 10-bit output.
+#[test]
+fn alpha8_partial_bottom_row_promotes_10bit() {
+    partial_roundtrip_at_depth(BitDepth::Ten);
+}
+
+/// Partial bottom-MB-row alpha roundtrips through §7.5.2 promotion at
+/// 12-bit output.
+#[test]
+fn alpha8_partial_bottom_row_promotes_12bit() {
+    partial_roundtrip_at_depth(BitDepth::Twelve);
+}
+
+/// The same partial-height geometry with **16-bit** coded alpha
+/// (`alpha_channel_type == 2`) — the bottom-MB-row array length and the
+/// §7.5.2 16-bit demotion arm together.
+#[test]
+fn alpha16_partial_bottom_row_roundtrips() {
+    let mut a = vec![0u8; WP * HP * 2];
+    for j in 0..HP {
+        for i in 0..WP {
+            // Full 16-bit sweep, distinct per pixel, hitting the partial
+            // bottom rows (j >= 16) with non-trivial values.
+            let v = (((i + j * WP) * 65535) / (WP * HP - 1)) as u16;
+            let off = (j * WP + i) * 2;
+            a[off] = (v & 0xFF) as u8;
+            a[off + 1] = (v >> 8) as u8;
+        }
+    }
+    // Colour coded at 12-bit, so the Y/Cb/Cr planes must be 2 bytes per
+    // sample (their content is irrelevant to the alpha lock).
+    let mut y12 = vec![0u8; WP * HP * 2];
+    let mut c12 = vec![0u8; WP * HP * 2];
+    for px in 0..WP * HP {
+        // mid-grey 12-bit: 2048 for luma, 2048 for chroma.
+        y12[px * 2] = 0x00;
+        y12[px * 2 + 1] = 0x08;
+        c12[px * 2] = 0x00;
+        c12[px * 2 + 1] = 0x08;
+    }
+    let src = VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: WP * 2,
+                data: y12,
+            },
+            VideoPlane {
+                stride: WP * 2,
+                data: c12.clone(),
+            },
+            VideoPlane {
+                stride: WP * 2,
+                data: c12,
+            },
+            VideoPlane {
+                stride: WP * 2,
+                data: a.clone(),
+            },
+        ],
+    };
+    let pkt = encode_frame_with_alpha(
+        &src,
+        WP as u32,
+        HP as u32,
+        ChromaFormat::Y444,
+        BitDepth::Twelve,
+        Profile::Prores4444,
+        2,
+        Some(AlphaChannelType::Sixteen),
+    )
+    .expect("encode 4444 + 16-bit alpha at non-MB-aligned height");
+
+    let frame =
+        decode_packet_with_depth(&pkt, Some(0), Some((BitDepth::Twelve, ChromaFormat::Y444)))
+            .expect("decode 16-bit alpha");
+    let got = read_alpha_plane(&frame, BitDepth::Twelve);
+    assert_eq!(got.len(), WP * HP);
+    // §7.5.2 16-bit demotion to 12-bit: round((2^12 − 1) * alpha / 65535).
+    for j in 0..HP {
+        for i in 0..WP {
+            let off = (j * WP + i) * 2;
+            let alpha = u16::from_le_bytes([a[off], a[off + 1]]) as u64;
+            let want = ((4095u64 * alpha * 2 + 65535) / (65535 * 2)) as u16;
+            assert_eq!(
+                got[j * WP + i],
+                want,
+                "16-bit alpha §7.5.2 demotion mismatch at ({i},{j})"
+            );
+        }
+    }
+}

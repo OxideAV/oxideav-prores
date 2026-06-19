@@ -1218,12 +1218,19 @@ fn encode_one_picture(
 
             let alpha_blob: Vec<u8> = if let Some(act) = alpha_channel_type {
                 // Emit alpha for the FULL macroblock-row height (16
-                // sample rows) regardless of visible picture clipping.
-                // Decoders MUST allocate the padded MB-aligned plane
-                // and crop after decode (RDD 36 §7.5.2 — alphaValues is
-                // the padded picture size). Edge-pixels for the partially-visible
-                // last MB row are clamped to the last visible row so
-                // the stream stays self-roundtrippable.
+                // sample rows) regardless of visible picture clipping —
+                // matching what real reference ProRes 4444 streams carry
+                // (see the bottom-MB-row analysis of the `4444-with-alpha`
+                // fixture in the decoder's alpha branch). A literal reading
+                // of RDD 36 §7.5.3 ("does not include alpha values for the
+                // excess rows") suggests sizing the bottom-row array to the
+                // visible row count, but reference bitstreams encode the
+                // full 16 rows; the §7.5.3 exclusion governs which rows a
+                // decoder WRITES, not the coded array length. Decoders
+                // allocate the padded MB-aligned plane and crop after decode
+                // (§7.5.2). Edge pixels for the partially-visible last MB
+                // row clamp to the last visible row so the stream stays
+                // self-roundtrippable and bit-compatible with the reference.
                 let slice_vertical_size = MB_SIDE_PX;
                 let cols = MB_SIDE_PX * mbs_this_slice;
                 let mut samples: Vec<u16> = Vec::with_capacity(cols * slice_vertical_size);

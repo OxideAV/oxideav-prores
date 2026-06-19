@@ -701,13 +701,34 @@ fn decode_picture_into_planes<'a>(
                 }
             }
             if let Some(act) = alpha_kind {
-                // The encoder writes alpha for the FULL macroblock-row
-                // height (16 sample rows) even when the picture's last
-                // MB row is partially visible; the padded plane has the
-                // extra rows allocated and the final crop trims them.
-                // Decoding only the visible-row count produces a "run
-                // overruns alphaValues array" error on streams where
-                // picture_height is not a multiple of 16.
+                // The per-slice scanned-alpha array carries the FULL
+                // macroblock-row height (16 sample rows) even when the
+                // picture's last MB row is only partially visible; the
+                // padded plane allocates the extra rows and the final crop
+                // trims them.
+                //
+                // NOTE ON RDD 36 §7.5.3: the published wording states the
+                // alpha array "does not include alpha values for the excess
+                // row(s) of pixels at the bottom of slices with i =
+                // height_in_mb − 1 when 16 * height_in_mb >
+                // picture_vertical_size", which reads as "size the bottom
+                // MB row's array to the visible row count". Empirically
+                // that is NOT what real ProRes 4444 streams carry: the
+                // in-tree reference fixture `4444-with-alpha` (1920×1080,
+                // height_in_mb = 68, picture_vertical_size = 1080 → bottom
+                // MB row visible height = 8) encodes a bottom-row alpha
+                // array of the full 16 rows; decoding with the visible-row
+                // count (8) raises "run overruns alphaValues array" because
+                // the run/level stream keeps producing values past the
+                // truncated `numValues`. So the empirically-correct
+                // `numValues` is `16 * slice_size_in_mb` columns × 16 rows
+                // for every slice, and the *excess rows* are discarded on
+                // paste (clamped via `usable_rows` below), exactly like the
+                // excess *columns* the spec already says are present. The
+                // §7.5.3 distinction therefore applies to what a decoder
+                // WRITES to the frame buffer, not to the array's coded
+                // length. (DOCS-GAP candidate: §7.5.3 wording vs. reference
+                // bitstream.)
                 let slice_vertical_size = MB_SIDE_PX;
                 let cols = MB_SIDE_PX * mbs_this_slice;
                 let num_alpha_values = cols * slice_vertical_size;
