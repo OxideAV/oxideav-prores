@@ -777,6 +777,185 @@ fn roundtrip_4444_with_alpha_non_mb_aligned_height() {
     );
 }
 
+/// Regression: the §7.5.3 right-edge **column** exclusion in the alpha
+/// path. When `16 * width_in_mb > horizontal_size` the scanned-alpha
+/// array carries values for the excess columns at the end of each row of
+/// the rightmost slice (which the decoder discards on crop) — the
+/// counterpart of the bottom-row exclusion, but where the spec says the
+/// excess values ARE present in the array. A non-MB-aligned width and a
+/// per-pixel ramp (not a flat opaque field) make a swapped column
+/// index or a mis-sized rightmost-slice array show up as a mismatch.
+#[test]
+fn roundtrip_4444_with_alpha_non_mb_aligned_width() {
+    use oxideav_core::frame::VideoPlane;
+    let w = 70usize; // 70 = 4*16 + 6 → rightmost MB column 6 px visible
+    let h = 48usize; // MB-aligned height isolates the column edge
+    let mut y = vec![0u8; w * h];
+    let mut cb = vec![0u8; w * h];
+    let mut cr = vec![0u8; w * h];
+    let mut a = vec![0u8; w * h];
+    for j in 0..h {
+        for i in 0..w {
+            y[j * w + i] = ((i * 3 + j * 2) as u16 % 256) as u8;
+            cb[j * w + i] = 128;
+            cr[j * w + i] = 128;
+            // Per-pixel alpha ramp spanning 0..=255 across the row so the
+            // right-edge columns carry distinct, non-flat values.
+            a[j * w + i] = ((i * 255) / (w - 1)) as u8;
+        }
+    }
+    let frame = VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane { stride: w, data: y },
+            VideoPlane {
+                stride: w,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w,
+                data: cr,
+            },
+            VideoPlane { stride: w, data: a },
+        ],
+    };
+    let pkt = oxideav_prores::encoder::encode_frame_with_alpha(
+        &frame,
+        w as u32,
+        h as u32,
+        oxideav_prores::frame::ChromaFormat::Y444,
+        oxideav_prores::decoder::BitDepth::Eight,
+        oxideav_prores::frame::Profile::Prores4444,
+        2,
+        Some(oxideav_prores::alpha::AlphaChannelType::Eight),
+    )
+    .expect("encode non-mb-aligned-width alpha");
+    let decoded = oxideav_prores::decoder::decode_packet_with_depth(
+        &pkt,
+        Some(0),
+        Some((
+            oxideav_prores::decoder::BitDepth::Eight,
+            oxideav_prores::frame::ChromaFormat::Y444,
+        )),
+    )
+    .expect("decode non-mb-aligned-width alpha");
+    assert_eq!(decoded.planes.len(), 4);
+    assert_eq!(decoded.planes[3].data.len(), w * h);
+    assert_eq!(decoded.planes[3].stride, w);
+    // Alpha is coded losslessly: the visible (cropped) plane must match
+    // the source ramp exactly, including the partially-visible rightmost
+    // MB column.
+    assert_eq!(
+        decoded.planes[3].data, frame.planes[3].data,
+        "non-MB-aligned-width alpha plane corrupted at the right edge"
+    );
+}
+
+/// Regression: both §7.5.3 edge exclusions at once — a width that is not
+/// a multiple of 16 (right-edge column padding) AND a height that is not
+/// a multiple of 16 (bottom-row full-height array). 16-bit alpha so the
+/// Table 14 path and the §7.5.2 16→8-bit demotion arm are also exercised
+/// at the corner macroblock (bottom-right, both axes partial).
+#[test]
+fn roundtrip_4444_with_alpha16_non_mb_aligned_both_axes() {
+    use oxideav_core::frame::VideoPlane;
+    let w = 50usize; // 50 = 3*16 + 2 → 2 visible columns in the last MB col
+    let h = 26usize; // 26 = 16 + 10 → 10 visible rows in the last MB row
+                     // 12-bit YUV planes (2 bytes/sample, packed LE) so the encoder's
+                     // 12-bit sample read matches the requested output depth, plus a
+                     // 16-bit alpha plane (also 2 bytes/sample).
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; w * h * 2];
+    let mut cr = vec![0u8; w * h * 2];
+    let mut a = vec![0u8; w * h * 2]; // 16-bit packed LE
+    for j in 0..h {
+        for i in 0..w {
+            let off = (j * w + i) * 2;
+            // 12-bit luma ramp (0..=4095) and neutral 12-bit chroma.
+            let yv = (((i * 5 + j * 7) as u32 * 4095) / (w * 5 + h * 7) as u32) as u16;
+            y[off] = (yv & 0xFF) as u8;
+            y[off + 1] = (yv >> 8) as u8;
+            let mid = 2048u16;
+            cb[off] = (mid & 0xFF) as u8;
+            cb[off + 1] = (mid >> 8) as u8;
+            cr[off] = (mid & 0xFF) as u8;
+            cr[off + 1] = (mid >> 8) as u8;
+            // Diagonal 16-bit alpha ramp so the corner MB carries
+            // distinct values along both axes.
+            let v = (((i + j) as u32 * 65535) / (w + h - 2) as u32) as u16;
+            a[off] = (v & 0xFF) as u8;
+            a[off + 1] = (v >> 8) as u8;
+        }
+    }
+    let frame = VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cr,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: a,
+            },
+        ],
+    };
+    let pkt = oxideav_prores::encoder::encode_frame_with_alpha(
+        &frame,
+        w as u32,
+        h as u32,
+        oxideav_prores::frame::ChromaFormat::Y444,
+        oxideav_prores::decoder::BitDepth::Twelve,
+        oxideav_prores::frame::Profile::Prores4444,
+        2,
+        Some(oxideav_prores::alpha::AlphaChannelType::Sixteen),
+    )
+    .expect("encode 16-bit alpha both-axes-partial");
+    // Decode at 12-bit: §7.5.2 demotes 16-bit coded alpha to a 12-bit
+    // sample via round((4095 * v) / 65535).
+    let decoded = oxideav_prores::decoder::decode_packet_with_depth(
+        &pkt,
+        Some(0),
+        Some((
+            oxideav_prores::decoder::BitDepth::Twelve,
+            oxideav_prores::frame::ChromaFormat::Y444,
+        )),
+    )
+    .expect("decode 16-bit alpha both-axes-partial");
+    assert_eq!(decoded.planes.len(), 4);
+    let out_a = &decoded.planes[3].data;
+    assert_eq!(
+        out_a.len(),
+        w * h * 2,
+        "12-bit alpha plane is 2 bytes/sample"
+    );
+    // Exact §7.5.2 demotion check at every visible sample, including the
+    // bottom-right corner MB where both axes are partial.
+    for j in 0..h {
+        for i in 0..w {
+            let v_in = u16::from_le_bytes([
+                frame.planes[3].data[(j * w + i) * 2],
+                frame.planes[3].data[(j * w + i) * 2 + 1],
+            ]) as u64;
+            let expected = ((4095u64 * v_in) + 32_767) / 65_535;
+            let off = (j * w + i) * 2;
+            let v_out = u16::from_le_bytes([out_a[off], out_a[off + 1]]) as u64;
+            assert_eq!(
+                v_out, expected,
+                "alpha demotion mismatch at ({i},{j}): got {v_out} want {expected}"
+            );
+        }
+    }
+}
+
 // ────────────────── interlaced (RDD 36 §5.1 + §7.5.3) ──────────────────
 
 /// Build a 4:2:2 source whose field-row content differs from the
