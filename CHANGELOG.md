@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RDD 36 §7.5.3 scanned-alpha array length is now proven **directly
+  against the reference bitstream** by `tests/alpha_array_length_reference.rs`.
+  The test extracts the raw `scanned_alpha()` blob of a real bottom-MB-row
+  slice (slice 1005, MB row 67) straight out of the `4444-with-alpha`
+  `input.mov` and decodes it twice: the §7.5.3-literal visible-row length
+  (`128 cols × 8 rows = 1024` values) overruns the coded run/level stream
+  and fails, while the full MB-row height (`128 × 16 = 2048` values)
+  decodes exactly (a single escape diff to 0xFFFF followed by one run of
+  2048). The same full-height decode holds for all 15 slices of the bottom
+  MB row and for an interior row. This closes the recorded §7.5.3
+  reference-bitstream finding: the bottom-row alpha array is always the
+  full MB-row height, and the §7.5.3 row exclusion is a *write* constraint
+  (which rows reach the frame buffer), parallel to the column wording —
+  not a coded-length reduction. DOCS-GAP candidate stands: recommend a
+  §7.5.3 erratum stating the array is uniformly
+  `16 * slice_size_in_mb[j] * 16` values.
 - RDD 36 §7.5.3 partial-bottom-MB-row scanned-alpha array length is now
   pinned by validator-independent regression tests. A literal reading of
   §7.5.3 suggests sizing the bottom macroblock row's alpha array to the

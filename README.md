@@ -84,6 +84,19 @@ bit-compatible with the reference. `tests/alpha_bit_depth.rs` and
 non-MB-aligned progressive heights and non-MB-aligned interlaced field
 heights respectively (8-bit and 16-bit coded alpha, 8/10/12-bit output).
 
+The conclusion is pinned **directly against the reference bytes** by
+`tests/alpha_array_length_reference.rs`: it pulls the raw
+`scanned_alpha()` blob of a real bottom-MB-row slice out of the
+`4444-with-alpha` `input.mov` and shows that decoding at the
+§7.5.3-literal visible-row length (`128 × 8 = 1024` values) overruns the
+coded run/level stream, while the full MB-row height (`128 × 16 = 2048`
+values) decodes exactly — a single escape diff to `0xFFFF` plus one run
+of 2048. The full-height decode holds for every slice of the bottom MB
+row and for an interior row. So the §7.5.3 exclusion is a *write*
+constraint (which rows reach the frame buffer), not a coded-length
+reduction; the array is uniformly `16 * slice_size_in_mb[j] * 16` values.
+This is a standing DOCS-GAP candidate against the §7.5.3 wording.
+
 ## Frame-header metadata (RDD 36 §5.1.1 / §6.2)
 
 The encoder fills the descriptive frame-header fields
