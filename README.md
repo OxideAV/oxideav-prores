@@ -278,11 +278,14 @@ alpha ÷ mask)` without the external validator: an 8-bit-alpha 4444 frame
 decoded at 8-/10-/12-bit output matches the §7.5.2 formula exactly (alpha
 is coded losslessly per §7.1.2), covering the identity, promotion,
 demotion, endpoint, and round-half-up cases — including non-MB-aligned
-progressive heights (the §7.5.3 partial-bottom-MB-row alpha array) and,
-in `tests/interlaced_alpha_partial_field.rs`, non-MB-aligned interlaced
-field heights that combine the §6.2 field split, the §7.5.3 top/bottom
-deinterleave, and the partial-row alpha array across TFF/BFF at
-8/10/12-bit output.
+progressive heights and widths (`tests/roundtrip.rs` covers the §7.5.3
+partial-bottom-MB-row array, the right-edge column exclusion, and a
+both-axes-partial corner MB with 16→12-bit demotion). The interlaced
+counterpart in `tests/interlaced_alpha_partial_field.rs` combines the
+§6.2 field split, the §7.5.3 top/bottom deinterleave, and the partial-row
+alpha array across TFF/BFF at 8/10/12-bit output for **both** 8-bit
+(Table 13) and 16-bit (Table 14) coded alpha, and at a non-MB-aligned
+width as well as a non-MB-aligned field height (the per-field corner MB).
 
 Streams produced by this crate's encoder use the spec's entropy coder
 for colour and a plain run-length code for alpha (the alternative path

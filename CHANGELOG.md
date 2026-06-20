@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RDD 36 alpha geometry coverage extended to the remaining §7.5.3 edges.
+  `tests/roundtrip.rs` gains a non-MB-aligned **width** alpha roundtrip
+  (right-edge column exclusion, per-pixel ramp) and a both-axes-partial
+  corner-MB case (50×26, 12-bit YUV + 16-bit alpha decoded at 12-bit,
+  exact §7.5.2 16→12-bit demotion at every visible sample). The
+  interlaced suite `tests/interlaced_alpha_partial_field.rs` grows from 4
+  to 9 cases: a 16-bit-coded-alpha (Table 14) path over the field split +
+  partial bottom MB row at 8/10/12-bit output and TFF/BFF, plus a
+  non-MB-aligned-width interlaced variant exercising the per-field corner
+  MB (right-edge column + partial bottom row of each field). All
+  validator-independent; no behavioural change.
 - RDD 36 §7.5.3 scanned-alpha array length is now proven **directly
   against the reference bitstream** by `tests/alpha_array_length_reference.rs`.
   The test extracts the raw `scanned_alpha()` blob of a real bottom-MB-row
