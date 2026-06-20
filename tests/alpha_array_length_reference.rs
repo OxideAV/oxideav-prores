@@ -147,9 +147,24 @@ fn extract_slice_alpha(frame: &[u8], target_idx: usize) -> SliceAlpha<'_> {
     }
 }
 
-fn fixture_mov() -> Vec<u8> {
+/// Read the reference fixture, or `None` when the `docs/` corpus is not
+/// present. The fixtures live in the workspace umbrella repo; a
+/// standalone crate checkout (and the per-crate CI matrix) has no corpus,
+/// so these reference-byte tests skip there exactly like the
+/// `progressive_decode_sha` / `interlaced_decode_sha` SHA pins do.
+fn fixture_mov() -> Option<Vec<u8>> {
     let p = PathBuf::from("../../docs/video/prores/fixtures/4444-with-alpha/input.mov");
-    fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    match fs::read(&p) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            eprintln!(
+                "skip: missing {} ({e}). docs/ fixtures live in the workspace \
+                 umbrella repo — the standalone crate checkout has no corpus.",
+                p.display()
+            );
+            None
+        }
+    }
 }
 
 /// The bottom macroblock row of the 1920×1080 fixture is MB row 67
@@ -160,7 +175,7 @@ const BOTTOM_ROW_FIRST_SLICE: usize = 1005;
 
 #[test]
 fn reference_bottom_mb_row_alpha_blob_is_full_height_not_visible_height() {
-    let mov = fixture_mov();
+    let Some(mov) = fixture_mov() else { return };
     let frame = first_prores_frame(&mov);
     let sa = extract_slice_alpha(frame, BOTTOM_ROW_FIRST_SLICE);
 
@@ -211,7 +226,7 @@ fn reference_bottom_mb_row_alpha_blob_is_full_height_not_visible_height() {
 /// only for the left-edge slice.
 #[test]
 fn reference_bottom_mb_row_full_height_holds_for_every_slice() {
-    let mov = fixture_mov();
+    let Some(mov) = fixture_mov() else { return };
     let frame = first_prores_frame(&mov);
 
     // 15 slices per MB row for 1920 px (120 MBs / 8 MBs-per-slice).
@@ -241,7 +256,7 @@ fn reference_bottom_mb_row_full_height_holds_for_every_slice() {
 /// bottom-row blob is not a special shorter shape.
 #[test]
 fn reference_interior_mb_row_alpha_blob_is_full_height() {
-    let mov = fixture_mov();
+    let Some(mov) = fixture_mov() else { return };
     let frame = first_prores_frame(&mov);
     let sa = extract_slice_alpha(frame, 0);
     let cols = sa.mb_count * MB_SIDE_PX;
