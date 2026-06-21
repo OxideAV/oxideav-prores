@@ -48,13 +48,25 @@ use oxideav_prores::frame::ChromaFormat;
 /// Macroblock side in luma samples (RDD 36 §6.2).
 const MB_SIDE_PX: usize = 16;
 
-/// 12-bit output: `alphaSample = round((2^12 − 1) * alpha ÷ 65535)`
-/// (§7.5.2, 16-bit decoded alpha → 12-bit pixel sample).
-fn promote_16_to_12(alpha: u16) -> u16 {
-    let max_out = 4095u64;
+/// §7.5.2 conversion of a 16-bit decoded alpha value to a pixel alpha
+/// sample of `out_max` (= `2^b − 1`): `alphaSample = round((2^b − 1) *
+/// alpha ÷ 65535)`. For 12-bit output `out_max = 4095`; the rule equally
+/// covers the *demote* direction (10-bit `out_max = 1023`, 8-bit `255`)
+/// the corpus never exercises because it only decodes at the native
+/// 12-bit depth.
+fn promote_16(alpha: u16, out_max: u64) -> u16 {
     let mask = 65535u64;
-    let num = max_out * alpha as u64;
+    let num = out_max * alpha as u64;
     ((num + mask / 2) / mask) as u16
+}
+
+/// `2^b − 1` for each output bit depth.
+fn out_max_for(depth: BitDepth) -> u64 {
+    match depth {
+        BitDepth::Eight => 255,
+        BitDepth::Ten => 1023,
+        BitDepth::Twelve => 4095,
+    }
 }
 
 /// Return the first ProRes frame container (`size + 'icpf' + …`) in a
@@ -159,8 +171,8 @@ fn slice_alpha<'a>(frame: &'a [u8], pic: &Picture, idx: usize) -> &'a [u8] {
 /// picture height is not a multiple of MB_SIDE_PX) and excess right
 /// columns (when the width is not MB-aligned) are discarded.
 ///
-/// Returns a tight `width * height` plane of 12-bit samples.
-fn reconstruct_alpha_plane(frame: &[u8], pic: &Picture) -> Vec<u16> {
+/// Returns a tight `width * height` plane of samples at `out_max`'s depth.
+fn reconstruct_alpha_plane(frame: &[u8], pic: &Picture, out_max: u64) -> Vec<u16> {
     let width = pic.width;
     let height = pic.height;
     let mut plane = vec![0u16; width * height];
@@ -199,7 +211,7 @@ fn reconstruct_alpha_plane(frame: &[u8], pic: &Picture) -> Vec<u16> {
                 if frame_col >= width {
                     break; // §7.5.3: excess right columns discarded.
                 }
-                plane[frame_row * width + frame_col] = promote_16_to_12(values[r * cols + c]);
+                plane[frame_row * width + frame_col] = promote_16(values[r * cols + c], out_max);
             }
         }
     }
@@ -221,33 +233,22 @@ fn fixture_mov() -> Option<Vec<u8>> {
     }
 }
 
-/// The decoder's emitted alpha plane (plane 3, 12-bit LE) must be
-/// byte-for-byte identical to the independent §7.5.2/§7.5.3
-/// reconstruction from the same bitstream.
-#[test]
-fn decoder_alpha_plane_matches_independent_reconstruction() {
-    let Some(mov) = fixture_mov() else { return };
-    let frame = first_prores_frame(&mov);
-    let pic = parse_picture(frame);
-    assert_eq!((pic.width, pic.height), (1920, 1080));
-    assert_eq!(pic.mbs_per_slice, 8);
-    assert_eq!(pic.num_slices, 1020);
+/// Compare the decoder's emitted alpha plane against the independent
+/// §7.5.2/§7.5.3 reconstruction at one requested output bit depth.
+fn check_at_depth(frame: &[u8], pic: &Picture, depth: BitDepth) {
+    let out_max = out_max_for(depth);
+    let reference = reconstruct_alpha_plane(frame, pic, out_max);
 
-    let reference = reconstruct_alpha_plane(frame, &pic);
-
-    let vf = decode_packet_with_depth(frame, Some(0), Some((BitDepth::Twelve, ChromaFormat::Y444)))
-        .expect("4444-with-alpha frame must decode");
+    let vf = decode_packet_with_depth(frame, Some(0), Some((depth, ChromaFormat::Y444)))
+        .unwrap_or_else(|e| panic!("4444-with-alpha frame must decode at {depth:?}: {e:?}"));
     assert_eq!(vf.planes.len(), 4, "alpha-bearing frame must emit 4 planes");
 
     let a = &vf.planes[3];
-    // Plane 3 is 12-bit LE-packed; read it into u16 samples honouring its
-    // byte stride (which may exceed width*2 for the padded plane → here
-    // the decoder crops to width, so stride == width*2, but read defensively).
-    let bps = 2usize;
+    let bps = depth.bytes_per_sample();
     let stride_samples = a.stride / bps;
     assert!(
         stride_samples >= pic.width,
-        "alpha stride {} samples < width {}",
+        "{depth:?}: alpha stride {} samples < width {}",
         stride_samples,
         pic.width
     );
@@ -257,7 +258,12 @@ fn decoder_alpha_plane_matches_independent_reconstruction() {
     for y in 0..pic.height {
         let row = &a.data[y * a.stride..y * a.stride + pic.width * bps];
         for x in 0..pic.width {
-            let got = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]);
+            let got = match depth {
+                BitDepth::Eight => row[x] as u16,
+                BitDepth::Ten | BitDepth::Twelve => {
+                    u16::from_le_bytes([row[x * 2], row[x * 2 + 1]])
+                }
+            };
             let want = reference[y * pic.width + x];
             if got != want {
                 if first.is_none() {
@@ -269,23 +275,48 @@ fn decoder_alpha_plane_matches_independent_reconstruction() {
     }
     assert_eq!(
         mismatches, 0,
-        "decoder alpha plane diverged from the independent §7.5.2/§7.5.3 \
-         reconstruction in {mismatches} samples; first at {:?} (got vs want)",
+        "{depth:?}: decoder alpha plane diverged from the independent \
+         §7.5.2/§7.5.3 reconstruction in {mismatches} samples; first at {:?} \
+         (got vs want)",
         first
     );
 }
 
-/// Cross-check the §7.5.2 promotion endpoints used above so the
-/// reconstruction's `promote_16_to_12` is itself pinned to the spec rule
-/// (and so a silent change to the rounding doesn't make the comparison
-/// vacuously pass on a uniform plane).
+/// The decoder's emitted alpha plane must be byte-for-byte identical to
+/// the independent §7.5.2/§7.5.3 reconstruction from the same bitstream,
+/// at the native 12-bit depth AND at the 10-/8-bit demote depths the
+/// §7.5.2 conversion supports (which the corpus never exercises because it
+/// only decodes the fixture at 12-bit).
+#[test]
+fn decoder_alpha_plane_matches_independent_reconstruction() {
+    let Some(mov) = fixture_mov() else { return };
+    let frame = first_prores_frame(&mov);
+    let pic = parse_picture(frame);
+    assert_eq!((pic.width, pic.height), (1920, 1080));
+    assert_eq!(pic.mbs_per_slice, 8);
+    assert_eq!(pic.num_slices, 1020);
+
+    for depth in [BitDepth::Twelve, BitDepth::Ten, BitDepth::Eight] {
+        check_at_depth(frame, &pic, depth);
+    }
+}
+
+/// Cross-check the §7.5.2 conversion endpoints used by the reconstruction
+/// so a silent change to the rounding can't make the comparison pass
+/// vacuously on a uniform plane, across all three output depths.
 #[test]
 fn promotion_endpoints_match_spec() {
-    // 16-bit fully transparent → 0; fully opaque 0xFFFF → 4095.
-    assert_eq!(promote_16_to_12(0), 0);
-    assert_eq!(promote_16_to_12(0xFFFF), 4095);
-    // Midpoint 0x8000 → round(4095 * 32768 / 65535) = round(2047.53) = 2048.
-    assert_eq!(promote_16_to_12(0x8000), 2048);
-    // 0x4000 → round(4095 * 16384 / 65535) = round(1023.77) = 1024.
-    assert_eq!(promote_16_to_12(0x4000), 1024);
+    // Fully transparent (0) → 0; fully opaque 0xFFFF → 2^b − 1, every depth.
+    for &m in &[255u64, 1023, 4095] {
+        assert_eq!(promote_16(0, m), 0);
+        assert_eq!(promote_16(0xFFFF, m), m as u16);
+    }
+    // 12-bit midpoints: 0x8000 → round(4095*32768/65535) = 2048;
+    // 0x4000 → round(4095*16384/65535) = round(1023.77) = 1024.
+    assert_eq!(promote_16(0x8000, 4095), 2048);
+    assert_eq!(promote_16(0x4000, 4095), 1024);
+    // 8-bit demote: 0xFF00 → round(255*65280/65535) = round(254.0) = 254;
+    // 0x0100 → round(255*256/65535) = round(0.996) = 1.
+    assert_eq!(promote_16(0xFF00, 255), 254);
+    assert_eq!(promote_16(0x0100, 255), 1);
 }
