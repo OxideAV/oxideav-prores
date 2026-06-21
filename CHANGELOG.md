@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The **full decoder's** alpha-plane output is now pinned byte-for-byte
+  against an independent RDD 36 §7.5.2/§7.5.3 reconstruction built from
+  the reference `4444-with-alpha` bitstream
+  (`tests/alpha_plane_reference.rs`). The test decodes every slice's
+  `scanned_alpha()` blob, applies the §7.5.2 conversion, and places the
+  result with the §7.5.3 row/column discard — sharing no placement code
+  with the decoder — then asserts the decoder's emitted plane 3 matches
+  across all 1020 slices (including the partial bottom MB row). It runs at
+  the native 12-bit **and** at the 10-/8-bit §7.5.2 demote depths the
+  corpus never otherwise exercises, so the demote rounding
+  `round((2^b−1)·alpha/65535)` for b in {8,10} is locked against real
+  reference bytes for the first time. Validator-independent; no
+  behavioural change.
 - RDD 36 alpha geometry coverage extended to the remaining §7.5.3 edges.
   `tests/roundtrip.rs` gains a non-MB-aligned **width** alpha roundtrip
   (right-edge column exclusion, per-pixel ramp) and a both-axes-partial

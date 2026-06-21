@@ -97,6 +97,16 @@ constraint (which rows reach the frame buffer), not a coded-length
 reduction; the array is uniformly `16 * slice_size_in_mb[j] * 16` values.
 This is a standing DOCS-GAP candidate against the §7.5.3 wording.
 
+`tests/alpha_plane_reference.rs` closes the loop end-to-end: it
+reconstructs the entire frame's alpha plane independently from the same
+`4444-with-alpha` bitstream (decode every slice's `scanned_alpha()` blob,
+apply the §7.5.2 conversion, place per §7.5.3 with the excess rows and
+columns discarded — sharing no placement code with the decoder) and
+asserts the **full decoder's** emitted alpha plane matches it
+byte-for-byte across all 1020 slices, including the partial bottom MB
+row. The comparison runs at the native 12-bit and at the 10-/8-bit
+§7.5.2 demote depths the corpus never otherwise exercises.
+
 ## Frame-header metadata (RDD 36 §5.1.1 / §6.2)
 
 The encoder fills the descriptive frame-header fields
