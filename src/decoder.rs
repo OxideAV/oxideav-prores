@@ -785,6 +785,39 @@ fn dequant_to_f32(blk: &[i32; 64], qmat: &[u8; 64], quantization_index: u8) -> [
 /// `range` selects the §7.5.1 clamp bounds `(nmin, nmax)`: `Full`
 /// (`0 ..= 2^b − 1`) or `Video` (`1 ..= 2^b − 2`, avoiding the
 /// BT.601/BT.709 sync/timing reference levels).
+/// Convert a single reconstructed color component value `v` (the centred
+/// IDCT output, nominally in `[-256, 256)` per §7.5.1) to a pixel
+/// component sample of the requested output bit depth and clamp `range`,
+/// per RDD 36 §7.5.1:
+///
+/// `s = clamp(round(2^b * (v + 256) / 512))`,
+///
+/// where `clamp(n)` restricts `n` to `(nmin, nmax)`. For `b = 8` the
+/// `2^b / 512` factor is `0.5`, for `b = 10` it is `2.0`, and for
+/// `b = 12` it is `8.0`. The clamp bounds are `(0, 2^b − 1)` for
+/// [`OutputRange::Full`] and `(1, 2^b − 2)` for [`OutputRange::Video`].
+///
+/// Pulled out of [`paste_block`] as a pure function so the §7.5.1
+/// arithmetic — the per-depth scale, the round-to-nearest, and both
+/// clamp arms — can be locked directly by unit tests, mirroring
+/// [`alpha_to_sample`] for §7.5.2.
+fn color_to_sample(v: f32, bit_depth: BitDepth, range: OutputRange) -> u32 {
+    let scale = match bit_depth {
+        BitDepth::Eight => 0.5,
+        BitDepth::Ten => 2.0,
+        BitDepth::Twelve => 8.0,
+    };
+    let (nmin, nmax) = range.bounds(bit_depth);
+    let s = (v + 256.0) * scale;
+    if s <= nmin as f32 {
+        nmin
+    } else if s >= nmax as f32 {
+        nmax
+    } else {
+        s.round() as u32
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paste_block(
     plane: &mut [u8],
@@ -796,27 +829,12 @@ fn paste_block(
     range: OutputRange,
     field: FieldStride,
 ) {
-    let scale = match bit_depth {
-        BitDepth::Eight => 0.5,
-        BitDepth::Ten => 2.0,
-        BitDepth::Twelve => 8.0,
-    };
-    let (nmin, nmax) = range.bounds(bit_depth);
-    let nmin_f = nmin as f32;
-    let nmax_f = nmax as f32;
     match bit_depth {
         BitDepth::Eight => {
             for j in 0..8 {
                 let row = field.map(y0 + j);
                 for i in 0..8 {
-                    let v = (blk[j * 8 + i] + 256.0) * scale;
-                    let px = if v <= nmin_f {
-                        nmin as u8
-                    } else if v >= nmax_f {
-                        nmax as u8
-                    } else {
-                        v.round() as u8
-                    };
+                    let px = color_to_sample(blk[j * 8 + i], bit_depth, range) as u8;
                     plane[row * byte_stride + x0 + i] = px;
                 }
             }
@@ -825,14 +843,7 @@ fn paste_block(
             for j in 0..8 {
                 let row = field.map(y0 + j);
                 for i in 0..8 {
-                    let v = (blk[j * 8 + i] + 256.0) * scale;
-                    let px: u16 = if v <= nmin_f {
-                        nmin as u16
-                    } else if v >= nmax_f {
-                        nmax as u16
-                    } else {
-                        v.round() as u16
-                    };
+                    let px = color_to_sample(blk[j * 8 + i], bit_depth, range) as u16;
                     let off = row * byte_stride + (x0 + i) * 2;
                     plane[off] = (px & 0xFF) as u8;
                     plane[off + 1] = (px >> 8) as u8;
@@ -1051,6 +1062,114 @@ mod alpha_sample_tests {
                         "round mismatch: {act:?} alpha {alpha} -> {depth:?} (exact {exact})"
                     );
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod color_sample_tests {
+    //! White-box coverage for the RDD 36 §7.5.1 reconstructed-color to
+    //! pixel-sample conversion `color_to_sample`, i.e.
+    //! `s = clamp(round(2^b * (v + 256) / 512))`. The end-to-end
+    //! `output_range` integration test drives this through a full
+    //! encode-then-decode round-trip; these cases lock the pure
+    //! arithmetic (per-depth scale, round-to-nearest, and both clamp
+    //! arms) directly with no codec round-trip, mirroring
+    //! `alpha_sample_tests` for §7.5.2.
+    use super::{color_to_sample, BitDepth, OutputRange};
+
+    /// The §7.5.1 mid-range value `v = 0` maps to the centre of the
+    /// output range: `2^b * 256 / 512 = 2^(b-1)`. For 8/10/12-bit that
+    /// is 128 / 512 / 2048 respectively, in either clamp range.
+    #[test]
+    fn midpoint_v_zero_maps_to_half_scale() {
+        for range in [OutputRange::Full, OutputRange::Video] {
+            assert_eq!(color_to_sample(0.0, BitDepth::Eight, range), 128);
+            assert_eq!(color_to_sample(0.0, BitDepth::Ten, range), 512);
+            assert_eq!(color_to_sample(0.0, BitDepth::Twelve, range), 2048);
+        }
+    }
+
+    /// The bottom of the centred IDCT range (`v = -256`) maps to the
+    /// clamp floor: 0 for `Full`, 1 for `Video`. A large positive `v`
+    /// saturates to the clamp ceiling: `2^b − 1` for `Full`,
+    /// `2^b − 2` for `Video`.
+    #[test]
+    fn clamp_floor_and_ceiling_track_the_range() {
+        // Floor: v = -256 → s = 0 before clamp.
+        assert_eq!(
+            color_to_sample(-256.0, BitDepth::Eight, OutputRange::Full),
+            0
+        );
+        assert_eq!(
+            color_to_sample(-256.0, BitDepth::Eight, OutputRange::Video),
+            1
+        );
+        assert_eq!(color_to_sample(-256.0, BitDepth::Ten, OutputRange::Full), 0);
+        assert_eq!(
+            color_to_sample(-256.0, BitDepth::Twelve, OutputRange::Video),
+            1
+        );
+
+        // Ceiling: a large positive v saturates to the top of the range.
+        assert_eq!(
+            color_to_sample(1000.0, BitDepth::Eight, OutputRange::Full),
+            255
+        );
+        assert_eq!(
+            color_to_sample(1000.0, BitDepth::Eight, OutputRange::Video),
+            254
+        );
+        assert_eq!(
+            color_to_sample(1000.0, BitDepth::Ten, OutputRange::Full),
+            1023
+        );
+        assert_eq!(
+            color_to_sample(1000.0, BitDepth::Ten, OutputRange::Video),
+            1022
+        );
+        assert_eq!(
+            color_to_sample(1000.0, BitDepth::Twelve, OutputRange::Full),
+            4095
+        );
+        assert_eq!(
+            color_to_sample(1000.0, BitDepth::Twelve, OutputRange::Video),
+            4094
+        );
+    }
+
+    /// Round-to-nearest: at 8-bit the scale is 0.5, so `v = 1` →
+    /// `(1 + 256) * 0.5 = 128.5` → rounds to 129 (ties away from zero),
+    /// and `v = -1` → `127.5` → 128.
+    #[test]
+    fn round_to_nearest_at_eight_bit() {
+        assert_eq!(
+            color_to_sample(1.0, BitDepth::Eight, OutputRange::Full),
+            129
+        );
+        assert_eq!(
+            color_to_sample(-1.0, BitDepth::Eight, OutputRange::Full),
+            128
+        );
+        // v = 2 → 129.0 exactly, no tie.
+        assert_eq!(
+            color_to_sample(2.0, BitDepth::Eight, OutputRange::Full),
+            129
+        );
+    }
+
+    /// The `Video` clamp differs from `Full` only at the two extreme
+    /// codes; every interior value is identical between the two ranges.
+    #[test]
+    fn video_equals_full_away_from_the_extremes() {
+        for &v in &[-200.0f32, -64.0, -1.0, 0.0, 1.0, 64.0, 200.0] {
+            for depth in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+                assert_eq!(
+                    color_to_sample(v, depth, OutputRange::Full),
+                    color_to_sample(v, depth, OutputRange::Video),
+                    "interior v={v} must match across ranges at {depth:?}"
+                );
             }
         }
     }
