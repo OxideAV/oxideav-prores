@@ -371,6 +371,19 @@ run is scheduled under `.github/workflows/fuzz.yml`.
 cd fuzz && cargo +nightly fuzz run decode_packet -- -max_total_time=60
 ```
 
+The malformed-input behaviour the fuzzers explore is *also* pinned by
+ordinary `cargo test` cases that run in the standard (nightly-free) CI
+matrix, so a refactor of the coders cannot silently regress it even
+between fuzz runs: `tests/entropy_alpha_robustness.rs` asserts the
+§7.1.1 coefficient coder and the §7.1.2 / Table 12-14 alpha coder
+round-trip exactly, terminate at the declared count, and surface a clean
+`Err` (never a panic / debug overflow / out-of-bounds index) on every
+truncation and on a spread of adversarial byte patterns. The
+§7.3 / Table 15 `qScale` map — including its slope-1 → slope-4
+discontinuity at the 128/129 boundary, both printed-anchor rows, and the
+reserved-index `None` arm of `SliceHeader::qscale` — is pinned
+exhaustively over `1..=224` by `tests/qscale_table15.rs`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
