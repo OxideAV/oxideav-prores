@@ -247,6 +247,17 @@ while a stream whose parsed payload *exceeds* its declared `picture_size`
 is refused as corrupt. Base bitstreams (where the two totals are equal)
 are byte-unaffected.
 
+The same declared-size advance is honoured at the **frame-header** (§6.1.1
+`frame_header_size`) and **slice-header** (§6.3.1 `slice_header_size`)
+levels: the first `picture()` starts at `frame_header_size`, and each
+slice's compressed luma data starts at `slice_header_size`, so a version
+variant that appends informative bytes inside either header decodes
+identically to its base twin. `tests/version_variant_picture.rs` injects
+filler at all three levels (frame header — progressive + interlaced —
+picture, and slice header), bumping the enclosing size fields in lock-step,
+and asserts byte-identical output; it also pins the inverse guard (a
+declared `picture_size` smaller than the real payload is rejected).
+
 ## ProRes RAW is detected and refused
 
 Apple **ProRes RAW** (`aprn` / `aprh`) is a separate format outside the

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RDD 36 §6.4 version-variant forward-compatibility coverage extended from
+  the `picture()` level to **all three** "decoders shall use the specified
+  size — rather than inference from the syntax itself" size fields.
+  `tests/version_variant_picture.rs` gains a **frame-header** case (§6.1.1
+  `frame_header_size`: inject informative filler after the frame header's
+  defined syntax and confirm the decoder locates the first picture from the
+  declared size, byte-identically — progressive and interlaced) and a
+  **slice-header** case (§6.3.1 `slice_header_size`: inject filler after a
+  slice header's defined syntax and confirm the decoder locates that
+  slice's compressed luma data from the declared size, bumping the matching
+  `coded_size_of_slice` / `picture_size` / `frame_size` in lock-step). With
+  the existing picture-level test this exercises every declared-size advance
+  a forward-compatible decoder must honour. Validator-independent; no
+  behavioural change (the decoder already advanced by all three declared
+  sizes — this pins the contract end-to-end).
 - The **full decoder's** alpha-plane output is now pinned byte-for-byte
   against an independent RDD 36 §7.5.2/§7.5.3 reconstruction built from
   the reference `4444-with-alpha` bitstream
