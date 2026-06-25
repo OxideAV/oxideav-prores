@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The encoder now refuses a frame whose `width`/`height` is zero or exceeds
+  65535 with a clean `Err`, instead of silently truncating it into the
+  RDD 36 §6.1.1 u16 `horizontal_size` / `vertical_size` fields. A
+  >65535-wide request previously emitted a stream whose declared
+  `horizontal_size` (the low 16 bits of the request) disagreed with the
+  macroblock grid the slices were coded against, and sized the internal
+  output-capacity cap against the truncated dimension. The guard fires at
+  the top of the shared encode core before any plane sample is read, so an
+  over-range request is rejected cheaply. `tests/encoder_dimension_bounds.rs`
+  covers zero width/height, over-u16 width/height (direct shim + registry +
+  config encoder paths), and confirms an in-range frame still encodes.
+
 ### Added
 
 - RDD 36 §6.4 version-variant forward-compatibility coverage extended from

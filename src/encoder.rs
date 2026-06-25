@@ -993,6 +993,25 @@ fn encode_frame_full(
             ));
         }
     }
+    // RDD 36 §6.1.1: `horizontal_size` / `vertical_size` are u16 fields, so
+    // a coded ProRes frame is at most 65535 × 65535 luma samples and at
+    // least 1 × 1. Reject out-of-range dimensions with a clean error rather
+    // than truncating `img_w`/`img_h` into u16 when the frame header is
+    // written (`img_w as u16` below + in `output_capacity_cap`): a silent
+    // truncation would emit a stream whose declared `horizontal_size` does
+    // not match the macroblock grid the slices were coded against, and size
+    // the output cap against the wrong (truncated) dimensions.
+    if img_w == 0 || img_h == 0 {
+        return Err(Error::invalid(
+            "prores encoder: frame dimensions must be non-zero (RDD 36 §6.1.1)",
+        ));
+    }
+    if img_w > u16::MAX as u32 || img_h > u16::MAX as u32 {
+        return Err(Error::invalid(format!(
+            "prores encoder: frame dimensions {img_w}×{img_h} exceed the RDD 36 §6.1.1 \
+             u16 horizontal_size / vertical_size limit of 65535"
+        )));
+    }
     let width = img_w as usize;
     let height = img_h as usize;
 

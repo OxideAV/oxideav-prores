@@ -215,6 +215,12 @@ All controls flow through [`encoder::EncoderConfig`] +
 - **Interlacing** (`with_interlace_mode` / [`encoder::encode_frame_interlaced`],
   §5.1 / §6.2 / §7.5.3) — 0 progressive, 1 TFF, 2 BFF; value 3 reserved.
 
+The encoder validates its inputs up front: `quantization_index` (`1..=224`),
+`mbs_per_slice` (`{1, 2, 4, 8}`), `interlace_mode` (`0..=2`), quant-matrix
+weights (`2..=63`), and — since the RDD 36 §6.1.1 `horizontal_size` /
+`vertical_size` fields are u16 — frame dimensions in `1..=65535` (an
+out-of-range width/height is refused rather than truncated into the header).
+
 ## Bitstream conformance (RDD 36 §6.4)
 
 The decoder enforces every "decoder shall refuse" clause:
