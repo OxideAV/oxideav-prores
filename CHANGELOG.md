@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pixel-exact **RDD 36 §6.1.1 fallback equivalence** coverage
+  (`tests/quant_matrix_fallback.rs`). For each compact carriage form the
+  corpus never carries, the test encodes the compact stream, then
+  byte-splices in the omitted quantization table(s) — flipping the load bit
+  and bumping `frame_size` + `frame_header_size` — to build the equivalent
+  explicit `(1, 1)` stream, and asserts the decoder produces byte-identical
+  planes for both. Three arms: chroma-copies-custom-luma `(1,0)` vs.
+  explicit duplicate table; both-default `(0,0)` vs. explicit two all-4s
+  tables (proving the §7.2 default is all-4s for both components); and
+  default-luma + custom-chroma `(0,1)` vs. explicit all-4s luma before the
+  custom chroma. The picture() payload is unchanged and its offsets are
+  self-relative, so the splice is well-formed. Validator-independent.
 - End-to-end coverage of all four RDD 36 §6.1.1 quantization-matrix
   carriage combinations (`tests/quant_matrix_carriage.rs`). The corpus
   fixtures are uniformly flags `(1, 1)`; this suite drives our own encoder
