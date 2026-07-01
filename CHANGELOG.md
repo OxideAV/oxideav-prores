@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The encoder now emits the **minimal RDD 36 §6.1.1 quantization-matrix
+  carriage** for any custom matrix pair, via the new
+  [`quant::QuantMatrices::wire_flags`] helper. `load_luma_quantization_matrix`
+  is set iff the luma matrix differs from the §7.2 all-4s default and
+  `load_chroma_quantization_matrix` iff the chroma matrix differs from the
+  effective luma matrix — so a frame carries 0, 1, or 2 tables (a 20-, 84-,
+  or 148-byte frame header) instead of always writing both whenever *either*
+  matrix was custom. This unlocks the legal
+  `(load_luma = 0, load_chroma = 1)` "default luma, custom chroma" form the
+  previous derivation could not emit (it wasted a redundant 64-byte flat luma
+  table). All four (luma-vs-default × chroma-vs-luma) combinations reconstruct
+  exactly `(luma, chroma)` at the decoder per the §6.1.1 fallback. Byte-exact
+  no-op for the flat/default (flags `0,0`) and both-custom perceptual
+  (flags `1,1`) paths, so every existing encoder-output SHA is unchanged;
+  only the previously-unreachable default-luma+custom-chroma case shrinks
+  (148 → 84 bytes). `perceptual_quant.rs`'s chroma-only test now pins the
+  84-byte single-table header and a clean round-trip; `quant.rs` unit tests
+  pin `wire_flags` across all four combinations plus the flat/perceptual
+  presets.
+
 ### Fixed
 
 - The encoder now refuses a frame whose `width`/`height` is zero or exceeds

@@ -168,6 +168,40 @@ impl QuantMatrices {
         self.luma == DEFAULT_QMAT && self.chroma == DEFAULT_QMAT
     }
 
+    /// Minimal RDD 36 §6.1.1 quantization-matrix carriage flags for this
+    /// matrix pair: `(load_luma_quantization_matrix,
+    /// load_chroma_quantization_matrix)`.
+    ///
+    /// The two wire flags admit four distinct derivations of the matrices a
+    /// decoder reconstructs (see [`crate::frame::QuantizationMatrixSource`]),
+    /// and this picks the smallest header that reproduces the pair exactly:
+    ///
+    /// | luma vs default | chroma vs luma | flags | header cost | reconstruction |
+    /// |-----------------|----------------|-------|-------------|----------------|
+    /// | equal           | equal          | `(0,0)` | +0 B  | luma = default, chroma = default (§6.1.1 fallback) |
+    /// | equal           | differs        | `(0,1)` | +64 B | luma = default, chroma = carried custom |
+    /// | differs         | equal          | `(1,0)` | +64 B | luma = carried custom, chroma = luma (§6.1.1 fallback) |
+    /// | differs         | differs        | `(1,1)` | +128 B | both carried custom |
+    ///
+    /// `load_luma` is set iff the luma matrix differs from the §7.2 all-4s
+    /// default, since a `load_luma == 0` frame always dequantises luma with
+    /// that default. `load_chroma` is set iff the chroma matrix differs from
+    /// the *effective* luma matrix, because RDD 36 §6.1.1 specifies that a
+    /// `load_chroma == 0` frame reuses the luma matrix for chroma ("the
+    /// specified custom luma quantization matrix if
+    /// `load_luma_quantization_matrix` is 1 or the default matrix
+    /// otherwise"). The effective luma matrix equals `self.luma` in both
+    /// `load_luma` cases, so the chroma test reduces to `chroma != luma`.
+    ///
+    /// A decoder reconstructs exactly `(self.luma, self.chroma)` for every
+    /// pair, including the `(0,1)` "default luma, custom chroma" form that
+    /// carries a single 64-byte table.
+    pub fn wire_flags(&self) -> (bool, bool) {
+        let load_luma = self.luma != DEFAULT_QMAT;
+        let load_chroma = self.chroma != self.luma;
+        (load_luma, load_chroma)
+    }
+
     /// True when every weight is in `2..=63`.
     pub fn weights_valid(&self) -> bool {
         self.luma.iter().all(|w| (2..=63).contains(w))
@@ -243,6 +277,89 @@ pub fn qscale(quantization_index: u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_flags_all_four_combinations() {
+        let default = DEFAULT_QMAT;
+        let mut custom_a = DEFAULT_QMAT;
+        custom_a[7] = 9;
+        let mut custom_b = DEFAULT_QMAT;
+        custom_b[63] = 40;
+        assert_ne!(custom_a, default);
+        assert_ne!(custom_b, default);
+        assert_ne!(custom_a, custom_b);
+
+        // (0,0): luma == default, chroma == default.
+        assert_eq!(
+            QuantMatrices {
+                luma: default,
+                chroma: default
+            }
+            .wire_flags(),
+            (false, false)
+        );
+        // (0,1): default luma, custom chroma — the form the old derivation
+        // could not emit (it forced load_luma whenever either was custom).
+        assert_eq!(
+            QuantMatrices {
+                luma: default,
+                chroma: custom_b
+            }
+            .wire_flags(),
+            (false, true)
+        );
+        // (1,0): custom luma, chroma copies luma (§6.1.1 fallback).
+        assert_eq!(
+            QuantMatrices {
+                luma: custom_a,
+                chroma: custom_a
+            }
+            .wire_flags(),
+            (true, false)
+        );
+        // (1,1): both custom and distinct.
+        assert_eq!(
+            QuantMatrices {
+                luma: custom_a,
+                chroma: custom_b
+            }
+            .wire_flags(),
+            (true, true)
+        );
+        // custom luma + default chroma: chroma differs from luma, so it
+        // must be carried explicitly → (1,1), not (1,0).
+        assert_eq!(
+            QuantMatrices {
+                luma: custom_a,
+                chroma: default
+            }
+            .wire_flags(),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn wire_flags_flat_and_perceptual() {
+        assert_eq!(QuantMatrices::flat().wire_flags(), (false, false));
+        // Every perceptual preset has weight-2 low-frequency entries, so the
+        // luma matrix always differs from the all-4s default and the chroma
+        // matrix differs from the luma matrix → the full (1,1) carriage.
+        assert_eq!(QuantMatrices::perceptual().wire_flags(), (true, true));
+        for profile in [
+            crate::frame::Profile::Proxy,
+            crate::frame::Profile::Lt,
+            crate::frame::Profile::Standard,
+            crate::frame::Profile::Hq,
+            crate::frame::Profile::Prores4444,
+            crate::frame::Profile::Prores4444Xq,
+        ] {
+            assert_eq!(
+                QuantMatrices::perceptual_for_profile(profile).wire_flags(),
+                (true, true),
+                "profile {profile:?} should carry both custom tables",
+            );
+        }
+    }
 
     #[test]
     fn progressive_scan_is_permutation() {

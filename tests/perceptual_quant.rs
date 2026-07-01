@@ -688,12 +688,13 @@ fn make_encoder_with_config_rejects_invalid_weights() {
 }
 
 #[test]
-fn perceptual_chroma_only_writes_two_qmats_in_header() {
-    // luma == default, chroma == perceptual. The encoder's current
-    // behaviour writes BOTH qmats whenever the pair differs from
-    // (flat, flat), because RDD 36 §7.3 says load_chroma_qmat = 0
-    // implies the chroma matrix follows the loaded luma — which would
-    // be wrong here. So both flags must be 1.
+fn perceptual_chroma_only_writes_one_qmat_in_header() {
+    // luma == default, chroma == perceptual. This is the RDD 36 §6.1.1
+    // (load_luma_qmat = 0, load_chroma_qmat = 1) carriage: the luma matrix
+    // falls back to the all-4s default and only the custom chroma table is
+    // carried (a single 64-byte table). The previous encoder could not
+    // emit this form — it forced load_luma whenever *either* matrix was
+    // custom, wasting a redundant 64-byte flat luma table.
     let mut qm = QuantMatrices::flat();
     qm.chroma = PERCEPTUAL_CHROMA_QMAT;
     let width = 64u32;
@@ -711,8 +712,23 @@ fn perceptual_chroma_only_writes_two_qmats_in_header() {
     )
     .expect("encode mixed qmats");
     let (fh, _) = parse_frame(&pkt).expect("parse");
+    // The wire flags: luma default (not loaded), chroma custom (loaded).
+    assert!(!fh.load_luma_quantization_matrix);
+    assert!(fh.load_chroma_quantization_matrix);
+    // Reconstructed matrices: luma = default (via §6.1.1 fallback), chroma
+    // = the carried custom table.
     assert_eq!(fh.luma_qmat, DEFAULT_QMAT);
     assert_eq!(fh.chroma_qmat, PERCEPTUAL_CHROMA_QMAT);
-    // Header size = 20 + 64 + 64 = 148 (both qmats present).
-    assert_eq!(fh.frame_header_size, 148);
+    // Header size = 20 + 64 = 84 (chroma qmat only).
+    assert_eq!(fh.frame_header_size, 84);
+
+    // The frame still decodes cleanly with those reconstructed matrices
+    // (Y/Cb/Cr planes, luma stride spanning the full width).
+    let frame = round_trip_packet(&pkt, width, height);
+    assert_eq!(frame.planes.len(), 3);
+    assert!(frame.planes[0].stride >= width as usize);
+    assert_eq!(
+        frame.planes[0].data.len(),
+        frame.planes[0].stride * height as usize
+    );
 }

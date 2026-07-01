@@ -20,7 +20,7 @@ use crate::frame::{
     compute_slice_sizes, frame_rate_code_from_rational, write_frame_with_meta,
     write_picture_header, write_slice_header, ChromaFormat, FrameMeta, Profile,
 };
-use crate::quant::{qscale, QuantMatrices, DEFAULT_QMAT};
+use crate::quant::{qscale, QuantMatrices};
 use crate::slice::{blocks_per_mb, chroma_blocks_per_mb, encode_slice_components};
 
 /// Encoder-side configuration. Defaults match the legacy behaviour
@@ -32,9 +32,10 @@ pub struct EncoderConfig {
     /// to `Some(QuantMatrices::flat())` — the encoder writes
     /// `load_luma_qmat = load_chroma_qmat = 0` and uses the spec's
     /// default matrix internally for quantisation. When non-default
-    /// matrices are supplied the encoder writes the matrices into the
-    /// frame header (setting `load_*_qmat` to 1) so any RDD 36 decoder
-    /// can dequantise correctly.
+    /// matrices are supplied the encoder writes the minimal RDD 36 §6.1.1
+    /// carriage flags into the frame header — see
+    /// [`QuantMatrices::wire_flags`] — so any RDD 36 decoder can dequantise
+    /// correctly while carrying only the tables it needs.
     pub quant_matrices: Option<QuantMatrices>,
     /// Per-slice `quantization_index` (RDD 36 §7.3 / Table 15) used for
     /// every slice in every encoded frame. Lower index → finer step →
@@ -362,8 +363,9 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
 
 /// Build a ProRes encoder with explicit [`EncoderConfig`] — wires
 /// optional perceptual quantisation matrices through to the frame
-/// header (setting `load_luma_qmat = load_chroma_qmat = 1` when the
-/// matrices differ from the spec default of all-4s).
+/// header, carrying only the tables the RDD 36 §6.1.1 flags require
+/// (see [`QuantMatrices::wire_flags`]) when the matrices differ from the
+/// spec default of all-4s.
 pub fn make_encoder_with_config(
     params: &CodecParameters,
     config: EncoderConfig,
@@ -668,8 +670,9 @@ pub fn encode_frame_with_depth(
 /// Encode a single picture using explicit per-component quantisation
 /// weight matrices (RDD 36 §7.3). When `qmats` differs from the spec
 /// default of all-4s the encoder loads the matrices into the frame
-/// header (`load_luma_qmat = load_chroma_qmat = 1`) so any RDD 36
-/// decoder reconstructs them correctly.
+/// header with the minimal RDD 36 §6.1.1 carriage flags
+/// ([`QuantMatrices::wire_flags`]) so any RDD 36 decoder reconstructs
+/// them correctly while carrying only the tables it needs.
 ///
 /// Equivalent to [`encode_frame_with_depth`] when
 /// `qmats == QuantMatrices::flat()`.
@@ -940,9 +943,13 @@ fn encode_frame_with_rate_control(
 /// matrices, `load_luma_qmat = load_chroma_qmat = 0`, frame_header_size
 /// = 20. `qmats == Some(QuantMatrices::flat())` is treated identically
 /// (no point loading the default matrix into the bitstream). For any
-/// other matrices, the encoder writes `load_luma_qmat = 1` and (when
-/// the chroma matrix differs from the luma matrix) `load_chroma_qmat
-/// = 1`, growing the frame header by 64 or 128 bytes per §7.3.
+/// other matrices, the encoder writes the minimal RDD 36 §6.1.1
+/// carriage — [`QuantMatrices::wire_flags`] sets `load_luma_qmat` iff the
+/// luma matrix differs from the all-4s default and `load_chroma_qmat` iff
+/// the chroma matrix differs from the effective luma matrix — growing the
+/// frame header by 0, 64, or 128 bytes per §7.3. This includes the
+/// `(load_luma_qmat = 0, load_chroma_qmat = 1)` "default luma, custom
+/// chroma" form (a single 64-byte table).
 #[allow(clippy::too_many_arguments)]
 fn encode_frame_full(
     frame: &VideoFrame,
@@ -1018,22 +1025,22 @@ fn encode_frame_full(
     // Bound output capacity against header-declared dimensions.
     let cap = output_capacity_cap(img_w as u16, img_h as u16, chroma);
 
-    // Resolve the per-component matrices used for quantisation. When
-    // the caller passed flat (or no) matrices we keep load_*_qmat = 0
-    // for byte-exact compatibility with the pre-config encoder.
+    // Resolve the per-component matrices used for quantisation, and the
+    // minimal RDD 36 §6.1.1 carriage flags for them. When the caller passed
+    // flat (or no) matrices this yields load_*_qmat = 0 (byte-exact with the
+    // pre-config encoder); a custom luma sets load_luma; a chroma matrix that
+    // differs from the effective luma sets load_chroma. The four resulting
+    // (load_luma, load_chroma) combinations reconstruct exactly
+    // (qmat_pair.luma, qmat_pair.chroma) at the decoder — including the
+    // (0, 1) "default luma, custom chroma" form, which the previous
+    // derivation could not emit (it forced load_luma whenever *either*
+    // matrix was custom, wasting a redundant 64-byte flat luma table).
+    // Quantisation always uses the full pair; the flags only pick which
+    // tables land in the frame header.
     let qmat_pair = qmats.unwrap_or_default();
-    let load_luma = !qmat_pair.is_default();
-    let load_chroma = load_luma && qmat_pair.chroma != qmat_pair.luma;
-    let luma_qmat = if load_luma {
-        &qmat_pair.luma
-    } else {
-        &DEFAULT_QMAT
-    };
-    let chroma_qmat = if load_luma {
-        &qmat_pair.chroma
-    } else {
-        &DEFAULT_QMAT
-    };
+    let (load_luma, load_chroma) = qmat_pair.wire_flags();
+    let luma_qmat = &qmat_pair.luma;
+    let chroma_qmat = &qmat_pair.chroma;
 
     // Per §6.2 picture_vertical_size derivation. Each interlaced field
     // is a separate picture sized at half the frame height (rounded
