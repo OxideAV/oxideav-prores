@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- End-to-end coverage of all four RDD 36 §6.1.1 quantization-matrix
+  carriage combinations (`tests/quant_matrix_carriage.rs`). The corpus
+  fixtures are uniformly flags `(1, 1)`; this suite drives our own encoder
+  across `(0,0)` / `(1,0)` / `(0,1)` / `(1,1)` and pins, for each, the wire
+  flags, the derived [`frame::QuantizationMatrixSource`], the frame-header
+  size (20 / 84 / 84 / 148), the reconstructed luma/chroma matrices
+  (including the §6.1.1 chroma-copies-luma fallback), and a clean registry
+  decode. Also pins that a custom-luma + default-chroma pair must carry
+  both tables (chroma differs from luma → `(1,1)`, not `(1,0)`) and the
+  header-size ordering across forms. Validator-independent.
+
 ### Changed
 
 - The encoder now emits the **minimal RDD 36 §6.1.1 quantization-matrix
