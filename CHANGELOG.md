@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Inverse-property coverage tying `QuantMatrices::wire_flags` to the
+  decoder's §6.1.1 fallback (`tests/quant_matrix_roundtrip_property.rs`):
+  for a broad pseudo-random spread of valid `(luma, chroma)` matrix pairs
+  plus the structural edge relationships (equal, one-default, both-default,
+  single-weight perturbations), encoding then parsing the frame header
+  reconstructs the pair exactly and the frame-header size equals
+  `20 + 64·load_luma + 64·load_chroma`. Generalises the hand-picked cases
+  into a proven encoder↔decoder round-trip guarantee. Validator-independent.
 - RDD 36 §6.1.1 quantization-matrix carriage coverage extended through the
   **interlaced two-picture path** and the **4:4:4 chroma-doubling path**
   (`tests/quant_matrix_interlaced_444.rs`). The carriage flags are written
