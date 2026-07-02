@@ -171,6 +171,36 @@ transcode-provenance callers. The decoder already applies the §6.1.1
 fallback when reconstructing `chroma_qmat`; this only exposes which of
 the three cases produced it.
 
+### Encoder minimal carriage
+
+The encoder emits the **smallest** §6.1.1 carriage that reproduces the
+configured matrix pair, via [`quant::QuantMatrices::wire_flags`]:
+`load_luma_quantization_matrix` is set iff the luma matrix differs from
+the §7.2 all-4s default, and `load_chroma_quantization_matrix` iff the
+chroma matrix differs from the effective luma matrix. A frame therefore
+carries 0, 1, or 2 tables (a 20-, 84-, or 148-byte frame header):
+
+| luma vs default | chroma vs luma | flags   | frame header | reconstruction                     |
+|-----------------|----------------|---------|--------------|------------------------------------|
+| equal           | equal          | `(0,0)` | 20 B         | luma = default, chroma = default   |
+| equal           | differs        | `(0,1)` | 84 B         | luma = default, chroma = custom    |
+| differs         | equal          | `(1,0)` | 84 B         | luma = custom, chroma = luma (§6.1.1) |
+| differs         | differs        | `(1,1)` | 148 B        | both custom                        |
+
+This includes the `(0,1)` "default luma, custom chroma" form (a single
+64-byte table). All four combinations reconstruct exactly `(luma,
+chroma)` at the decoder. `tests/quant_matrix_carriage.rs` pins the flags
+/ source enum / header size / reconstructed matrices end-to-end for each
+form; `tests/quant_matrix_fallback.rs` proves each compact form decodes
+**byte-identically** to its explicit both-tables twin (built by splicing
+the omitted table into the compact stream);
+`tests/quant_matrix_interlaced_444.rs` carries the forms through the
+interlaced two-picture and 4:4:4 full-resolution-chroma paths; and
+`tests/quant_matrix_roundtrip_property.rs` proves `wire_flags` and the
+decoder fallback are exact inverses over a broad pseudo-random matrix
+space. The flat and both-custom (perceptual-preset) paths are byte-exact
+with the prior encoder, so every encoder-output SHA is unchanged.
+
 ## Picture geometry (RDD 36 §6.2)
 
 [`FrameHeader::picture_geometry`] folds the §6.2 derivation of the
