@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RDD 36 §6.1.1 quantization-matrix carriage coverage extended through the
+  **interlaced two-picture path** and the **4:4:4 chroma-doubling path**
+  (`tests/quant_matrix_interlaced_444.rs`). The carriage flags are written
+  once per frame_header() and shared by both field pictures, so this pins
+  that interlaced (TFF/BFF) and 4:4:4 frames carry the same minimal flags
+  and decode cleanly for the flat `(0,0)`, default-luma+custom-chroma
+  `(0,1)`, and both-custom `(1,1)` forms — including an interlaced-4:4:4
+  case that exercises the field split and full-resolution custom-chroma
+  dequant at once. Registry `EncoderConfig` path; validator-independent.
 - Pixel-exact **RDD 36 §6.1.1 fallback equivalence** coverage
   (`tests/quant_matrix_fallback.rs`). For each compact carriage form the
   corpus never carries, the test encodes the compact stream, then
