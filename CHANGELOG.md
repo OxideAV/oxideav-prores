@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/OxideAV/oxideav-prores/compare/v0.0.10...v0.0.11) - 2026-07-02
+
+### Other
+
+- document the encoder minimal RDD 36 §6.1.1 quant-matrix carriage
+- prove wire_flags <-> §6.1.1 fallback are exact inverses over a broad matrix space
+- carriage flags across interlaced two-picture + 4:4:4 chroma-doubling paths
+- prove RDD 36 §6.1.1 quant-matrix fallback is pixel-exact vs explicit tables
+- pin all four RDD 36 §6.1.1 quant-matrix carriage combinations end-to-end
+- emit minimal RDD 36 §6.1.1 quant-matrix carriage (flags 0/1/2/3)
+- reject out-of-range frame dimensions instead of truncating to u16
+- pin RDD 36 §6.4 declared-size advance at the frame- and slice-header levels
+- extract RDD 36 §7.5.1 color_to_sample as a pure, unit-tested helper
+- pin RDD 36 §7.3/Table 15 qScale map + §7.1.1/§7.1.2 coder robustness in nightly-free CI
+- record the reference-bitstream alpha-plane byte-exact pin (§7.5.2/§7.5.3)
+- extend reference alpha-plane pin to the §7.5.2 demote depths (10/8-bit)
+- pin the full decoder alpha plane byte-exact to an independent RDD 36 §7.5.2/§7.5.3 reconstruction
+- skip the §7.5.3 reference-byte alpha tests when the docs/ corpus is absent
+- extend interlaced 4444 alpha coverage — 16-bit Table 14 + non-MB-aligned width
+- lock RDD 36 §7.5.3 right-edge column + both-axes-partial alpha edges
+- prove RDD 36 §7.5.3 bottom-MB-row alpha array length against the reference bitstream
+- record RDD 36 §7.5.3 reference-bitstream alpha-array finding + new partial-row coverage
+- interlaced 4444 + alpha at a non-MB-aligned field height (RDD 36 §6.2 / §7.5.3)
+- lock RDD 36 §7.5.3 partial-bottom-MB-row alpha array length against the reference bitstream
+- lock RDD 36 §7.5.2 alpha bit-depth conversion with validator-independent tests
+- RDD 36 §6.4 version-variant trailing bytes after picture()
+- typed RDD 36 §6.2 picture-geometry accessor on FrameHeader
+- surface RDD 36 §6.1.1 quantization-matrix provenance on FrameHeader
+- RDD 36 §7.5.1 output-range clamp (Full vs Video)
+- refresh to current status, drop per-round changelog cruft
+
 ### Added
 
 - Inverse-property coverage tying `QuantMatrices::wire_flags` to the
