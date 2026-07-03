@@ -1,5 +1,7 @@
 # oxideav-prores
 
+[![CI](https://github.com/OxideAV/oxideav-prores/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-prores/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-prores.svg)](https://crates.io/crates/oxideav-prores) [![docs.rs](https://docs.rs/oxideav-prores/badge.svg)](https://docs.rs/oxideav-prores) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust **Apple ProRes** codec — decoder + encoder for all six
 ProRes video profiles (422 Proxy / LT / Standard / HQ and 4444 /
 4444 XQ). 8-bit, 10-bit, and 12-bit Y'CbCr; lossless alpha plane on the
