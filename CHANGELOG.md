@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-profile signature quantisation matrices** (RDD 36 §6.1.1 / §7.3).
+  Each ProRes profile carries a characteristic quantisation weight matrix
+  in the frame header; the encoder previously only offered the flat
+  all-4s default or a JPEG-derived perceptual preset. The new
+  `quant::SIGNATURE_{PROXY_LUMA,PROXY_CHROMA,LT,STANDARD,HQ}_QMAT`
+  constants, `QuantMatrices::signature_for_profile`, and
+  `EncoderConfig::signature_for_profile` reproduce each profile's native
+  quantisation signature (Proxy's aggressive high-frequency 63-clamp, the
+  Standard/LT low-frequency-preserving shapes, the near-flat HQ / 4444 /
+  4444 XQ table), so an encoder can emit streams whose carried matrices
+  match the reference corpus byte-for-byte. Proxy is the only profile
+  whose chroma matrix differs from its luma matrix, so it carries both
+  tables (`load_luma = load_chroma = 1`); the other five reuse the luma
+  matrix for chroma via the §6.1.1 fallback (`(1, 0)`, an 84-byte header).
+  `QuantMatrices::from_header` recovers the pair a parsed frame header
+  carries (fallback applied) for transcode forwarding.
+  `tests/quant_matrix_signature.rs` pins every signature constant
+  byte-for-byte against the corresponding corpus fixture's carried matrix
+  (decoded with this crate's own parser — no external decoder consulted),
+  and `tests/quant_matrix_signature_encode.rs` confirms the encoder emits
+  the signature pair with the minimal §6.1.1 carriage and self-round-trips
+  at a healthy PSNR for all six profiles. Unit tests pin the natural
+  (row-major) low-to-high-frequency monotonicity that lets the decoder
+  apply `qmat[k]` to the natural-order block directly. Validator-independent.
 - Inverse-property coverage tying `QuantMatrices::wire_flags` to the
   decoder's §6.1.1 fallback (`tests/quant_matrix_roundtrip_property.rs`):
   for a broad pseudo-random spread of valid `(luma, chroma)` matrix pairs

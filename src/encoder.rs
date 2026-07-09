@@ -204,6 +204,30 @@ impl EncoderConfig {
         }
     }
 
+    /// Construct a config that emits the profile's **native signature**
+    /// quantisation matrices (see [`QuantMatrices::signature_for_profile`])
+    /// and pins the encoder to the supplied [`Profile`].
+    ///
+    /// Equivalent to
+    /// `EncoderConfig::for_profile(profile).with_quant_matrices(
+    /// QuantMatrices::signature_for_profile(profile))`.
+    ///
+    /// Where [`Self::perceptual_for_profile`] applies a general R-D
+    /// shaping matrix, this reproduces the exact per-profile
+    /// quantisation weights the reference ProRes streams carry, so the
+    /// emitted frame header's `luma_qmat` / `chroma_qmat` match the
+    /// native profile signature byte-for-byte (RDD 36 §6.1.1 / §7.3).
+    /// Proxy carries both tables (`load_luma = load_chroma = 1`); the
+    /// other five reuse the luma matrix for chroma via the §6.1.1
+    /// fallback (`load_luma = 1, load_chroma = 0`, an 84-byte header).
+    pub fn signature_for_profile(profile: Profile) -> Self {
+        Self {
+            quant_matrices: Some(QuantMatrices::signature_for_profile(profile)),
+            profile: Some(profile),
+            ..Self::default()
+        }
+    }
+
     /// Construct a config that pins the encoder to the supplied
     /// [`Profile`]. The override is honoured verbatim (the `bit_rate`
     /// heuristic in [`pick_profile`] is bypassed). All other fields take

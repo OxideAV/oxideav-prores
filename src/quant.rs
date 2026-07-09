@@ -85,6 +85,101 @@ pub const PERCEPTUAL_CHROMA_QMAT: [u8; 64] = [
     12, 12, 12, 12, 12, 12, 12, 12, // v=7
 ];
 
+// ---------------------------------------------------------------------
+// Per-profile signature quantisation matrices (RDD 36 §6.1.1 / §7.3).
+//
+// The six ProRes profiles each carry a characteristic quantisation
+// weight matrix in the frame header. Unlike the JPEG-derived
+// [`PERCEPTUAL_LUMA_QMAT`] preset above (a general R-D shaping matrix),
+// these are the exact per-profile weights carried by the reference
+// ProRes streams in the in-tree corpus (`docs/video/prores/fixtures/`).
+// They let the encoder reproduce each profile's native quantisation
+// signature — the proxy profile's aggressive high-frequency 63-clamp,
+// the standard/LT low-frequency-preserving shapes, and the near-flat
+// high-quality tables — rather than the flat all-4s default.
+//
+// RDD 36 stores the matrix in natural (row-major) order: entry
+// `[v * 8 + u]` weights the DCT coefficient at spatial frequency
+// `(u, v)`, so the DC weight is `[0]` (top-left) and the highest
+// spatial frequency is `[63]` (bottom-right). Every constant below is
+// therefore directly usable as a [`QuantMatrices`] field and is pinned
+// byte-for-byte against the corresponding corpus fixture's carried
+// matrix by `tests/quant_matrix_signature.rs` (decoded with this
+// crate's own parser — no external decoder consulted).
+
+/// 422 Proxy (`apco`) luma signature matrix. High-frequency weights
+/// saturate to the §6.1.1 maximum of 63 along the anti-diagonal — the
+/// aggressive quantisation that gives the proxy profile its small
+/// packets. Natural (row-major) order.
+pub const SIGNATURE_PROXY_LUMA_QMAT: [u8; 64] = [
+    4, 7, 9, 11, 13, 14, 15, 63, //
+    7, 7, 11, 12, 14, 15, 63, 63, //
+    9, 11, 13, 14, 15, 63, 63, 63, //
+    11, 11, 13, 14, 63, 63, 63, 63, //
+    11, 13, 14, 63, 63, 63, 63, 63, //
+    13, 14, 63, 63, 63, 63, 63, 63, //
+    13, 63, 63, 63, 63, 63, 63, 63, //
+    63, 63, 63, 63, 63, 63, 63, 63, //
+];
+
+/// 422 Proxy (`apco`) chroma signature matrix. Proxy is the only
+/// profile whose chroma matrix differs from its luma matrix — the
+/// chroma 63-clamp starts one anti-diagonal earlier, so the profile
+/// carries both tables (`load_luma = load_chroma = 1`). Natural order.
+pub const SIGNATURE_PROXY_CHROMA_QMAT: [u8; 64] = [
+    4, 7, 9, 11, 13, 14, 63, 63, //
+    7, 7, 11, 12, 14, 63, 63, 63, //
+    9, 11, 13, 14, 63, 63, 63, 63, //
+    11, 11, 13, 14, 63, 63, 63, 63, //
+    11, 13, 14, 63, 63, 63, 63, 63, //
+    13, 14, 63, 63, 63, 63, 63, 63, //
+    13, 63, 63, 63, 63, 63, 63, 63, //
+    63, 63, 63, 63, 63, 63, 63, 63, //
+];
+
+/// 422 LT (`apcs`) signature matrix, used for both luma and chroma. A
+/// JPEG-shaped table relaxed at the high end relative to Standard.
+/// Natural order.
+pub const SIGNATURE_LT_QMAT: [u8; 64] = [
+    4, 5, 6, 7, 9, 11, 13, 15, //
+    5, 5, 7, 8, 11, 13, 15, 17, //
+    6, 7, 9, 11, 13, 15, 15, 17, //
+    7, 7, 9, 11, 13, 15, 17, 19, //
+    7, 9, 11, 13, 14, 16, 19, 23, //
+    9, 11, 13, 14, 16, 19, 23, 29, //
+    9, 11, 13, 15, 17, 21, 28, 35, //
+    11, 13, 16, 17, 21, 28, 35, 41, //
+];
+
+/// 422 Standard (`apcn`) signature matrix, used for both luma and
+/// chroma. Tighter low-frequency quantisation than LT. Natural order.
+pub const SIGNATURE_STANDARD_QMAT: [u8; 64] = [
+    4, 4, 5, 5, 6, 7, 7, 9, //
+    4, 4, 5, 6, 7, 7, 9, 9, //
+    5, 5, 6, 7, 7, 9, 9, 10, //
+    5, 5, 6, 7, 7, 9, 9, 10, //
+    5, 6, 7, 7, 8, 9, 10, 12, //
+    6, 7, 7, 8, 9, 10, 12, 15, //
+    6, 7, 7, 9, 10, 11, 14, 17, //
+    7, 7, 9, 10, 11, 14, 17, 21, //
+];
+
+/// High-quality signature matrix shared by 422 HQ (`apch`), 4444
+/// (`ap4h`), and 4444 XQ (`ap4x`), used for both luma and chroma. It is
+/// near-flat (mostly 4) — the three profiles diverge through their
+/// slice-level `quantization_index` envelope rather than the matrix.
+/// Natural order.
+pub const SIGNATURE_HQ_QMAT: [u8; 64] = [
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 4, //
+    4, 4, 4, 4, 4, 4, 4, 5, //
+    4, 4, 4, 4, 4, 4, 5, 5, //
+    4, 4, 4, 4, 4, 5, 5, 6, //
+    4, 4, 4, 4, 5, 5, 6, 7, //
+    4, 4, 4, 4, 5, 6, 7, 7, //
+];
+
 /// Per-component pair of 8x8 quantisation weight matrices for the
 /// ProRes encoder.
 ///
@@ -161,6 +256,70 @@ impl QuantMatrices {
             chroma[k] = cw.clamp(2, 63) as u8;
         }
         Self { luma, chroma }
+    }
+
+    /// The native per-profile signature quantisation-matrix pair (RDD 36
+    /// §6.1.1 / §7.3) — the exact weights the reference ProRes streams
+    /// carry for each profile (see the `SIGNATURE_*_QMAT` constants).
+    ///
+    /// Unlike [`Self::perceptual_for_profile`] (a general R-D shaping
+    /// preset), this reproduces the profile's *native* quantisation
+    /// signature, so an encoder can emit streams whose carried matrices
+    /// match the reference corpus byte-for-byte:
+    ///
+    /// | Profile  | luma            | chroma          | wire flags |
+    /// |----------|-----------------|-----------------|------------|
+    /// | Proxy    | proxy luma      | proxy chroma    | `(1, 1)`   |
+    /// | LT       | LT              | = luma          | `(1, 0)`   |
+    /// | Standard | standard        | = luma          | `(1, 0)`   |
+    /// | HQ       | HQ              | = luma          | `(1, 0)`   |
+    /// | 4444     | HQ              | = luma          | `(1, 0)`   |
+    /// | 4444 XQ  | HQ              | = luma          | `(1, 0)`   |
+    ///
+    /// Proxy is the only profile whose chroma matrix differs from its
+    /// luma matrix, so it is the only one that carries two tables; the
+    /// other five reuse the luma matrix for chroma via the §6.1.1
+    /// fallback, which [`Self::wire_flags`] emits as `(1, 0)` (a single
+    /// 64-byte table, 84-byte frame header).
+    pub fn signature_for_profile(profile: crate::frame::Profile) -> Self {
+        use crate::frame::Profile;
+        match profile {
+            Profile::Proxy => Self {
+                luma: SIGNATURE_PROXY_LUMA_QMAT,
+                chroma: SIGNATURE_PROXY_CHROMA_QMAT,
+            },
+            Profile::Lt => Self {
+                luma: SIGNATURE_LT_QMAT,
+                chroma: SIGNATURE_LT_QMAT,
+            },
+            Profile::Standard => Self {
+                luma: SIGNATURE_STANDARD_QMAT,
+                chroma: SIGNATURE_STANDARD_QMAT,
+            },
+            Profile::Hq | Profile::Prores4444 | Profile::Prores4444Xq => Self {
+                luma: SIGNATURE_HQ_QMAT,
+                chroma: SIGNATURE_HQ_QMAT,
+            },
+        }
+    }
+
+    /// Recover the `(luma, chroma)` matrix pair a parsed frame header
+    /// carries, applying the RDD 36 §6.1.1 chroma-copies-luma fallback.
+    ///
+    /// The parsed [`crate::frame::FrameHeader`] already exposes the
+    /// reconstructed `luma_qmat` / `chroma_qmat` (with the fallback
+    /// applied when `load_chroma_quantization_matrix == 0`), so this is a
+    /// direct convenience for transcode callers: decode a source frame,
+    /// then feed `QuantMatrices::from_header(&fh)` straight into an
+    /// [`crate::encoder::EncoderConfig`] to forward the source's exact
+    /// quantisation matrices into the re-encode. Round-tripping a header
+    /// through this and [`Self::wire_flags`] reproduces the source's
+    /// carriage form.
+    pub fn from_header(header: &crate::frame::FrameHeader) -> Self {
+        Self {
+            luma: header.luma_qmat,
+            chroma: header.chroma_qmat,
+        }
     }
 
     /// True when both matrices equal the spec's all-4s default.
@@ -548,6 +707,116 @@ mod tests {
                  encoder would silently emit load_*_qmat = 0",
             );
         }
+    }
+
+    #[test]
+    fn signature_matrices_all_in_valid_range() {
+        // RDD 36 §6.1.1: every entry in 2..=63.
+        for m in [
+            &SIGNATURE_PROXY_LUMA_QMAT,
+            &SIGNATURE_PROXY_CHROMA_QMAT,
+            &SIGNATURE_LT_QMAT,
+            &SIGNATURE_STANDARD_QMAT,
+            &SIGNATURE_HQ_QMAT,
+        ] {
+            assert!(
+                m.iter().all(|&w| (2..=63).contains(&w)),
+                "weight out of range"
+            );
+            assert_eq!(m[0], 4, "DC weight is 4");
+        }
+    }
+
+    #[test]
+    fn signature_matrices_are_low_to_high_frequency_monotone() {
+        // Natural (row-major) order: weights are non-decreasing left to
+        // right and top to bottom (DC at [0], highest frequency at [63]).
+        // This is what distinguishes a natural-order matrix from a
+        // zigzag-serialised one and is the structural fact the decoder
+        // relies on when it applies qmat[k] to the natural-order block.
+        for m in [
+            &SIGNATURE_PROXY_LUMA_QMAT,
+            &SIGNATURE_LT_QMAT,
+            &SIGNATURE_STANDARD_QMAT,
+            &SIGNATURE_HQ_QMAT,
+        ] {
+            for v in 0..8 {
+                for u in 0..7 {
+                    assert!(m[v * 8 + u] <= m[v * 8 + u + 1], "row {v} not monotone");
+                }
+            }
+            for u in 0..8 {
+                for v in 0..7 {
+                    assert!(m[v * 8 + u] <= m[(v + 1) * 8 + u], "col {u} not monotone");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn signature_for_profile_wire_flags() {
+        use crate::frame::Profile;
+        // Proxy is the only profile with distinct chroma → carries both
+        // tables (1, 1). The rest reuse luma for chroma → (1, 0).
+        assert_eq!(
+            QuantMatrices::signature_for_profile(Profile::Proxy).wire_flags(),
+            (true, true)
+        );
+        for p in [
+            Profile::Lt,
+            Profile::Standard,
+            Profile::Hq,
+            Profile::Prores4444,
+            Profile::Prores4444Xq,
+        ] {
+            let qm = QuantMatrices::signature_for_profile(p);
+            assert_eq!(qm.luma, qm.chroma, "{p:?} chroma should equal luma");
+            assert_eq!(qm.wire_flags(), (true, false), "{p:?} flags");
+            assert!(!qm.is_default(), "{p:?} differs from all-4s default");
+        }
+    }
+
+    #[test]
+    fn signature_hq_family_shares_one_matrix() {
+        use crate::frame::Profile;
+        let hq = QuantMatrices::signature_for_profile(Profile::Hq);
+        assert_eq!(
+            hq,
+            QuantMatrices::signature_for_profile(Profile::Prores4444)
+        );
+        assert_eq!(
+            hq,
+            QuantMatrices::signature_for_profile(Profile::Prores4444Xq)
+        );
+    }
+
+    #[test]
+    fn from_header_recovers_matrix_pair() {
+        use crate::frame::{parse_frame_header, write_frame_with_meta, ChromaFormat, FrameMeta};
+        // Encode a frame header carrying the proxy signature (both
+        // tables), parse it back, and confirm from_header round-trips the
+        // pair including the distinct chroma matrix.
+        let qm = QuantMatrices::signature_for_profile(crate::frame::Profile::Proxy);
+        let (load_luma, load_chroma) = qm.wire_flags();
+        let mut buf = Vec::new();
+        write_frame_with_meta(
+            &mut buf,
+            0,
+            64,
+            64,
+            ChromaFormat::Y422,
+            0,
+            &qm.luma,
+            &qm.chroma,
+            load_luma,
+            load_chroma,
+            0,
+            FrameMeta::default(),
+        );
+        let (fh, _) = parse_frame_header(&buf[8..]).unwrap();
+        let recovered = QuantMatrices::from_header(&fh);
+        assert_eq!(recovered, qm);
+        assert_ne!(recovered.luma, recovered.chroma, "proxy chroma differs");
     }
 
     #[test]
