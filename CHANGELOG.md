@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at a healthy PSNR for all six profiles. Unit tests pin the natural
   (row-major) low-to-high-frequency monotonicity that lets the decoder
   apply `qmat[k]` to the natural-order block directly. Validator-independent.
+- Transcode-forwarding coverage for quantisation matrices
+  (`tests/quant_matrix_transcode.rs`): for every corpus profile, decode a
+  reference `input.mov` frame header, recover its carried matrix pair via
+  `QuantMatrices::from_header`, feed it into the encoder, and confirm the
+  re-encoded stream carries the identical matrices and decodes. Unlike the
+  signature-preset coverage this proves the encoder faithfully re-emits an
+  *arbitrary* matrix pair it did not itself generate — including Proxy's
+  distinct chroma table. Validator-independent.
 - Inverse-property coverage tying `QuantMatrices::wire_flags` to the
   decoder's §6.1.1 fallback (`tests/quant_matrix_roundtrip_property.rs`):
   for a broad pseudo-random spread of valid `(luma, chroma)` matrix pairs
