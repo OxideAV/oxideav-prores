@@ -241,6 +241,23 @@ All controls flow through [`encoder::EncoderConfig`] +
   (`EncoderConfig::perceptual` / `perceptual_for_profile`) loads
   JPEG K.1/K.2-derived matrices clamped to the `2..=63` range, blended
   toward flat in proportion to the profile's quality tier.
+- **Per-profile signature matrices**
+  (`EncoderConfig::signature_for_profile` /
+  `quant::QuantMatrices::signature_for_profile`, §6.1.1 + §7.3) — the
+  native quantisation weight matrix each profile carries in the wild
+  (Proxy's aggressive high-frequency 63-clamp, the Standard/LT
+  low-frequency-preserving shapes, the near-flat HQ / 4444 / 4444 XQ
+  table), so the emitted frame header's `luma_qmat` / `chroma_qmat`
+  match the profile's native signature. Proxy is the only profile whose
+  chroma matrix differs from its luma matrix — it carries both tables;
+  the other five reuse the luma matrix for chroma via the §6.1.1
+  fallback (an 84-byte header). RDD 36 stores the matrix in natural
+  (row-major) order — DC weight at index 0, highest spatial frequency at
+  index 63 — which is exactly the order the decoder applies it in;
+  `quant::QuantMatrices::from_header` recovers the pair a parsed header
+  carries so a transcode can forward the source's exact matrices. Every
+  signature constant is pinned byte-for-byte against the reference
+  corpus fixtures by `tests/quant_matrix_signature.rs`.
 - **Constant-frame-size stuffing** (`with_min_frame_size`, §5.1.2 +
   §6.1.2) — pads short frames up to a minimum on-wire `frame_size`; a
   padded frame decodes bit-identically to its unpadded twin.
