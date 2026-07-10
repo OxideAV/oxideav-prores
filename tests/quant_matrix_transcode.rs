@@ -26,11 +26,23 @@ use oxideav_prores::quant::QuantMatrices;
 
 const CODEC_ID_STR: &str = "prores";
 
-fn fixture_frame(name: &str) -> Vec<u8> {
+/// Read a fixture frame, or `None` when the `docs/` corpus submodule is
+/// not checked out (standalone CI has no fixtures — skip, don't fail).
+fn fixture_frame(name: &str) -> Option<Vec<u8>> {
     let path = PathBuf::from("../../docs/video/prores/fixtures")
         .join(name)
         .join("input.mov");
-    let container = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let container = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "skip {name}: missing {} ({e}). docs/ corpus lives in the \
+                 workspace umbrella; the standalone checkout has no fixtures.",
+                path.display()
+            );
+            return None;
+        }
+    };
     let needle = b"icpf";
     let mut i = 4usize;
     while i + 4 <= container.len() {
@@ -40,7 +52,7 @@ fn fixture_frame(name: &str) -> Vec<u8> {
                 u32::from_be_bytes(container[size_off..size_off + 4].try_into().unwrap()) as usize;
             let end = size_off + frame_size;
             if end <= container.len() && frame_size >= 8 {
-                return container[size_off..end].to_vec();
+                return Some(container[size_off..end].to_vec());
             }
         }
         i += 1;
@@ -114,7 +126,9 @@ fn decode(packet: &[u8], width: u32, height: u32, chroma: ChromaFormat) -> Video
 /// re-encode a synthesised frame carrying those matrices, and confirm
 /// the re-encoded header preserves the source matrix pair exactly.
 fn transcode_matrices(name: &str, profile: Profile) {
-    let src_frame = fixture_frame(name);
+    let Some(src_frame) = fixture_frame(name) else {
+        return;
+    };
     let (src_fh, _) = parse_frame(&src_frame).expect("parse source header");
     let forwarded = QuantMatrices::from_header(&src_fh);
 
@@ -154,8 +168,10 @@ fn transcode_matrices(name: &str, profile: Profile) {
 fn transcode_proxy_forwards_distinct_chroma() {
     // Proxy is the important case: its chroma table differs from luma,
     // so a faithful transcode must forward both distinct tables.
-    let (fh, _) = parse_frame(&fixture_frame("proxy-1280x720")).unwrap();
-    assert_ne!(fh.luma_qmat, fh.chroma_qmat, "proxy source chroma differs");
+    if let Some(frame) = fixture_frame("proxy-1280x720") {
+        let (fh, _) = parse_frame(&frame).unwrap();
+        assert_ne!(fh.luma_qmat, fh.chroma_qmat, "proxy source chroma differs");
+    }
     transcode_matrices("proxy-1280x720", Profile::Proxy);
 }
 

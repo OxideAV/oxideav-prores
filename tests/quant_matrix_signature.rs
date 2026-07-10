@@ -28,11 +28,24 @@ use std::path::PathBuf;
 use oxideav_prores::frame::{parse_frame, Profile};
 use oxideav_prores::quant::{self, QuantMatrices};
 
-fn fixture_frame(name: &str) -> Vec<u8> {
+/// Read a fixture frame, or `None` when the `docs/` corpus submodule is
+/// not checked out (the standalone crate CI has no fixtures — a missing
+/// file is a skip, not a failure, matching `docs_corpus.rs`).
+fn fixture_frame(name: &str) -> Option<Vec<u8>> {
     let path = PathBuf::from("../../docs/video/prores/fixtures")
         .join(name)
         .join("input.mov");
-    let container = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let container = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "skip {name}: missing {} ({e}). docs/ corpus lives in the \
+                 workspace umbrella; the standalone checkout has no fixtures.",
+                path.display()
+            );
+            return None;
+        }
+    };
     let needle = b"icpf";
     let mut i = 4usize;
     while i + 4 <= container.len() {
@@ -42,7 +55,7 @@ fn fixture_frame(name: &str) -> Vec<u8> {
                 u32::from_be_bytes(container[size_off..size_off + 4].try_into().unwrap()) as usize;
             let end = size_off + frame_size;
             if end <= container.len() && frame_size >= 8 {
-                return container[size_off..end].to_vec();
+                return Some(container[size_off..end].to_vec());
             }
         }
         i += 1;
@@ -52,22 +65,26 @@ fn fixture_frame(name: &str) -> Vec<u8> {
 
 /// Decode a fixture's frame header and return the carried
 /// `(luma_qmat, chroma_qmat)` (with the §6.1.1 chroma-copies-luma
-/// fallback already applied by the parser).
-fn carried_matrices(name: &str) -> ([u8; 64], [u8; 64], bool, bool) {
-    let frame = fixture_frame(name);
+/// fallback already applied by the parser), or `None` when the fixture
+/// is absent.
+fn carried_matrices(name: &str) -> Option<([u8; 64], [u8; 64], bool, bool)> {
+    let frame = fixture_frame(name)?;
     let (fh, _) = parse_frame(&frame).expect("parse frame header");
-    (
+    Some((
         fh.luma_qmat,
         fh.chroma_qmat,
         fh.load_luma_quantization_matrix,
         fh.load_chroma_quantization_matrix,
-    )
+    ))
 }
 
 fn check(name: &str, profile: Profile, exp_luma: &[u8; 64], exp_chroma: &[u8; 64]) {
-    let (luma, chroma, _load_l, _load_c) = carried_matrices(name);
-    assert_eq!(&luma, exp_luma, "{name}: carried luma matrix");
-    assert_eq!(&chroma, exp_chroma, "{name}: carried chroma matrix");
+    let Some(frame) = fixture_frame(name) else {
+        return;
+    };
+    let (fh, _) = parse_frame(&frame).expect("parse frame header");
+    assert_eq!(&fh.luma_qmat, exp_luma, "{name}: carried luma matrix");
+    assert_eq!(&fh.chroma_qmat, exp_chroma, "{name}: carried chroma matrix");
 
     // The signature preset must reproduce exactly the carried pair.
     let sig = QuantMatrices::signature_for_profile(profile);
@@ -76,8 +93,6 @@ fn check(name: &str, profile: Profile, exp_luma: &[u8; 64], exp_chroma: &[u8; 64
 
     // from_header on the parsed fixture recovers the same pair, and its
     // wire_flags reproduce the signature preset's carriage.
-    let frame = fixture_frame(name);
-    let (fh, _) = parse_frame(&frame).unwrap();
     let recovered = QuantMatrices::from_header(&fh);
     assert_eq!(recovered, sig, "{name}: from_header == signature preset");
 }
@@ -91,8 +106,9 @@ fn proxy_signature_matches_corpus() {
         &quant::SIGNATURE_PROXY_CHROMA_QMAT,
     );
     // Proxy is the only profile that carries a distinct chroma table.
-    let (_, _, load_l, load_c) = carried_matrices("proxy-1280x720");
-    assert!(load_l && load_c, "proxy carries both quant tables");
+    if let Some((_, _, load_l, load_c)) = carried_matrices("proxy-1280x720") {
+        assert!(load_l && load_c, "proxy carries both quant tables");
+    }
 }
 
 #[test]
@@ -149,9 +165,13 @@ fn prores4444xq_signature_matches_corpus() {
 /// all three corpus fixtures must carry the identical matrix.
 #[test]
 fn hq_family_carries_one_shared_matrix() {
-    let (hq, _, _, _) = carried_matrices("hq-1920x1080");
-    let (v4444, _, _, _) = carried_matrices("4444-1920x1080");
-    let (xq, _, _, _) = carried_matrices("4444xq-1920x1080");
+    let (Some((hq, ..)), Some((v4444, ..)), Some((xq, ..))) = (
+        carried_matrices("hq-1920x1080"),
+        carried_matrices("4444-1920x1080"),
+        carried_matrices("4444xq-1920x1080"),
+    ) else {
+        return;
+    };
     assert_eq!(hq, v4444);
     assert_eq!(hq, xq);
     assert_eq!(&hq, &quant::SIGNATURE_HQ_QMAT);
