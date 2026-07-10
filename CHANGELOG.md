@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Order-pinned quantisation-matrix regression tests**
+  (`tests/quant_matrix_order.rs`). The in-tree corpus documentation
+  originally described the frame-header quantisation tables as "zigzag
+  order, permute before use"; that wording was corrected in the corpus
+  (Errata E1) to **natural (raster) coefficient order**, which is what
+  this crate has always implemented — the audit against the corrected
+  doc found no read/write/dequant mismatch. The new suite pins the
+  order at every layer so a scan permutation cannot regress in
+  silently: the encoder's raw wire bytes at the fixed §6.1.1 offsets
+  (no parser in the loop), the natural-order raster fingerprints (2-D
+  monotone gradient; Proxy's closed 63-clamp triangle) shown to *fail*
+  under a scan-order reinterpretation, the reference fixtures' raw
+  header bytes, and an independent §7.3/§7.4/§7.5.1 reconstruction
+  proving the decoder scales the coefficient at natural position `k` by
+  `qmat[k]` — byte-identical to the production decoder with natural
+  indexing and provably different with scan-permuted weights.
 - **Per-profile signature quantisation matrices** (RDD 36 §6.1.1 / §7.3).
   Each ProRes profile carries a characteristic quantisation weight matrix
   in the frame header; the encoder previously only offered the flat
