@@ -47,8 +47,8 @@ use oxideav_prores::frame::{
     Profile,
 };
 use oxideav_prores::quant::{
-    qscale, QuantMatrices, BLOCK_SCAN_PROGRESSIVE, SIGNATURE_LT_QMAT, SIGNATURE_PROXY_CHROMA_QMAT,
-    SIGNATURE_PROXY_LUMA_QMAT, SIGNATURE_STANDARD_QMAT,
+    qscale, QuantMatrices, BLOCK_SCAN_INTERLACED, BLOCK_SCAN_PROGRESSIVE, SIGNATURE_LT_QMAT,
+    SIGNATURE_PROXY_CHROMA_QMAT, SIGNATURE_PROXY_LUMA_QMAT, SIGNATURE_STANDARD_QMAT,
 };
 use oxideav_prores::slice::decode_slice_components;
 
@@ -93,6 +93,17 @@ fn as_if_scan_ordered(wire: &[u8; 64]) -> [u8; 64] {
     let mut out = [0u8; 64];
     for n in 0..64 {
         out[n] = wire[BLOCK_SCAN_PROGRESSIVE[n] as usize];
+    }
+    out
+}
+
+/// Same rejected hypothesis with the Figure 5 interlaced block scan —
+/// the matrix is stored in natural order for field pictures too (the
+/// scan choice affects only coefficient reading inside a slice).
+fn as_if_interlaced_scan_ordered(wire: &[u8; 64]) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    for n in 0..64 {
+        out[n] = wire[BLOCK_SCAN_INTERLACED[n] as usize];
     }
     out
 }
@@ -214,6 +225,12 @@ fn natural_order_fingerprints_hold_and_fail_under_scan_reinterpretation() {
             !is_2d_monotone(&as_if_scan_ordered(m)),
             "{name}: scan reinterpretation must scatter the gradient"
         );
+        // The Figure 5 interlaced scan is a different permutation with
+        // the same conclusion: matrix storage is scan-independent.
+        assert!(
+            !is_2d_monotone(&as_if_interlaced_scan_ordered(m)),
+            "{name}: interlaced-scan reinterpretation must scatter the gradient"
+        );
     }
 
     // Proxy's 63-clamp fills a closed bottom-right triangle in natural
@@ -231,6 +248,34 @@ fn natural_order_fingerprints_hold_and_fail_under_scan_reinterpretation() {
             "{name}: scan reinterpretation must break the triangle"
         );
     }
+}
+
+#[test]
+fn interlaced_encode_places_matrix_bytes_on_wire_verbatim() {
+    // The frame-header matrix carriage is scan-independent: an
+    // interlaced (TFF) encode with the same signature preset must place
+    // the identical natural-order bytes at the identical offsets, even
+    // though its slices are coded with the Figure 5 interlaced scan.
+    use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat};
+    use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+
+    let mut params = CodecParameters::video(CodecId::new(oxideav_prores::CODEC_ID_STR));
+    params.media_type = MediaType::Video;
+    params.width = Some(32);
+    params.height = Some(32);
+    params.pixel_format = Some(PixelFormat::Yuv422P);
+    let cfg = EncoderConfig::signature_for_profile(Profile::Standard).with_interlace_mode(1);
+    let mut enc = make_encoder_with_config(&params, cfg).expect("make encoder");
+    enc.send_frame(&Frame::Video(synth_422(32, 32)))
+        .expect("send");
+    let pkt = enc.receive_packet().expect("receive").data;
+
+    assert_eq!(pkt[FLAGS_OFF] & 0b11, 0b10, "flags (1, 0)");
+    assert_eq!(
+        &pkt[LUMA_TABLE],
+        &SIGNATURE_STANDARD_QMAT[..],
+        "interlaced frame header must carry the natural-order bytes verbatim"
+    );
 }
 
 // -------------------------------------------------------------------

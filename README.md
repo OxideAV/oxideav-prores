@@ -403,8 +403,10 @@ alpha array across TFF/BFF at 8/10/12-bit output for **both** 8-bit
 width as well as a non-MB-aligned field height (the per-field corner MB).
 
 Streams produced by this crate's encoder use the spec's entropy coder
-for colour and a plain run-length code for alpha (the alternative path
-permitted by §7.1.2); both are bit-exact with this crate's decoder.
+for colour and the §5.3.3 / §7.1.2 `scanned_alpha()` code for alpha —
+differential VLC (Table 13 / Table 14, small-magnitude path when the
+difference fits, escape FLC otherwise) plus Table 12 run lengths; both
+are bit-exact with this crate's decoder.
 
 ## Usage
 
