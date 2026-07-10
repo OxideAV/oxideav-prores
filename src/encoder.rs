@@ -154,6 +154,29 @@ pub struct EncoderConfig {
     /// zero bytes (this crate's [`crate::decoder`] already consumes only
     /// the coded picture(s) and discards the remainder).
     pub min_frame_size: Option<u32>,
+    /// Carry **both** quantisation tables explicitly in every frame
+    /// header (`load_luma_quantization_matrix =
+    /// load_chroma_quantization_matrix = 1`, a 148-byte header) instead
+    /// of the minimal RDD 36 §6.1.1 carriage derived by
+    /// [`QuantMatrices::wire_flags`].
+    ///
+    /// The reference ProRes streams in the in-tree corpus always ship
+    /// both tables — every fixture carries flags `(1, 1)` even when the
+    /// chroma table is a byte-for-byte copy of the luma table or both
+    /// tables are the §7.2 all-4s default (all weights 4, which is
+    /// legal on the wire since 4 is within the §6.1.1 `2..=63` entry
+    /// range). Set this when byte-level frame-header form parity with
+    /// such streams matters (golden-stream comparison harnesses,
+    /// container re-wrap diffing, downstream parsers only ever
+    /// exercised on both-tables headers).
+    ///
+    /// Semantically a no-op: a decoder reconstructs the identical
+    /// matrix pair from either carriage, so the decoded planes are
+    /// byte-identical to the minimal-carriage twin
+    /// (`tests/quant_matrix_explicit_carriage.rs` pins this). The
+    /// default (`false`) preserves the minimal carriage and every
+    /// existing encoder-output SHA.
+    pub explicit_qmat_carriage: bool,
 }
 
 /// Maximum number of trial encodes per frame when rate control is active.
@@ -317,6 +340,16 @@ impl EncoderConfig {
     /// [`Self::min_frame_size`].
     pub fn with_min_frame_size(mut self, min_frame_size: u32) -> Self {
         self.min_frame_size = Some(min_frame_size);
+        self
+    }
+
+    /// Carry both quantisation tables explicitly in every frame header
+    /// (flags `(1, 1)`, 148-byte header), matching the carriage form of
+    /// the reference streams in the corpus — see
+    /// [`Self::explicit_qmat_carriage`]. Decoded output is
+    /// byte-identical to the default minimal carriage.
+    pub fn with_explicit_qmat_carriage(mut self) -> Self {
+        self.explicit_qmat_carriage = true;
         self
     }
 }
@@ -571,6 +604,7 @@ impl Encoder for ProResEncoder {
                         self.profile,
                         self.quant_index,
                         self.config.quant_matrices,
+                        self.config.explicit_qmat_carriage,
                         self.meta,
                         self.target_bytes,
                         self.interlace_mode,
@@ -588,6 +622,7 @@ impl Encoder for ProResEncoder {
                         None,
                         self.interlace_mode,
                         self.config.quant_matrices,
+                        self.config.explicit_qmat_carriage,
                         self.meta,
                         self.log2_slice_mb_width,
                     )?
@@ -722,6 +757,7 @@ pub fn encode_frame_with_qmats(
         None,
         0,
         Some(qmats),
+        false,
         FrameMeta::default(),
         3, // log2(8) — default slice width matches every reference encoder
     )
@@ -761,6 +797,7 @@ pub fn encode_frame_with_alpha(
         alpha_channel_type,
         0,
         None,
+        false,
         FrameMeta::default(),
         3, // log2(8) — default slice width matches every reference encoder
     )
@@ -800,6 +837,7 @@ pub fn encode_frame_interlaced(
         alpha_channel_type,
         interlace_mode,
         None,
+        false,
         FrameMeta::default(),
         3, // log2(8) — default slice width matches every reference encoder
     )
@@ -874,6 +912,7 @@ fn encode_frame_with_rate_control(
     profile: Profile,
     seed_qi: u8,
     qmats: Option<QuantMatrices>,
+    explicit_qmat_carriage: bool,
     meta: FrameMeta,
     target_bytes: usize,
     interlace_mode: u8,
@@ -894,6 +933,7 @@ fn encode_frame_with_rate_control(
         None,
         interlace_mode,
         qmats,
+        explicit_qmat_carriage,
         meta,
         log2_slice_mb_width,
     )?;
@@ -930,6 +970,7 @@ fn encode_frame_with_rate_control(
             None,
             interlace_mode,
             qmats,
+            explicit_qmat_carriage,
             meta,
             log2_slice_mb_width,
         )?;
@@ -986,6 +1027,7 @@ fn encode_frame_full(
     alpha_channel_type: Option<AlphaChannelType>,
     interlace_mode: u8,
     qmats: Option<QuantMatrices>,
+    explicit_qmat_carriage: bool,
     meta: FrameMeta,
     log2_slice_mb_width: u8,
 ) -> Result<Vec<u8>> {
@@ -1060,9 +1102,16 @@ fn encode_frame_full(
     // derivation could not emit (it forced load_luma whenever *either*
     // matrix was custom, wasting a redundant 64-byte flat luma table).
     // Quantisation always uses the full pair; the flags only pick which
-    // tables land in the frame header.
+    // tables land in the frame header. `explicit_qmat_carriage` forces
+    // the both-tables form the reference corpus streams always use
+    // (flags (1, 1), 148-byte header) — the decoder reconstructs the
+    // identical pair either way.
     let qmat_pair = qmats.unwrap_or_default();
-    let (load_luma, load_chroma) = qmat_pair.wire_flags();
+    let (load_luma, load_chroma) = if explicit_qmat_carriage {
+        (true, true)
+    } else {
+        qmat_pair.wire_flags()
+    };
     let luma_qmat = &qmat_pair.luma;
     let chroma_qmat = &qmat_pair.chroma;
 

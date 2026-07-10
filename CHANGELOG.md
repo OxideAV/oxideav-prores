@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proving the decoder scales the coefficient at natural position `k` by
   `qmat[k]` — byte-identical to the production decoder with natural
   indexing and provably different with scan-permuted weights.
+- **Explicit both-tables quantisation-matrix carriage**
+  (`EncoderConfig::explicit_qmat_carriage` /
+  `with_explicit_qmat_carriage`). The reference streams in the corpus
+  always ship both tables (`load_luma_quantization_matrix =
+  load_chroma_quantization_matrix = 1`, a 148-byte frame header), even
+  when the chroma table is a byte-for-byte copy of the luma table or
+  both are the §7.2 all-4s default; the encoder's default remains the
+  minimal §6.1.1 carriage. The new opt-in reproduces the reference
+  header form for byte-level parity scenarios (golden-stream
+  comparison, container re-wrap diffing). Semantically a no-op — the
+  decoder reconstructs the identical matrix pair from either carriage.
+  `tests/quant_matrix_explicit_carriage.rs` pins the wire form for all
+  six profiles (both tables verbatim in natural raster order, including
+  the chroma-copy and flat-default cases), the pixel-identity with the
+  minimal-carriage twin, the byte-stability of default-config output,
+  and the flags/header-size/table parity with the reference fixture's
+  raw bytes.
 - **Per-profile signature quantisation matrices** (RDD 36 §6.1.1 / §7.3).
   Each ProRes profile carries a characteristic quantisation weight matrix
   in the frame header; the encoder previously only offered the flat
@@ -99,6 +116,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ProRes RAW documentation aligned with the corpus source-provenance
+  note: ProRes RAW has **no public bitstream specification** (no
+  SMPTE-registered document; Apple's only published ProRes RAW document
+  is a marketing white paper with no frame/slice syntax, entropy
+  coding, transform, or quantisation description), so the crate's clean
+  typed refusal (`is_prores_raw_fourcc` at the FourCC level, a specific
+  `Unsupported` error for the in-stream `aprh` marker) is the correct
+  and final behaviour until an actual specification exists. Behaviour
+  unchanged; docs only.
 - The encoder now emits the **minimal RDD 36 §6.1.1 quantization-matrix
   carriage** for any custom matrix pair, via the new
   [`quant::QuantMatrices::wire_flags`] helper. `load_luma_quantization_matrix`

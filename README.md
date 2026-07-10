@@ -203,6 +203,37 @@ decoder fallback are exact inverses over a broad pseudo-random matrix
 space. The flat and both-custom (perceptual-preset) paths are byte-exact
 with the prior encoder, so every encoder-output SHA is unchanged.
 
+### Explicit both-tables carriage
+
+The reference streams in the corpus always ship **both** tables (flags
+`(1,1)`, a 148-byte frame header), even when the chroma table is a
+byte-for-byte copy of the luma table.
+[`EncoderConfig::with_explicit_qmat_carriage`] opts into that form for
+byte-level header parity with such streams (golden-stream comparison,
+container re-wrap diffing); it is semantically a no-op — the decoder
+reconstructs the identical matrix pair either way, and
+`tests/quant_matrix_explicit_carriage.rs` pins the wire form, the
+pixel-identity with the minimal twin, and the flags/table parity with
+the reference fixture bytes. The default stays minimal, so existing
+output is byte-unchanged.
+
+### Storage order (natural raster, pinned)
+
+RDD 36 stores each 64-byte table in **natural (raster) coefficient
+order**, row-major — the DC weight at index 0, the highest spatial
+frequency at index 63 — and the decoder indexes it directly by natural
+block position at dequantisation time. The block scan applies only to
+*coefficient reading* inside a slice, never to the matrix. (The corpus
+documentation originally described the tables as zigzag-ordered; that
+wording was corrected as corpus Errata E1 — this crate has always used
+natural order.) `tests/quant_matrix_order.rs` pins the order at every
+layer: the encoder's raw wire bytes at the fixed §6.1.1 offsets, the
+natural-order raster fingerprints (2-D monotone gradient, Proxy's
+closed 63-clamp triangle) shown to fail under a scan-order
+reinterpretation, the reference fixtures' raw header bytes, and an
+independent §7.3/§7.4/§7.5.1 reconstruction proving the decoder scales
+the coefficient at natural position `k` by `qmat[k]`.
+
 ## Picture geometry (RDD 36 §6.2)
 
 [`FrameHeader::picture_geometry`] folds the §6.2 derivation of the
@@ -320,9 +351,17 @@ scope of SMPTE RDD 36. This crate refuses it cleanly at the FourCC level
 ([`is_prores_raw_fourcc`] / [`PRORES_RAW_FOURCCS`]) and in-stream (the
 `aprh` marker at the `icpf` offset yields a specific `Unsupported`
 error), so a dispatcher can tell "ProRes RAW, unsupported" apart from
-"not ProRes at all" rather than mis-decoding it. Decoding it would
-require Apple's proprietary bitstream documentation and is not
-implemented.
+"not ProRes at all" rather than mis-decoding it.
+
+ProRes RAW has **no public bitstream specification**: there is no
+SMPTE-registered document for it (RDD 36 explicitly scopes itself to
+the six YUV/RGB profiles), and the only document Apple publishes is a
+marketing white paper with no frame/slice syntax, entropy coding,
+transform, or quantisation description (see the corpus
+source-provenance note `docs/video/prores/prores-raw-provenance.md`).
+There is therefore no normative source to implement it from; the clean
+typed refusal above is the correct and final behaviour until an actual
+specification exists.
 
 ## FourCC routing helpers
 

@@ -93,9 +93,13 @@ pub const PRORES_FOURCCS: [&[u8; 4]; 6] = [b"apco", b"apcs", b"apcn", b"apch", b
 /// MP4 / MOV `VisualSampleEntry` FourCCs that identify an Apple
 /// **ProRes RAW** bitstream. ProRes RAW is a *separate* Apple format
 /// that wraps single-plane Bayer/CFA sensor data; it is NOT one of the
-/// six RDD 36 YUV/RGB profiles this crate decodes, uses an incompatible
-/// sample structure, and is documented only in Apple's proprietary
-/// ProRes RAW white paper. These FourCCs deliberately resolve to
+/// six RDD 36 YUV/RGB profiles this crate decodes and uses an
+/// incompatible sample structure. It has **no public bitstream
+/// specification**: no SMPTE-registered document covers it, and Apple's
+/// only published ProRes RAW document is a marketing white paper with
+/// no frame/slice syntax, entropy coding, transform, or quantisation
+/// description — there is no normative source a decoder could be
+/// implemented from. These FourCCs deliberately resolve to
 /// neither a [`CodecId`] nor a [`frame::Profile`] here —
 /// [`is_prores_raw_fourcc`] lets a caller tell "ProRes RAW, which we
 /// don't decode" apart from "not ProRes at all".
