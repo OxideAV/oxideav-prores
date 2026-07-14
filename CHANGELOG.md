@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-profile rate/quality acceptance against black-box reference
+  encodes** (`tests/rate_quality_reference.rs`). All six RDD 36
+  profiles: a deterministic pseudo-natural 10-bit source is fed
+  byte-identically (raw planar file) to the reference encoder and to
+  this crate's encoder (signature quantisation matrices, default qi,
+  plus an equal-rate point rate-controlled to the reference packet
+  size); all streams are decoded by the black-box reference decoder
+  and scored as luma PSNR against the source. Measured at 256×128:
+  equal-rate PSNR is *above* the reference encoder on every profile
+  (Proxy +0.2 dB, LT +3.9, Standard +5.5, HQ +7.6, 4444 +5.7,
+  4444 XQ +6.2), with the equal-rate packet within ±6 % of the
+  reference rate. Acceptance bars: equal-rate within ±20 % of the
+  reference rate and within 6 dB of its PSNR; default-qi ≥ 40 dB;
+  plus a self-roundtrip leg on the equal-rate packet.
 - **Alpha-channel encoding through the high-level `Encoder` path**
   (`EncoderConfig::alpha_channel_type` / `with_alpha_channel_type`).
   Previously alpha (RDD 36 §5.3.3 + §7.1.2) was reachable only via the
