@@ -177,6 +177,35 @@ pub struct EncoderConfig {
     /// default (`false`) preserves the minimal carriage and every
     /// existing encoder-output SHA.
     pub explicit_qmat_carriage: bool,
+    /// Alpha-channel coding for every frame the encoder emits (RDD 36
+    /// §5.3.3 + §7.1.2, frame-header `alpha_channel_type` per §6.1.1 /
+    /// Table 7).
+    ///
+    /// * `Some(AlphaChannelType::Eight)` — each `send_frame` input must
+    ///   carry a 4th `VideoPlane` holding one byte per pixel at full
+    ///   luma resolution; coded losslessly as 8-bit alpha
+    ///   (`alpha_channel_type = 1`).
+    /// * `Some(AlphaChannelType::Sixteen)` — the 4th plane holds
+    ///   little-endian `u16` samples (2 bytes per pixel); coded as
+    ///   16-bit alpha (`alpha_channel_type = 2`).
+    /// * `None` (default) — **auto-detect**: a 3-plane input frame
+    ///   encodes without alpha (`alpha_channel_type = 0`, identical to
+    ///   the pre-config behaviour); a 4-plane input frame enables alpha
+    ///   coding automatically, inferring the coded width from the alpha
+    ///   plane's bytes-per-sample (`stride / width` — 1 → 8-bit,
+    ///   2 → 16-bit). This makes a registry-built encoder accept the
+    ///   4-plane frames this crate's own decoder emits for 4444 ± alpha
+    ///   streams without any config plumbing.
+    ///
+    /// When alpha is active (explicitly or by detection) every emitted
+    /// slice carries a `scanned_alpha()` blob at its tail and the frame
+    /// header's `alpha_channel_type` field is set accordingly; the
+    /// bitstream version is raised to 1 per §6.4 (a version-0 stream
+    /// must not carry alpha). An explicit `Some(...)` with a 3-plane
+    /// input frame is an error (the plane the caller promised is
+    /// missing), as is a 4-plane frame whose alpha stride is neither 1
+    /// nor 2 bytes per sample under auto-detection.
+    pub alpha_channel_type: Option<AlphaChannelType>,
 }
 
 /// Maximum number of trial encodes per frame when rate control is active.
@@ -351,6 +380,43 @@ impl EncoderConfig {
     pub fn with_explicit_qmat_carriage(mut self) -> Self {
         self.explicit_qmat_carriage = true;
         self
+    }
+
+    /// Request alpha-channel coding (RDD 36 §5.3.3 + §7.1.2) on every
+    /// frame: `AlphaChannelType::Eight` reads the 4th input plane as one
+    /// byte per pixel, `AlphaChannelType::Sixteen` as little-endian
+    /// `u16`. See [`Self::alpha_channel_type`] — the default (`None`)
+    /// auto-detects alpha from a 4-plane input frame.
+    pub fn with_alpha_channel_type(mut self, act: AlphaChannelType) -> Self {
+        self.alpha_channel_type = Some(act);
+        self
+    }
+}
+
+/// Infer the coded alpha width from the 4th input plane's layout under
+/// [`EncoderConfig::alpha_channel_type`] auto-detection: an alpha plane
+/// at full luma resolution stores `width` samples per row, so its
+/// byte-stride divided by `width` is the bytes-per-sample — 1 selects
+/// 8-bit alpha (Table 13), 2 selects 16-bit alpha (Table 14). Any other
+/// ratio (including a stride shorter than one row) is refused: guessing
+/// would silently mis-read the caller's samples.
+fn detect_alpha_channel_type(
+    plane: &oxideav_core::frame::VideoPlane,
+    width: usize,
+) -> Result<AlphaChannelType> {
+    if width == 0 {
+        return Err(Error::invalid("prores encoder: zero-width alpha plane"));
+    }
+    match plane.stride / width {
+        1 => Ok(AlphaChannelType::Eight),
+        2 => Ok(AlphaChannelType::Sixteen),
+        other => Err(Error::invalid(format!(
+            "prores encoder: cannot infer alpha depth from a 4-plane frame whose alpha \
+             stride is {} bytes for {width} samples/row ({other} bytes/sample — expected \
+             1 for 8-bit or 2 for 16-bit LE); set \
+             EncoderConfig::alpha_channel_type explicitly",
+            plane.stride
+        ))),
     }
 }
 
@@ -535,8 +601,10 @@ pub fn make_encoder_with_config(
     let interlace_mode = config.interlace_mode;
     let log2_slice_mb_width =
         mbs_per_slice_to_log2(config.mbs_per_slice.unwrap_or(DEFAULT_MBS_PER_SLICE))?;
+    let alpha_channel_type = config.alpha_channel_type;
 
     Ok(Box::new(ProResEncoder {
+        alpha_channel_type,
         output_params,
         width,
         height,
@@ -574,6 +642,10 @@ struct ProResEncoder {
     /// picture_header (RDD 36 §5.2.2 / §5.3). Resolved at construction
     /// from `config.mbs_per_slice` (default 8 → log2 == 3).
     log2_slice_mb_width: u8,
+    /// Explicit alpha coding request (RDD 36 §5.3.3 + §7.1.2). `None`
+    /// auto-detects from the input frame's plane count per
+    /// [`EncoderConfig::alpha_channel_type`].
+    alpha_channel_type: Option<AlphaChannelType>,
     config: EncoderConfig,
     time_base: TimeBase,
     /// Target bytes per frame for rate control, or 0 when disabled.
@@ -594,6 +666,21 @@ impl Encoder for ProResEncoder {
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         match frame {
             Frame::Video(v) => {
+                // Resolve the effective alpha coding for THIS frame: an
+                // explicit config request wins; otherwise a 4-plane
+                // input auto-enables alpha with the depth inferred from
+                // the alpha plane's bytes-per-sample (see
+                // `EncoderConfig::alpha_channel_type`). A 3-plane input
+                // with no request stays alpha-free — byte-identical to
+                // the pre-alpha-config encoder.
+                let alpha_channel_type = match self.alpha_channel_type {
+                    Some(act) => Some(act),
+                    None if v.planes.len() == 4 => Some(detect_alpha_channel_type(
+                        &v.planes[3],
+                        self.width as usize,
+                    )?),
+                    None => None,
+                };
                 let data = if self.target_bytes > 0 {
                     encode_frame_with_rate_control(
                         v,
@@ -609,6 +696,7 @@ impl Encoder for ProResEncoder {
                         self.target_bytes,
                         self.interlace_mode,
                         self.log2_slice_mb_width,
+                        alpha_channel_type,
                     )?
                 } else {
                     encode_frame_full(
@@ -619,7 +707,7 @@ impl Encoder for ProResEncoder {
                         self.bit_depth,
                         self.profile,
                         self.quant_index,
-                        None,
+                        alpha_channel_type,
                         self.interlace_mode,
                         self.config.quant_matrices,
                         self.config.explicit_qmat_carriage,
@@ -917,11 +1005,15 @@ fn encode_frame_with_rate_control(
     target_bytes: usize,
     interlace_mode: u8,
     log2_slice_mb_width: u8,
+    alpha_channel_type: Option<AlphaChannelType>,
 ) -> Result<Vec<u8>> {
     let tol_lo = (target_bytes as f64 * (1.0 - RATE_CTRL_TOLERANCE)) as usize;
     let tol_hi = (target_bytes as f64 * (1.0 + RATE_CTRL_TOLERANCE)) as usize;
 
-    // First encode at seed qi.
+    // First encode at seed qi. Alpha rides along on every trial encode:
+    // the §7.1.2 alpha coder is lossless and qi-independent, so its
+    // per-slice blob is a (content-)constant size floor the binary
+    // search converges around.
     let seed = encode_frame_full(
         frame,
         img_w,
@@ -930,7 +1022,7 @@ fn encode_frame_with_rate_control(
         bit_depth,
         profile,
         seed_qi,
-        None,
+        alpha_channel_type,
         interlace_mode,
         qmats,
         explicit_qmat_carriage,
@@ -967,7 +1059,7 @@ fn encode_frame_with_rate_control(
             bit_depth,
             profile,
             mid,
-            None,
+            alpha_channel_type,
             interlace_mode,
             qmats,
             explicit_qmat_carriage,

@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Alpha-channel encoding through the high-level `Encoder` path**
+  (`EncoderConfig::alpha_channel_type` / `with_alpha_channel_type`).
+  Previously alpha (RDD 36 §5.3.3 + §7.1.2) was reachable only via the
+  free function `encoder::encode_frame_with_alpha`; a registry-built
+  encoder refused 4-plane frames, and the two-pass rate-control path
+  could not carry alpha at all. Now: an explicit
+  `Some(Eight | Sixteen)` codes the 4th input plane as 8-/16-bit alpha;
+  the default `None` **auto-detects** a 4-plane input frame, inferring
+  the alpha depth from the plane's bytes-per-sample (so plain
+  `make_encoder` accepts the 4-plane frames this crate's own decoder
+  emits, with no config plumbing). Rate control threads alpha through
+  every trial encode. A 4:2:2 + alpha stream is emitted as bitstream
+  version 1 per §6.4. Undetectable alpha strides and a missing
+  promised plane are clean errors. `tests/encoder_alpha_config.rs`
+  pins the explicit paths, both auto-detections, alpha + rate control
+  (byte target still met), alpha + interlaced field pairs, the §6.4
+  version rule, byte-exact lossless alpha roundtrips, and the error
+  paths.
+
 - **Order-pinned quantisation-matrix regression tests**
   (`tests/quant_matrix_order.rs`). The in-tree corpus documentation
   originally described the frame-header quantisation tables as "zigzag
