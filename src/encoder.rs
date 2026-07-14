@@ -1033,21 +1033,32 @@ fn encode_frame_with_rate_control(
         return Ok(seed);
     }
 
-    // Decide search direction.
-    // If seed is too large (above target+tol) we need higher qi (coarser).
-    // If seed is too small (below target-tol) we need lower qi (finer).
+    // Decide search direction over the *untried* candidate window.
+    // Frame size is monotonically non-increasing in qi, so the seed
+    // outcome prunes one side: too large → only coarser indices
+    // (seed_qi + 1 ..= 224) can help; too small → only finer indices
+    // (1 ..= seed_qi − 1). The window is inclusive on both ends and
+    // never re-contains an already-encoded qi — the previous
+    // formulation kept the seed inside the window, so the collapsing
+    // search could burn its final pass re-encoding the seed and break
+    // one step short of the nearest candidate (e.g. seed qi = 1 too
+    // large with qi = 2 just under target: mids 112, 56, 28, 14, 7, 3,
+    // then 1 again — qi 2 was never tried and the seed was returned at
+    // ~20 % over target).
     let (mut lo, mut hi): (u8, u8) = if seed.len() > tol_hi {
-        // Too large → need coarser quantisation → higher qi
-        (seed_qi, 224)
+        // Too large → need coarser quantisation → higher qi.
+        // seed_qi == 224 yields (225, 224): empty window, seed returned.
+        (seed_qi + 1, 224)
     } else {
-        // Too small → need finer quantisation → lower qi
-        (1, seed_qi)
+        // Too small → need finer quantisation → lower qi.
+        // seed_qi == 1 yields (1, 0): empty window, seed returned.
+        (1, seed_qi - 1)
     };
 
     let mut best = seed;
 
     for _ in 0..RATE_CTRL_MAX_PASSES {
-        if lo >= hi {
+        if lo > hi {
             break;
         }
         let mid = lo + (hi - lo) / 2;
@@ -1077,14 +1088,12 @@ fn encode_frame_with_rate_control(
             best = candidate;
         }
         if sz > tol_hi {
-            // Frame too large → raise qi (coarser)
+            // Frame too large → raise qi (coarser). mid ≤ 224 so the
+            // increment stays in u8 range (lo caps at 225 = empty).
             lo = mid + 1;
         } else {
-            // Frame too small → lower qi (finer)
-            // Safe because mid >= lo >= 1; if mid == 1 the loop exits.
-            if mid == 0 {
-                break;
-            }
+            // Frame too small → lower qi (finer). mid ≥ lo ≥ 1 so the
+            // decrement stays non-negative (hi = 0 = empty window).
             hi = mid - 1;
         }
     }

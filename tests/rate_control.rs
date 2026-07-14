@@ -485,3 +485,93 @@ fn rate_ctrl_unreachable_target_does_not_panic() {
         pkt.data.len()
     );
 }
+
+/// Regression: the binary search must reach the qi **adjacent to the
+/// seed** when that is the closest candidate. The previous window
+/// formulation `(lo, hi) = (seed_qi, 224)` kept the already-encoded
+/// seed inside the window, so the collapsing search re-encoded the seed
+/// on its final pass and broke one step short: with seed qi = 1 too
+/// large and the target set to the qi = 2 packet size, the search
+/// walked mids 112, 56, 28, 14, 7, 3, 1 — never trying qi = 2 — and
+/// returned the seed packet ~20 % over target.
+///
+/// Setup: XQ profile (default/seed qi = 1); target = the exact packet
+/// size measured at qi = 2. The rate-controlled encode must return a
+/// packet within the ±5 % tolerance of that target (i.e. it found
+/// qi = 2 or an equivalent), not the oversized seed.
+#[test]
+fn rate_ctrl_reaches_qi_adjacent_to_seed() {
+    let (w, h) = (128u32, 96u32);
+    let src = synth_444(w, h);
+
+    // Measure the deterministic qi = 2 packet size for this content.
+    let target = {
+        let mut p = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        p.media_type = MediaType::Video;
+        p.width = Some(w);
+        p.height = Some(h);
+        p.pixel_format = Some(PixelFormat::Yuv444P);
+        let cfg = EncoderConfig::for_profile(Profile::Prores4444Xq).with_quantization_index(2);
+        let mut enc = make_encoder_with_config(&p, cfg).expect("make encoder");
+        enc.send_frame(&Frame::Video(src.clone())).expect("send");
+        enc.receive_packet().expect("receive").data.len()
+    };
+
+    // Sanity for the scenario premise: the seed (qi = 1) must be OVER
+    // tolerance, else the test would pass trivially.
+    let seed_len = {
+        let mut p = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        p.media_type = MediaType::Video;
+        p.width = Some(w);
+        p.height = Some(h);
+        p.pixel_format = Some(PixelFormat::Yuv444P);
+        let cfg = EncoderConfig::for_profile(Profile::Prores4444Xq).with_quantization_index(1);
+        let mut enc = make_encoder_with_config(&p, cfg).expect("make encoder");
+        enc.send_frame(&Frame::Video(src.clone())).expect("send");
+        enc.receive_packet().expect("receive").data.len()
+    };
+    let tol = (target as f64 * RATE_CTRL_TOLERANCE) as usize;
+    assert!(
+        seed_len > target + tol,
+        "scenario premise broken: qi=1 packet ({seed_len} B) not over the qi=2 target \
+         ({target} B ± {tol}); pick different content"
+    );
+
+    // …and qi = 3 must be UNDER tolerance, so qi = 2 is the only
+    // in-tolerance candidate — a search that skips the seed-adjacent
+    // index cannot luck into a pass via qi = 3.
+    let qi3_len = {
+        let mut p = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        p.media_type = MediaType::Video;
+        p.width = Some(w);
+        p.height = Some(h);
+        p.pixel_format = Some(PixelFormat::Yuv444P);
+        let cfg = EncoderConfig::for_profile(Profile::Prores4444Xq).with_quantization_index(3);
+        let mut enc = make_encoder_with_config(&p, cfg).expect("make encoder");
+        enc.send_frame(&Frame::Video(src.clone())).expect("send");
+        enc.receive_packet().expect("receive").data.len()
+    };
+    assert!(
+        qi3_len < target - tol,
+        "scenario premise broken: qi=3 packet ({qi3_len} B) is inside the qi=2 target \
+         tolerance ({target} B ± {tol}); pick different content"
+    );
+
+    // Rate-controlled encode at exactly the qi = 2 target.
+    let mut p = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+    p.media_type = MediaType::Video;
+    p.width = Some(w);
+    p.height = Some(h);
+    p.pixel_format = Some(PixelFormat::Yuv444P);
+    p.bit_rate = Some(target as u64 * 8 * 25);
+    p.frame_rate = Some(Rational::new(25, 1));
+    let cfg = EncoderConfig::for_profile(Profile::Prores4444Xq).with_rate_control();
+    let mut enc = make_encoder_with_config(&p, cfg).expect("make encoder");
+    enc.send_frame(&Frame::Video(src)).expect("send");
+    let got = enc.receive_packet().expect("receive").data.len();
+    assert!(
+        got >= target - tol && got <= target + tol,
+        "rate control returned {got} B for a reachable {target} B target (±{tol}) — \
+         the qi adjacent to the seed was skipped"
+    );
+}

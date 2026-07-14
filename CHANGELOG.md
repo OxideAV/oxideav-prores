@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rate control could return the seed packet when the closest
+  candidate was the adjacent quantisation index.** The binary-search
+  window kept the already-encoded seed qi inside itself
+  (`(lo, hi) = (seed_qi, 224)`), so the collapsing search burned its
+  final pass re-encoding the seed and broke one step short: with a
+  seed of qi = 1 (4444 XQ's default) too large and a target equal to
+  the qi = 2 packet size, the walk tried mids 112, 56, 28, 14, 7, 3,
+  then 1 again — never qi = 2 — and returned a packet ~20 % over a
+  reachable target. The window is now inclusive over the *untried*
+  candidates only (`seed_qi + 1 ..= 224` / `1 ..= seed_qi − 1`), which
+  both reaches the adjacent index and never wastes a pass.
+  `tests/rate_control.rs::rate_ctrl_reaches_qi_adjacent_to_seed` pins
+  the exact scenario (with premise guards that qi = 2 is the only
+  in-tolerance candidate).
+
 ### Added
 
 - **Alpha-channel encoding through the high-level `Encoder` path**
