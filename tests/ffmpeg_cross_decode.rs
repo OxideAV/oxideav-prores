@@ -2859,3 +2859,277 @@ fn cross_decode_apch_progressive_mbs_per_slice_8() {
 fn cross_decode_apch_progressive_mbs_per_slice_1() {
     cross_decode_progressive_422_mbs_per_slice(Profile::Hq, 128, 48, 1);
 }
+
+// ─────────── alpha via the public Encoder trait (EncoderConfig) ───────────
+//
+// The 4444+alpha cases above drive the free functions
+// (`encode_frame_with_alpha` / `encode_frame_interlaced`) directly. These
+// exercise the *high-level* alpha path instead:
+// `make_encoder_with_config(... with_alpha_channel_type(...))` — and the
+// config-free auto-detection where a plain default `EncoderConfig` (the
+// registry-equivalent construction) receives a 4-plane frame and enables
+// alpha by itself. The emitted stream must decode in the black-box
+// reference decoder with the luma at ≥ 30 dB PSNR AND the 8-bit alpha
+// plane recovered exactly (alpha is lossless per RDD 36 §7.1.2; the
+// reference decoder emits 4444 alpha at 12 bits, so "exactly" means the
+// §7.5.2 promote round(4095 * a / 255) of every source sample).
+
+/// 8-bit 4:4:4 source with a field-distinct even/odd luma bias (usable
+/// for both progressive and interlaced drivers — progressive callers
+/// simply don't assert the bias) and a diagonal 8-bit alpha gradient.
+fn synthetic_444_8bit_with_alpha8(width: u32, height: u32) -> VideoFrame {
+    let w = width as usize;
+    let h = height as usize;
+    let mut y = vec![0u8; w * h];
+    let mut cb = vec![128u8; w * h];
+    let mut cr = vec![128u8; w * h];
+    let mut a = vec![0u8; w * h];
+    for j in 0..h {
+        for i in 0..w {
+            let base: i32 = if j % 2 == 0 { 160 } else { 96 };
+            let grad = ((i + j) % 48) as i32;
+            let phase = ((i.wrapping_mul(7) ^ j.wrapping_mul(13)) % 24) as i32;
+            y[j * w + i] = (base + grad + phase - 12).clamp(16, 235) as u8;
+            cb[j * w + i] = (128 + ((i as i32 - w as i32 / 2) / 2).clamp(-48, 48)) as u8;
+            cr[j * w + i] = (128 + ((j as i32 - h as i32 / 2) / 2).clamp(-48, 48)) as u8;
+            a[j * w + i] = (((i + j) * 255) / (w + h - 2).max(1)) as u8;
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane { stride: w, data: y },
+            VideoPlane {
+                stride: w,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w,
+                data: cr,
+            },
+            VideoPlane { stride: w, data: a },
+        ],
+    }
+}
+
+/// Convert an 8-bit plane to 12-bit LE per the §7.5.1 output formula for
+/// b = 12 given an 8-bit encode input (`s12 = 16 * s8`).
+fn upshift_8_to_12_le(plane8: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(plane8.len() * 2);
+    for &v in plane8 {
+        let v12 = (v as u16) << 4;
+        out.extend_from_slice(&v12.to_le_bytes());
+    }
+    out
+}
+
+/// Drive the config-path alpha encoder (explicit `Eight`, auto-detected,
+/// progressive or interlaced, optionally rate-controlled) and validate
+/// the emitted stream in the black-box reference decoder.
+fn cross_decode_encoder_alpha(
+    width: u32,
+    height: u32,
+    interlace_mode: u8,
+    explicit: bool,
+    rate_control: bool,
+) {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping encoder-alpha cross-decode");
+        return;
+    }
+    let tmp = tempdir().expect("tempdir");
+    let profile_flag = 4u8; // ap4h
+    let template_path = tmp.join(format!(
+        "tmpl_enca_{width}x{height}_im{interlace_mode}_e{explicit}_r{rate_control}.mov"
+    ));
+    let have_template = if interlace_mode == 0 {
+        ffmpeg_make_template_mov_444_alpha_progressive(profile_flag, width, height, &template_path)
+    } else {
+        ffmpeg_make_template_mov_444_alpha(
+            profile_flag,
+            width,
+            height,
+            interlace_mode == 1,
+            &template_path,
+        )
+    };
+    if !have_template {
+        eprintln!("4444+alpha template MOV unavailable — skipping");
+        return;
+    }
+    let template = std::fs::read(&template_path).expect("read template");
+
+    let src = synthetic_444_8bit_with_alpha8(width, height);
+    let mut params = CodecParameters::video(CodecId::new("prores"));
+    params.media_type = MediaType::Video;
+    params.width = Some(width);
+    params.height = Some(height);
+    params.pixel_format = Some(PixelFormat::Yuv444P);
+    let mut cfg = EncoderConfig::for_profile(Profile::Prores4444);
+    if explicit {
+        cfg = cfg.with_alpha_channel_type(AlphaChannelType::Eight);
+    }
+    if interlace_mode != 0 {
+        cfg = cfg.with_interlace_mode(interlace_mode);
+    }
+    if rate_control {
+        // Target inside the achievable band for this content size so the
+        // qi binary search genuinely moves (multiple trial encodes, all
+        // carrying the alpha blob): 1 byte/pixel/frame at 25 fps —
+        // roughly 70 % of this synthetic's finest-qi coded size, so the
+        // search lands mid-range without collapsing quality.
+        params.bit_rate = Some(width as u64 * height as u64 * 8 * 25);
+        params.frame_rate = Some(oxideav_core::Rational::new(25, 1));
+        cfg = cfg.with_rate_control();
+    }
+    let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder_with_config");
+    enc.send_frame(&Frame::Video(src.clone()))
+        .expect("send_frame");
+    let pkt = enc.receive_packet().expect("receive_packet");
+
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt.data).expect("parse our packet");
+    assert_eq!(
+        fh.alpha_channel_type, 1,
+        "config-path frame must carry 8-bit alpha (explicit={explicit})"
+    );
+    assert_eq!(fh.interlace_mode, interlace_mode);
+
+    let patched = patch_mov_with_packet(&template, &pkt.data);
+    let patched_path = tmp.join(format!(
+        "patched_enca_{width}x{height}_im{interlace_mode}_e{explicit}_r{rate_control}.mov"
+    ));
+    std::fs::write(&patched_path, &patched).expect("write patched");
+
+    let decoded_path = tmp.join(format!(
+        "decoded_enca_{width}x{height}_im{interlace_mode}_e{explicit}_r{rate_control}.yuv"
+    ));
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            patched_path.to_str().unwrap(),
+            "-pix_fmt",
+            "yuva444p12le",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            decoded_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode");
+    assert!(
+        status.success(),
+        "reference decoder refused our config-path alpha packet \
+         (im={interlace_mode}, explicit={explicit}, rate_control={rate_control})"
+    );
+    let decoded = std::fs::read(&decoded_path).expect("read decoded");
+    let plane_bytes = (width as usize) * (height as usize) * 2;
+    assert!(
+        decoded.len() >= plane_bytes * 4,
+        "expected 4 12-bit planes, got {} bytes",
+        decoded.len()
+    );
+    let decoded_y = &decoded[..plane_bytes];
+    let decoded_a = &decoded[plane_bytes * 3..plane_bytes * 4];
+
+    // Luma PSNR against the §7.5.1 12-bit promote of the 8-bit source.
+    let src_y_12 = upshift_8_to_12_le(&src.planes[0].data);
+    let psnr = psnr_12bit(&src_y_12, decoded_y);
+
+    // Alpha: coded losslessly (§7.1.2); the reference decoder emits it
+    // at 12 bits via the §7.5.2 promote round(4095 * a / 255). Require
+    // sub-LSB mean absolute error against that closed form.
+    let n = plane_bytes / 2;
+    let mut a_abs_err = 0u64;
+    let mut a_exact = 0usize;
+    for i in 0..n {
+        let s8 = src.planes[3].data[i] as u32;
+        let want = ((s8 * 4095 + 127) / 255) as i64;
+        let got = u16::from_le_bytes([decoded_a[i * 2], decoded_a[i * 2 + 1]]) as i64;
+        let d = (got - want).unsigned_abs();
+        a_abs_err += d;
+        if d == 0 {
+            a_exact += 1;
+        }
+    }
+    let a_mae = a_abs_err as f64 / n as f64;
+    eprintln!(
+        "cross-decode encoder-alpha (im={interlace_mode}, explicit={explicit}, \
+         rate_control={rate_control}, {width}x{height}): packet={} bytes, \
+         luma PSNR={psnr:.2} dB, alpha MAE={a_mae:.4} ({a_exact}/{n} exact)",
+        pkt.data.len()
+    );
+    assert!(
+        psnr >= 30.0,
+        "config-path alpha cross-decode PSNR {psnr:.2} dB under 30 dB bar"
+    );
+    assert!(
+        a_mae < 1.0,
+        "config-path alpha MAE {a_mae:.4} not sub-LSB — alpha blob broken in Encoder path?"
+    );
+
+    if interlace_mode != 0 {
+        // Even/odd luma bias must survive the field pair.
+        let mut even_sum = 0u64;
+        let mut odd_sum = 0u64;
+        let w = width as usize;
+        for j in 0..(height as usize) {
+            let row_start = j * w * 2;
+            let mut row_sum = 0u64;
+            for i in 0..w {
+                let v = u16::from_le_bytes([
+                    decoded_y[row_start + i * 2],
+                    decoded_y[row_start + i * 2 + 1],
+                ]);
+                row_sum += v as u64;
+            }
+            if j % 2 == 0 {
+                even_sum += row_sum;
+            } else {
+                odd_sum += row_sum;
+            }
+        }
+        assert!(
+            even_sum > odd_sum,
+            "config-path alpha interlaced: even-row sum {even_sum} not > odd-row sum {odd_sum}"
+        );
+    }
+}
+
+#[test]
+fn cross_decode_encoder_alpha_progressive_explicit() {
+    cross_decode_encoder_alpha(64, 48, 0, true, false);
+}
+
+#[test]
+fn cross_decode_encoder_alpha_progressive_autodetect() {
+    // No with_alpha_channel_type at all — the 4-plane frame must enable
+    // alpha by itself and still produce a reference-decodable stream.
+    cross_decode_encoder_alpha(64, 48, 0, false, false);
+}
+
+#[test]
+fn cross_decode_encoder_alpha_interlaced_tff() {
+    cross_decode_encoder_alpha(64, 48, 1, true, false);
+}
+
+#[test]
+fn cross_decode_encoder_alpha_interlaced_bff() {
+    cross_decode_encoder_alpha(64, 48, 2, true, false);
+}
+
+#[test]
+fn cross_decode_encoder_alpha_rate_controlled() {
+    // Rate control + alpha: every trial encode carries the lossless
+    // alpha blob and the final packet still decodes externally.
+    cross_decode_encoder_alpha(64, 48, 0, true, true);
+}
+
+#[test]
+fn cross_decode_encoder_alpha_progressive_larger() {
+    cross_decode_encoder_alpha(128, 96, 0, true, false);
+}
