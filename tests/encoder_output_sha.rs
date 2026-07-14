@@ -862,3 +862,176 @@ const EXPECTED_APCN_12BIT_QI4: &str =
     "2a3a595b86266b55af602e990699231c6969ad5ba5fb5125784ae2ad14041bfc";
 const EXPECTED_AP4H_12BIT_QI2: &str =
     "8e2296ba352a1deeaee9361c43839927f17d9f38508098ee59d2962c39f52f4f";
+
+// ---------------------------------------------------------------------
+// Alpha corpus extension: 16-bit alpha (Table 14) and interlaced+alpha,
+// plus byte-equivalence pins for the EncoderConfig / registry path.
+//
+// The pins above cover 8-bit alpha (Table 13) progressive only. The
+// 16-bit alpha coder (Table 14: wider small-difference codes + 16-bit
+// escape FLC) and the interlaced field-pair + alpha combination emit
+// different wire bytes, so each gets its own SHA. The config-path
+// tests then pin that `make_encoder_with_config` + `send_frame`
+// produces byte-IDENTICAL packets to the free-function calls — the
+// high-level path adds no bytes of its own, so one SHA corpus covers
+// both surfaces (including the 4-plane auto-detection, which must be
+// indistinguishable on the wire from an explicit request).
+// ---------------------------------------------------------------------
+
+fn synthetic_yuv444p_8bit_with_alpha16() -> VideoFrame {
+    let w = W as usize;
+    let h = H as usize;
+    let mut frame = synthetic_yuv444p_8bit();
+    // 16-bit LE alpha sweeping the full range diagonally, with a
+    // deterministic low-bit texture so the Table 14 small-difference
+    // and escape paths are both exercised.
+    let mut a = vec![0u8; w * h * 2];
+    for j in 0..h {
+        for i in 0..w {
+            let v = ((((i + j) * 65535) / (w + h - 2)) as u16) ^ (((i * 7 + j * 13) & 0x3F) as u16);
+            let off = (j * w + i) * 2;
+            a[off] = (v & 0xFF) as u8;
+            a[off + 1] = (v >> 8) as u8;
+        }
+    }
+    frame.planes.push(VideoPlane {
+        stride: w * 2,
+        data: a,
+    });
+    frame
+}
+
+const EXPECTED_AP4X_8BIT_QI1_ALPHA16: &str =
+    "8ea77c460fe3289c4a9a7612d91df1937e6fa39c2c7311bef884fce02a3641b0";
+const EXPECTED_AP4H_8BIT_QI2_INTERLACED_TFF_ALPHA8: &str =
+    "2131c59f74797ba5df2ef48e7ade90c38f066ba9d366db05a15434a46b5a41e6";
+
+/// 4444 XQ (`ap4x`), progressive, 8-bit YUV, **16-bit alpha**
+/// (Table 14), default qi = 1. First SHA coverage of the 16-bit alpha
+/// codeword family.
+#[test]
+fn encoder_sha_pin_ap4x_8bit_with_16bit_alpha() {
+    let frame = synthetic_yuv444p_8bit_with_alpha16();
+    let pkt = encode_frame_with_alpha(
+        &frame,
+        W,
+        H,
+        ChromaFormat::Y444,
+        BitDepth::Eight,
+        Profile::Prores4444Xq,
+        1,
+        Some(AlphaChannelType::Sixteen),
+    )
+    .unwrap();
+    let sha = hex(&sha256(&pkt));
+    assert_eq!(
+        sha, EXPECTED_AP4X_8BIT_QI1_ALPHA16,
+        "ap4x 8-bit qi=1 + 16-bit alpha SHA drift"
+    );
+    assert_decodes_cleanly(&pkt, ChromaFormat::Y444, BitDepth::Eight, true);
+}
+
+/// 4444 (`ap4h`), interlaced TFF, 8-bit YUV + 8-bit alpha, qi = 2.
+/// First SHA coverage of the field-pair + scanned_alpha combination
+/// (per-field §7.5.3 alpha rows at the padded MB height).
+#[test]
+fn encoder_sha_pin_ap4h_8bit_interlaced_tff_with_alpha() {
+    let frame = synthetic_yuv444p_8bit_with_alpha();
+    let pkt = encode_frame_interlaced(
+        &frame,
+        W,
+        H,
+        ChromaFormat::Y444,
+        BitDepth::Eight,
+        Profile::Prores4444,
+        2,
+        Some(AlphaChannelType::Eight),
+        1, // TFF
+    )
+    .unwrap();
+    let sha = hex(&sha256(&pkt));
+    assert_eq!(
+        sha, EXPECTED_AP4H_8BIT_QI2_INTERLACED_TFF_ALPHA8,
+        "ap4h 8-bit qi=2 interlaced TFF + alpha SHA drift"
+    );
+    assert_decodes_cleanly(&pkt, ChromaFormat::Y444, BitDepth::Eight, true);
+}
+
+// ---------------------------------------------------------------------
+// EncoderConfig-path byte equivalence with the free functions.
+// ---------------------------------------------------------------------
+
+fn config_encode(frame: &VideoFrame, cfg: oxideav_prores::encoder::EncoderConfig) -> Vec<u8> {
+    use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat};
+    let mut p = CodecParameters::video(CodecId::new("prores"));
+    p.media_type = MediaType::Video;
+    p.width = Some(W);
+    p.height = Some(H);
+    p.pixel_format = Some(PixelFormat::Yuv444P);
+    let mut enc = oxideav_prores::encoder::make_encoder_with_config(&p, cfg).expect("make encoder");
+    enc.send_frame(&Frame::Video(frame.clone())).expect("send");
+    enc.receive_packet().expect("receive").data
+}
+
+/// The config path with an explicit 8-bit alpha request must emit
+/// byte-identically to `encode_frame_with_alpha` — same SHA constant.
+#[test]
+fn encoder_sha_config_path_alpha_matches_free_function() {
+    use oxideav_prores::encoder::EncoderConfig;
+    let frame = synthetic_yuv444p_8bit_with_alpha();
+    let pkt = config_encode(
+        &frame,
+        EncoderConfig::for_profile(Profile::Prores4444)
+            .with_alpha_channel_type(AlphaChannelType::Eight),
+    );
+    assert_eq!(
+        hex(&sha256(&pkt)),
+        EXPECTED_AP4H_8BIT_QI2_ALPHA8,
+        "config-path alpha bytes diverge from encode_frame_with_alpha"
+    );
+}
+
+/// Auto-detected alpha (4-plane frame, no config request) must be
+/// wire-indistinguishable from the explicit request.
+#[test]
+fn encoder_sha_autodetected_alpha_matches_free_function() {
+    use oxideav_prores::encoder::EncoderConfig;
+    let frame = synthetic_yuv444p_8bit_with_alpha();
+    let pkt = config_encode(&frame, EncoderConfig::for_profile(Profile::Prores4444));
+    assert_eq!(
+        hex(&sha256(&pkt)),
+        EXPECTED_AP4H_8BIT_QI2_ALPHA8,
+        "auto-detected alpha bytes diverge from the explicit request"
+    );
+}
+
+/// Auto-detected 16-bit alpha likewise (2-bytes-per-sample plane).
+#[test]
+fn encoder_sha_autodetected_alpha16_matches_free_function() {
+    use oxideav_prores::encoder::EncoderConfig;
+    let frame = synthetic_yuv444p_8bit_with_alpha16();
+    let pkt = config_encode(&frame, EncoderConfig::for_profile(Profile::Prores4444Xq));
+    assert_eq!(
+        hex(&sha256(&pkt)),
+        EXPECTED_AP4X_8BIT_QI1_ALPHA16,
+        "auto-detected 16-bit alpha bytes diverge from the explicit request"
+    );
+}
+
+/// Config-path interlaced + alpha must match `encode_frame_interlaced`.
+#[test]
+fn encoder_sha_config_path_interlaced_alpha_matches_free_function() {
+    use oxideav_prores::encoder::EncoderConfig;
+    let frame = synthetic_yuv444p_8bit_with_alpha();
+    let pkt = config_encode(
+        &frame,
+        EncoderConfig::for_profile(Profile::Prores4444)
+            .with_alpha_channel_type(AlphaChannelType::Eight)
+            .with_interlace_mode(1),
+    );
+    assert_eq!(
+        hex(&sha256(&pkt)),
+        EXPECTED_AP4H_8BIT_QI2_INTERLACED_TFF_ALPHA8,
+        "config-path interlaced+alpha bytes diverge from encode_frame_interlaced"
+    );
+}
