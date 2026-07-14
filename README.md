@@ -169,6 +169,16 @@ descriptive bytes of a parsed header back into a [`frame::FrameMeta`] so
 a transcode forwards the source's aspect / rate / colour metadata
 verbatim.
 
+**4:4:4 interop note:** the all-zero defaults mean "unknown /
+unspecified" (spec-legal), but at least one common third-party decoder
+resolves *unknown* colour metadata on the 4444 profiles to an RGB (GBR)
+colourspace guess, and its downstream format converter then refuses the
+reserved-primaries combination. When a 4444 / 4444 XQ stream will be
+consumed outside this crate, tag real colour metadata (e.g.
+`color_primaries: 1, transfer_characteristic: 1, matrix_coefficients: 1`
+for BT.709) via `with_meta` — `tests/rate_quality_reference.rs` shows
+the pattern.
+
 [`CodecParameters::frame_rate`]: https://docs.rs/oxideav-core/latest/oxideav_core/struct.CodecParameters.html#structfield.frame_rate
 
 ## Quantization-matrix provenance (RDD 36 §6.1.1 / §7.2)

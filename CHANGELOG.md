@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Encoder-output SHA corpus extension** — pinned SHAs for the
+  Table 14 16-bit alpha codeword family (ap4x progressive) and the
+  interlaced field-pair + alpha combination (ap4h TFF), plus four
+  byte-equivalence pins proving the `EncoderConfig` / registry path
+  emits identical wire bytes to the free functions (explicit alpha,
+  8-/16-bit auto-detection, interlaced + alpha).
 - **Per-profile rate/quality acceptance against black-box reference
   encodes** (`tests/rate_quality_reference.rs`). All six RDD 36
   profiles: a deterministic pseudo-natural 10-bit source is fed

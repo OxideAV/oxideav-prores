@@ -393,3 +393,44 @@ fn undetectable_alpha_stride_is_error() {
         "error must mention alpha detection, got: {msg}"
     );
 }
+
+// ─────────────────── alpha + custom quantisation matrices ───────────────────
+
+#[test]
+fn config_alpha_with_signature_matrices() {
+    // Alpha and loaded quantisation matrices ride in the same frame
+    // header (§6.1.1: alpha_channel_type nibble + load_*_qmat flags +
+    // inline tables). The config path must combine them: signature
+    // matrices for 4444 use the §6.1.1 luma-reuse fallback (flags
+    // (1, 0), an 84-byte header) while alpha adds the per-slice
+    // scanned_alpha() blobs — neither may clobber the other.
+    use oxideav_prores::quant::QuantMatrices;
+    let (w, h) = (W as usize, H as usize);
+    let mut planes = yuv444_8(w, h);
+    let alpha = alpha_plane_8(w, h);
+    let expected_alpha = alpha.data.clone();
+    planes.push(alpha);
+
+    let cfg = EncoderConfig::signature_for_profile(Profile::Prores4444)
+        .with_alpha_channel_type(AlphaChannelType::Eight);
+    let mut enc =
+        make_encoder_with_config(&params(PixelFormat::Yuv444P), cfg).expect("make encoder");
+    enc.send_frame(&frame_with(planes)).expect("send_frame");
+    let pkt = enc.receive_packet().expect("receive_packet");
+
+    let (fh, _) = parse_frame(&pkt.data).expect("parse");
+    assert_eq!(fh.alpha_channel_type, 1, "alpha survives loaded matrices");
+    assert!(
+        fh.load_luma_quantization_matrix,
+        "signature luma matrix must be carried inline"
+    );
+    assert!(
+        !fh.load_chroma_quantization_matrix,
+        "4444 signature chroma reuses luma via the §6.1.1 fallback"
+    );
+    // The carried matrix must be the profile signature, not the default.
+    let sig = QuantMatrices::signature_for_profile(Profile::Prores4444);
+    assert_eq!(fh.luma_qmat, sig.luma, "inline luma table is the signature");
+    // Alpha is lossless regardless of the colour quantisation choice.
+    assert_alpha8_exact(&pkt.data, &expected_alpha);
+}
