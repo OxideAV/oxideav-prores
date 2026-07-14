@@ -62,11 +62,27 @@ The 4444 / 4444 XQ profiles support a per-pixel alpha channel coded
 losslessly per RDD 36 §5.3.3 + §7.1.2 (raster-scan run-length code +
 differential VLC, Tables 12-14). Alpha is exposed as a 4th `VideoPlane`
 on the decoded `VideoFrame` (after Y/Cb/Cr); the encoder accepts the
-same shape via [`encoder::encode_frame_with_alpha`]. The core
-`PixelFormat` enum does not yet carry `Yuva422P` / `Yuva444P` variants,
-so pixel-format reporting stays `Yuv4(2|4)4P*` — the caller checks
-`frame.planes.len() == 4` to detect alpha. `FrameHeader::alpha_kind()`
-returns the named Table 7 variant (`None` / `Bits8` / `Bits16`).
+same shape through **both** API levels:
+
+- the free function [`encoder::encode_frame_with_alpha`] (and
+  [`encoder::encode_frame_interlaced`] for field pairs), and
+- the high-level `Encoder` path:
+  [`encoder::EncoderConfig::alpha_channel_type`] /
+  `with_alpha_channel_type(Eight | Sixteen)` requests alpha explicitly,
+  and the default (`None`) **auto-detects** a 4-plane input frame,
+  inferring 8- vs 16-bit alpha from the plane's bytes-per-sample — so a
+  plain registry-built encoder accepts the 4-plane frames this crate's
+  decoder emits, with no config plumbing. Rate control carries the
+  lossless alpha blob through every trial encode. The config path is
+  byte-identical to the free functions
+  (`tests/encoder_output_sha.rs` pins the equivalence by SHA).
+
+A 4:2:2 + alpha stream is emitted as `bitstream_version` 1 per §6.4.
+The core `PixelFormat` enum does not yet carry `Yuva422P` / `Yuva444P`
+variants, so pixel-format reporting stays `Yuv4(2|4)4P*` — the caller
+checks `frame.planes.len() == 4` to detect alpha.
+`FrameHeader::alpha_kind()` returns the named Table 7 variant (`None` /
+`Bits8` / `Bits16`).
 
 ### §7.5.3 scanned-alpha array length (reference-bitstream note)
 
@@ -267,6 +283,12 @@ All controls flow through [`encoder::EncoderConfig`] +
 - **Two-pass rate control** (`with_rate_control`) — per-frame
   binary-search on `quantization_index` to hit `bit_rate / fps` within
   ±5 %, returning the best candidate when the target is unreachable.
+  The search window covers only untried indices, so it always reaches
+  the qi adjacent to the seed
+  (`tests/rate_control.rs::rate_ctrl_reaches_qi_adjacent_to_seed`).
+- **Alpha channel** (`with_alpha_channel_type`, §5.3.3 + §7.1.2) —
+  explicit 8-/16-bit alpha coding of the 4th input plane; the default
+  auto-detects 4-plane frames (see the Alpha plane section above).
 - **Quantisation matrices** (`with_quant_matrices`, §5.3.4 + §7.3) —
   defaults to the flat all-4s matrix; a built-in perceptual preset
   (`EncoderConfig::perceptual` / `perceptual_for_profile`) loads
@@ -407,6 +429,30 @@ for colour and the §5.3.3 / §7.1.2 `scanned_alpha()` code for alpha —
 differential VLC (Table 13 / Table 14, small-magnitude path when the
 difference fits, escape FLC otherwise) plus Table 12 run lengths; both
 are bit-exact with this crate's decoder.
+
+### Rate/quality vs the reference encoder
+
+`tests/rate_quality_reference.rs` measures rate/quality per profile
+head-to-head against black-box reference encodes of a byte-identical
+10-bit source (raw planar file fed to both encoders; every stream
+decoded by the reference decoder and scored as luma PSNR against the
+source). At the equal-rate point (our encoder rate-controlled to the
+reference packet size, signature quantisation matrices) this encoder
+measures **above** the reference on every profile at 256×128:
+
+| Profile  | reference        | ours @ equal rate | Δ PSNR |
+|----------|------------------|-------------------|--------|
+| Proxy    | 3 637 B, 46.2 dB | 3 774 B, 46.4 dB  | +0.2   |
+| LT       | 10 815 B, 51.0 dB| 11 415 B, 54.9 dB | +3.9   |
+| Standard | 15 686 B, 53.8 dB| 14 697 B, 59.3 dB | +5.5   |
+| HQ       | 23 801 B, 59.5 dB| 22 589 B, 67.1 dB | +7.6   |
+| 4444     | 35 893 B, 59.0 dB| 34 556 B, 64.7 dB | +5.7   |
+| 4444 XQ  | 51 640 B, 63.4 dB| 48 572 B, 69.6 dB | +6.2   |
+
+Pinned acceptance bars are looser than the measurements (equal-rate
+within ±20 % of the reference rate and within 6 dB of its PSNR;
+default-qi ≥ 40 dB) so ordinary reference-build drift cannot flake the
+suite.
 
 ## Usage
 
