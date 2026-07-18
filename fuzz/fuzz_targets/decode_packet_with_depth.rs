@@ -27,6 +27,13 @@
 //! both the bit-depth tag and the chroma-format tag from the input's
 //! own bytes and lets the decoder validate / cross-check them against
 //! the parsed frame header.
+//!
+//! One extra tag bit routes the same input through
+//! `decode_packet_with_format` with the alpha-typed `Yuva422P` /
+//! `Yuva444P` surface instead — covering the guaranteed-4-plane
+//! contract (including the synthesised fully-opaque plane when the
+//! attacker's frame header declares `alpha_channel_type == 0`) — and
+//! another selects the §7.5.1 `OutputRange::Video` clamp.
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_prores::{decoder, frame};
@@ -50,24 +57,50 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Derive a (BitDepth, ChromaFormat) tag from the input's own first
-    // byte so libFuzzer can steer mutations toward all six requested
-    // (bit-depth, chroma) combinations. The 7th-12th slots circle back
-    // to the same combos; the only state the harness reads from `data`
-    // is the low 4 bits of byte 0, which is fed back as an attacker-
-    // controlled output-format request, exactly as a container demuxer
-    // would do when it has its own `pixel_format` declaration.
+    // Derive the requested output surface from the input's own first
+    // byte so libFuzzer can steer mutations toward every request shape.
+    // The only state the harness reads from `data` is the low 5 bits of
+    // byte 0, fed back as an attacker-controlled output-format request,
+    // exactly as a container demuxer would do when it has its own
+    // `pixel_format` declaration:
+    //
+    // * bits 0-1 — bit depth (8 / 10 / 12);
+    // * bit 2    — chroma format (4:2:2 / 4:4:4);
+    // * bit 3    — route through the alpha-typed `Yuva4(2|4)4P` surface
+    //   of `decode_packet_with_format` (8-bit, 4 planes guaranteed)
+    //   instead of `decode_packet_with_options`;
+    // * bit 4    — §7.5.1 `OutputRange::Video` clamp instead of `Full`.
     let tag = data.first().copied().unwrap_or(0);
     let bit_depth = match tag & 0x3 {
         0 => decoder::BitDepth::Eight,
         1 => decoder::BitDepth::Ten,
         _ => decoder::BitDepth::Twelve,
     };
-    let chroma_format = if (tag >> 2) & 1 == 0 {
-        frame::ChromaFormat::Y422
-    } else {
+    let y444 = (tag >> 2) & 1 != 0;
+    let chroma_format = if y444 {
         frame::ChromaFormat::Y444
+    } else {
+        frame::ChromaFormat::Y422
+    };
+    let range = if (tag >> 4) & 1 == 0 {
+        decoder::OutputRange::Full
+    } else {
+        decoder::OutputRange::Video
     };
 
-    let _ = decoder::decode_packet_with_depth(data, None, Some((bit_depth, chroma_format)));
+    if (tag >> 3) & 1 == 0 {
+        let _ = decoder::decode_packet_with_options(
+            data,
+            None,
+            Some((bit_depth, chroma_format)),
+            range,
+        );
+    } else {
+        let pf = if y444 {
+            oxideav_core::PixelFormat::Yuva444P
+        } else {
+            oxideav_core::PixelFormat::Yuva422P
+        };
+        let _ = decoder::decode_packet_with_format(data, None, Some(pf), range);
+    }
 });

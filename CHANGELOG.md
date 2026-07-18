@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     4:2:2+alpha version-1 streams, §7.5.2 16→8-bit demotion, chroma
     mismatch and contract-violation errors, rate-control alpha
     carriage, and a registry-built encode→decode round trip.
+  - **Fuzz coverage**: the `decode_packet_with_depth` harness now
+    derives two more request bits from the input — one routes through
+    `decode_packet_with_format` with the alpha-typed `Yuva4(2|4)4P`
+    surface (guaranteed-4-plane contract incl. the synthesised opaque
+    plane), the other selects the §7.5.1 `OutputRange::Video` clamp —
+    so the typed path and both clamp modes get adversarial coverage.
   - **Black-box validation both directions**: the encoder-alpha
     cross-decode driver now also runs with `pixel_format = Yuva444P`
     and no alpha config at all (progressive, interlaced TFF,

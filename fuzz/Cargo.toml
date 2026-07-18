@@ -33,6 +33,10 @@ cargo-fuzz = true
 # attacker-controlled buffer the size of the declared width × height.
 [dependencies]
 libfuzzer-sys = "0.4"
+# The `decode_packet_with_depth` harness feeds the alpha-typed
+# `PixelFormat::Yuva4(2|4)4P` request shapes through
+# `decode_packet_with_format`, and the enum lives in oxideav-core.
+oxideav-core = "0.1"
 
 [dependencies.oxideav-prores]
 path = ".."
