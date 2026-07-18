@@ -6,7 +6,8 @@ Pure-Rust **Apple ProRes** codec — decoder + encoder for all six
 ProRes video profiles (422 Proxy / LT / Standard / HQ and 4444 /
 4444 XQ). 8-bit, 10-bit, and 12-bit Y'CbCr; lossless alpha plane on the
 4444 / 4444 XQ profiles, with an alpha-typed `Yuva422P` / `Yuva444P`
-frame surface on both codec directions.
+frame surface on both codec directions. Progressive and interlaced
+(TFF/BFF) in every profile.
 
 Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace)
 framework but usable standalone. Implemented from SMPTE RDD 36 (no C
@@ -25,507 +26,28 @@ Every profile decodes and encodes.
 | 4444           | `ap4h` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  |
 | 4444 XQ        | `ap4x` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  |
 
-The `Yuv*` formats optionally carry alpha as an untyped 4th plane; the
-alpha-typed `Yuva422P` / `Yuva444P` formats make the 4-plane layout a
-contract on both codec directions (see the Alpha plane section).
+## Using it through the oxideav framework
 
-Both progressive and interlaced (top-field-first / bottom-field-first)
-modes decode and encode across all six profiles.
-
-## Bit depth
-
-Bit-depth selection follows the stream's `CodecParameters::pixel_format`
-— RDD 36 §5 carries no per-frame bit-depth syntax element; §7.5.1
-defines the conversion from reconstructed component values to pixel
-samples of arbitrary bit depth `b`. Pass `Yuv422P10Le` / `Yuv444P10Le`
-for 10-bit planar output (LE u16, range `0..=1023`), `Yuv422P12Le` /
-`Yuv444P12Le` for 12-bit (`0..=4095`), or `Yuv422P` / `Yuv444P` (or omit
-`pixel_format`) for 8-bit.
-
-## Output range (RDD 36 §7.5.1)
-
-The reconstructed-value → pixel-sample conversion `s = clamp(round(2^b *
-(v + 256) / 512))` of §7.5.1 offers two clamp choices. The decoder
-exposes both through [`decoder::OutputRange`]:
-
-- **`Full`** (default) — `nmin = 0`, `nmax = 2^b − 1`; samples utilise
-  all available quantization levels. Byte-identical to the prior
-  behaviour, so [`decoder::decode_packet_with_depth`] and the registry
-  path are unchanged.
-- **`Video`** — `nmin = 1`, `nmax = 2^b − 2`; confines colour samples to
-  the permissible video quantization levels, avoiding the BT.601/BT.709
-  synchronization/timing reference codes (the extreme codes `0` and
-  `2^b − 1`).
-
-Select it via [`decoder::decode_packet_with_options`] or
-`ProResDecoder::set_output_range` on the direct API. The choice affects
-only the Y/Cb/Cr clamp bounds; entropy decode, inverse quantisation, the
-IDCT, and the alpha plane (§7.5.2 always maps the full opacity range) are
-unaffected.
-
-## Alpha plane
-
-The 4444 / 4444 XQ profiles support a per-pixel alpha channel coded
-losslessly per RDD 36 §5.3.3 + §7.1.2 (raster-scan run-length code +
-differential VLC, Tables 12-14). Alpha is exposed as a 4th `VideoPlane`
-on the decoded `VideoFrame` (after Y/Cb/Cr); the encoder accepts the
-same shape through **both** API levels:
-
-- the free function [`encoder::encode_frame_with_alpha`] (and
-  [`encoder::encode_frame_interlaced`] for field pairs), and
-- the high-level `Encoder` path:
-  [`encoder::EncoderConfig::alpha_channel_type`] /
-  `with_alpha_channel_type(Eight | Sixteen)` requests alpha explicitly,
-  and the default (`None`) **auto-detects** a 4-plane input frame,
-  inferring 8- vs 16-bit alpha from the plane's bytes-per-sample — so a
-  plain registry-built encoder accepts the 4-plane frames this crate's
-  decoder emits, with no config plumbing. Rate control carries the
-  lossless alpha blob through every trial encode. The config path is
-  byte-identical to the free functions
-  (`tests/encoder_output_sha.rs` pins the equivalence by SHA).
-
-A 4:2:2 + alpha stream is emitted as `bitstream_version` 1 per §6.4.
-`FrameHeader::alpha_kind()` returns the named Table 7 variant (`None` /
-`Bits8` / `Bits16`).
-
-### Alpha-typed surface (`Yuva422P` / `Yuva444P`)
-
-The core `PixelFormat` enum carries `Yuva422P` / `Yuva444P`
-(oxideav-core ≥ 0.1.30): 8-bit planar Y/Cb/Cr plus a full-resolution
-8-bit alpha plane at index 3. Requesting one of them in
-`CodecParameters::pixel_format` (or via the new free function
-[`decoder::decode_packet_with_format`]) turns the 4-plane layout from a
-probe-the-plane-count convention into a **format contract**:
-
-- **Decode** — the frame *always* has 4 planes. Coded alpha rides
-  plane 3; 16-bit coded alpha (Table 7 type 2) is demoted per §7.5.2
-  (`round(255 · a / 65535)`), mirroring the §7.5.1 demotion Y/Cb/Cr
-  undergo at 8-bit output. A stream with no coded alpha gets a
-  synthesised fully-opaque plane. The chroma format must match the
-  frame header, as for every other request.
-- **Encode** — input frames must carry 4 planes with 1-byte alpha
-  samples; every frame is coded with 8-bit alpha (bitstream version 1
-  per §6.4), and the wire bytes are identical to the free-function /
-  auto-detect paths. A 3-plane frame, a 2-bytes-per-sample alpha
-  plane, or an explicit `AlphaChannelType::Sixteen` config under a
-  `Yuva*` format are each rejected with a self-explaining error.
-
-**Bit-depth policy**: the `Yuva*` formats are defined as 8-bit
-surfaces, so the typed path demotes everything to 8 bits. Deeper
-output — 10-/12-bit Y'CbCr with a §7.5.2-converted 10-/12-bit alpha
-plane, or 16-bit coded alpha input on the encoder — remains available
-through the untyped `Yuv4(2|4)4P{10,12}Le` requests exactly as before
-(4th plane appended when the stream codes alpha, detected via
-`frame.planes.len() == 4`). Carrying RDD 36's up-to-16-bit alpha *in
-the type system* would need `Yuva*P10Le` / `Yuva*P12Le` (and for full
-fidelity `Yuva*P16Le`) core formats, which the enum does not have yet.
-
-### §7.5.3 scanned-alpha array length (reference-bitstream note)
-
-A literal reading of RDD 36 §7.5.3 — the per-slice scanned-alpha array
-"does not include alpha values for the excess row(s) of pixels at the
-bottom of slices with `i = height_in_mb − 1`" — suggests sizing the
-bottom macroblock row's alpha array to the *visible* row count. Real
-ProRes 4444 bitstreams (including the in-tree `4444-with-alpha`
-1920×1080 reference fixture, whose bottom MB row spans only 8 visible
-rows) instead carry the **full 16-row** array and let the decoder
-discard the excess rows on paste, exactly as it already discards the
-excess right-edge *columns*. The §7.5.3 exclusion therefore governs
-which rows a decoder writes to the frame buffer, not the coded array
-length; the codec reads/writes the full 16-row array to stay
-bit-compatible with the reference. `tests/alpha_bit_depth.rs` and
-`tests/interlaced_alpha_partial_field.rs` lock this against
-non-MB-aligned progressive heights and non-MB-aligned interlaced field
-heights respectively (8-bit and 16-bit coded alpha, 8/10/12-bit output).
-
-The conclusion is pinned **directly against the reference bytes** by
-`tests/alpha_array_length_reference.rs`: it pulls the raw
-`scanned_alpha()` blob of a real bottom-MB-row slice out of the
-`4444-with-alpha` `input.mov` and shows that decoding at the
-§7.5.3-literal visible-row length (`128 × 8 = 1024` values) overruns the
-coded run/level stream, while the full MB-row height (`128 × 16 = 2048`
-values) decodes exactly — a single escape diff to `0xFFFF` plus one run
-of 2048. The full-height decode holds for every slice of the bottom MB
-row and for an interior row. So the §7.5.3 exclusion is a *write*
-constraint (which rows reach the frame buffer), not a coded-length
-reduction; the array is uniformly `16 * slice_size_in_mb[j] * 16` values.
-This is a standing DOCS-GAP candidate against the §7.5.3 wording.
-
-`tests/alpha_plane_reference.rs` closes the loop end-to-end: it
-reconstructs the entire frame's alpha plane independently from the same
-`4444-with-alpha` bitstream (decode every slice's `scanned_alpha()` blob,
-apply the §7.5.2 conversion, place per §7.5.3 with the excess rows and
-columns discarded — sharing no placement code with the decoder) and
-asserts the **full decoder's** emitted alpha plane matches it
-byte-for-byte across all 1020 slices, including the partial bottom MB
-row. The comparison runs at the native 12-bit and at the 10-/8-bit
-§7.5.2 demote depths the corpus never otherwise exercises.
-
-## Frame-header metadata (RDD 36 §5.1.1 / §6.2)
-
-The encoder fills the descriptive frame-header fields
-(`aspect_ratio_information`, `frame_rate_code`, `color_primaries`,
-`transfer_characteristic`, `matrix_coefficients`) automatically from
-[`CodecParameters::frame_rate`], or explicitly via
-[`encoder::EncoderConfig::with_meta`]:
+You don't register anything yourself: `oxideav-meta`'s
+`register_all(&mut RuntimeContext)` sets up every enabled sibling, and
+ProRes tracks inside MOV/MP4/MKV then route here through the generic
+demux→decode flow. The codec id is `"prores"`; all frames are intra
+(keyframe-only).
 
 ```rust
-use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
-use oxideav_prores::frame::FrameMeta;
+use oxideav_core::{CodecId, CodecParameters, PixelFormat, RuntimeContext};
 
-let cfg = EncoderConfig::default().with_meta(FrameMeta {
-    aspect_ratio_information: 3,  // 16:9
-    frame_rate_code: 8,          // 60 fps
-    color_primaries: 9,          // BT.2020
-    transfer_characteristic: 16, // SMPTE ST 2084 (PQ)
-    matrix_coefficients: 9,      // BT.2020 NCL
-});
-let enc = make_encoder_with_config(&params, cfg)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
+let mut ctx = RuntimeContext::new();
+oxideav_meta::register_all(&mut ctx);
 
-Each descriptive field has a symmetric forward/reverse helper pair and a
-typed accessor on the parsed `FrameHeader` returning `Option<…>` — the
-outer-Option discriminant distinguishes the spec's "unknown /
-unspecified" codes from named values:
+let mut params = CodecParameters::video(CodecId::new("prores"));
+params.width = Some(1920);
+params.height = Some(1080);
+params.pixel_format = Some(PixelFormat::Yuv422P);
+params.bit_rate = Some(220_000_000); // -> 422 HQ
 
-- `frame_rate` ⇄ [`frame::rational_from_frame_rate_code`] /
-  [`frame::frame_rate_code_from_rational`] (Table 4).
-- `aspect_ratio` ⇄ [`frame::aspect_ratio_from_code`] (Table 3).
-- `color_primaries_kind` → [`frame::ColorPrimaries`] (Table 5).
-- `matrix_coefficients_kind` → [`frame::MatrixCoefficients`] (Table 6,
-  with `luma_coefficients()` returning the K_R/K_G/K_B triple).
-- `transfer_characteristic_kind` → [`frame::TransferCharacteristic`]
-  (§6.1.1: BT.1886 / ST 2084 / HLG).
-- `encoder_identifier` / `encoder_identifier_str` (§6.1.1 f(32) FourCC;
-  this crate writes [`frame::ENCODER_IDENTIFIER`] = `oxav`).
-
-For the re-encode direction, [`FrameHeader::meta`] folds all five
-descriptive bytes of a parsed header back into a [`frame::FrameMeta`] so
-a transcode forwards the source's aspect / rate / colour metadata
-verbatim.
-
-**4:4:4 interop note:** the all-zero defaults mean "unknown /
-unspecified" (spec-legal), but at least one common third-party decoder
-resolves *unknown* colour metadata on the 4444 profiles to an RGB (GBR)
-colourspace guess, and its downstream format converter then refuses the
-reserved-primaries combination. When a 4444 / 4444 XQ stream will be
-consumed outside this crate, tag real colour metadata (e.g.
-`color_primaries: 1, transfer_characteristic: 1, matrix_coefficients: 1`
-for BT.709) via `with_meta` — `tests/rate_quality_reference.rs` shows
-the pattern.
-
-[`CodecParameters::frame_rate`]: https://docs.rs/oxideav-core/latest/oxideav_core/struct.CodecParameters.html#structfield.frame_rate
-
-## Quantization-matrix provenance (RDD 36 §6.1.1 / §7.2)
-
-The frame header carries two flags, `load_luma_quantization_matrix` and
-`load_chroma_quantization_matrix`, that select whether each component's
-quantization weight matrix is custom (carried inline) or the §7.2
-default (all 64 weights = 4). The chroma side has a §6.1.1 wrinkle: when
-its flag is `0`, the *luma* matrix is reused for chroma — which is itself
-the custom luma matrix if that flag is `1`, else the default.
-
-Both raw flags are now surfaced on the parsed [`frame::FrameHeader`]
-(`load_luma_quantization_matrix` / `load_chroma_quantization_matrix`),
-and [`FrameHeader::quantization_matrix_source`] folds the chroma
-derivation into the [`frame::QuantizationMatrixSource`] enum
-(`CustomChroma` / `LumaCustom` / `Default`) for stream-inspection and
-transcode-provenance callers. The decoder already applies the §6.1.1
-fallback when reconstructing `chroma_qmat`; this only exposes which of
-the three cases produced it.
-
-### Encoder minimal carriage
-
-The encoder emits the **smallest** §6.1.1 carriage that reproduces the
-configured matrix pair, via [`quant::QuantMatrices::wire_flags`]:
-`load_luma_quantization_matrix` is set iff the luma matrix differs from
-the §7.2 all-4s default, and `load_chroma_quantization_matrix` iff the
-chroma matrix differs from the effective luma matrix. A frame therefore
-carries 0, 1, or 2 tables (a 20-, 84-, or 148-byte frame header):
-
-| luma vs default | chroma vs luma | flags   | frame header | reconstruction                     |
-|-----------------|----------------|---------|--------------|------------------------------------|
-| equal           | equal          | `(0,0)` | 20 B         | luma = default, chroma = default   |
-| equal           | differs        | `(0,1)` | 84 B         | luma = default, chroma = custom    |
-| differs         | equal          | `(1,0)` | 84 B         | luma = custom, chroma = luma (§6.1.1) |
-| differs         | differs        | `(1,1)` | 148 B        | both custom                        |
-
-This includes the `(0,1)` "default luma, custom chroma" form (a single
-64-byte table). All four combinations reconstruct exactly `(luma,
-chroma)` at the decoder. `tests/quant_matrix_carriage.rs` pins the flags
-/ source enum / header size / reconstructed matrices end-to-end for each
-form; `tests/quant_matrix_fallback.rs` proves each compact form decodes
-**byte-identically** to its explicit both-tables twin (built by splicing
-the omitted table into the compact stream);
-`tests/quant_matrix_interlaced_444.rs` carries the forms through the
-interlaced two-picture and 4:4:4 full-resolution-chroma paths; and
-`tests/quant_matrix_roundtrip_property.rs` proves `wire_flags` and the
-decoder fallback are exact inverses over a broad pseudo-random matrix
-space. The flat and both-custom (perceptual-preset) paths are byte-exact
-with the prior encoder, so every encoder-output SHA is unchanged.
-
-### Explicit both-tables carriage
-
-The reference streams in the corpus always ship **both** tables (flags
-`(1,1)`, a 148-byte frame header), even when the chroma table is a
-byte-for-byte copy of the luma table.
-[`EncoderConfig::with_explicit_qmat_carriage`] opts into that form for
-byte-level header parity with such streams (golden-stream comparison,
-container re-wrap diffing); it is semantically a no-op — the decoder
-reconstructs the identical matrix pair either way, and
-`tests/quant_matrix_explicit_carriage.rs` pins the wire form, the
-pixel-identity with the minimal twin, and the flags/table parity with
-the reference fixture bytes. The default stays minimal, so existing
-output is byte-unchanged.
-
-### Storage order (natural raster, pinned)
-
-RDD 36 stores each 64-byte table in **natural (raster) coefficient
-order**, row-major — the DC weight at index 0, the highest spatial
-frequency at index 63 — and the decoder indexes it directly by natural
-block position at dequantisation time. The block scan applies only to
-*coefficient reading* inside a slice, never to the matrix. (The corpus
-documentation originally described the tables as zigzag-ordered; that
-wording was corrected as corpus Errata E1 — this crate has always used
-natural order.) `tests/quant_matrix_order.rs` pins the order at every
-layer: the encoder's raw wire bytes at the fixed §6.1.1 offsets, the
-natural-order raster fingerprints (2-D monotone gradient, Proxy's
-closed 63-clamp triangle) shown to fail under a scan-order
-reinterpretation, the reference fixtures' raw header bytes, and an
-independent §7.3/§7.4/§7.5.1 reconstruction proving the decoder scales
-the coefficient at natural position `k` by `qmat[k]`.
-
-## Picture geometry (RDD 36 §6.2)
-
-[`FrameHeader::picture_geometry`] folds the §6.2 derivation of the
-*encoded* picture geometry out of the header's source dimensions into a
-[`frame::PictureGeometry`]: `width_in_mb` (`ceil(horizontal_size / 16)`,
-identical for both fields), the per-picture `picture_vertical_size` field
-split for interlaced frames (`top = (h + 1) / 2`, `bottom = h / 2`, with
-the leading field selected by the TFF/BFF `interlace_mode`),
-`height_in_mb`, the trailing field height, and the §6.2 / §7.5.3
-right/bottom crop amounts a decoder discards when the source size is not a
-multiple of 16. The slice-partitioning bridges
-`PictureGeometry::slice_count(log2)` /
-`slices_per_mb_row(log2)` take the picture header's
-`log2_desired_slice_size_in_mb`. This is the geometry the decode loop
-computes internally, surfaced for stream-inspection / muxer / transcode
-callers to size buffers or cross-check container-declared dimensions
-without re-deriving the rounding and field-split rules.
-
-## Encoder controls
-
-All controls flow through [`encoder::EncoderConfig`] +
-[`encoder::make_encoder_with_config`].
-
-- **Quantisation index** (`with_quantization_index`, §7.3 / Table 15) —
-  per-profile defaults `8 / 6 / 4 / 2 / 2 / 1`; valid range `1..=224`.
-- **Macroblocks-per-slice** (`with_mbs_per_slice`, §5.3) — `{1, 2, 4, 8}`,
-  default 8; smaller values trade packet size for error resilience.
-- **Explicit profile** (`with_profile` / `for_profile`) — overrides the
-  `bit_rate` → profile heuristic; the profile's chroma format must match
-  the requested `PixelFormat`.
-- **Two-pass rate control** (`with_rate_control`) — per-frame
-  binary-search on `quantization_index` to hit `bit_rate / fps` within
-  ±5 %, returning the best candidate when the target is unreachable.
-  The search window covers only untried indices, so it always reaches
-  the qi adjacent to the seed
-  (`tests/rate_control.rs::rate_ctrl_reaches_qi_adjacent_to_seed`).
-- **Alpha channel** (`with_alpha_channel_type`, §5.3.3 + §7.1.2) —
-  explicit 8-/16-bit alpha coding of the 4th input plane; the default
-  auto-detects 4-plane frames (see the Alpha plane section above).
-- **Quantisation matrices** (`with_quant_matrices`, §5.3.4 + §7.3) —
-  defaults to the flat all-4s matrix; a built-in perceptual preset
-  (`EncoderConfig::perceptual` / `perceptual_for_profile`) loads
-  JPEG K.1/K.2-derived matrices clamped to the `2..=63` range, blended
-  toward flat in proportion to the profile's quality tier.
-- **Per-profile signature matrices**
-  (`EncoderConfig::signature_for_profile` /
-  `quant::QuantMatrices::signature_for_profile`, §6.1.1 + §7.3) — the
-  native quantisation weight matrix each profile carries in the wild
-  (Proxy's aggressive high-frequency 63-clamp, the Standard/LT
-  low-frequency-preserving shapes, the near-flat HQ / 4444 / 4444 XQ
-  table), so the emitted frame header's `luma_qmat` / `chroma_qmat`
-  match the profile's native signature. Proxy is the only profile whose
-  chroma matrix differs from its luma matrix — it carries both tables;
-  the other five reuse the luma matrix for chroma via the §6.1.1
-  fallback (an 84-byte header). RDD 36 stores the matrix in natural
-  (row-major) order — DC weight at index 0, highest spatial frequency at
-  index 63 — which is exactly the order the decoder applies it in;
-  `quant::QuantMatrices::from_header` recovers the pair a parsed header
-  carries so a transcode can forward the source's exact matrices. Every
-  signature constant is pinned byte-for-byte against the reference
-  corpus fixtures by `tests/quant_matrix_signature.rs`.
-- **Constant-frame-size stuffing** (`with_min_frame_size`, §5.1.2 +
-  §6.1.2) — pads short frames up to a minimum on-wire `frame_size`; a
-  padded frame decodes bit-identically to its unpadded twin.
-- **Interlacing** (`with_interlace_mode` / [`encoder::encode_frame_interlaced`],
-  §5.1 / §6.2 / §7.5.3) — 0 progressive, 1 TFF, 2 BFF; value 3 reserved.
-
-The encoder validates its inputs up front: `quantization_index` (`1..=224`),
-`mbs_per_slice` (`{1, 2, 4, 8}`), `interlace_mode` (`0..=2`), quant-matrix
-weights (`2..=63`), and — since the RDD 36 §6.1.1 `horizontal_size` /
-`vertical_size` fields are u16 — frame dimensions in `1..=65535` (an
-out-of-range width/height is refused rather than truncated into the header).
-
-## Bitstream conformance (RDD 36 §6.4)
-
-The decoder enforces every "decoder shall refuse" clause:
-
-| Spec clause | Constraint |
-|-------------|-----------|
-| §6.1.1 `bitstream_version` | reject any value > 1 |
-| §6.4 v0 stream rules | a v0 stream must be 4:2:2 with no alpha |
-| §6.1.1 Table 2 `interlace_mode` | value 3 reserved |
-| §6.1.1 qmat entries | every entry in `2..=63` |
-
-The encoder picks the lowest legal `bitstream_version` (v0 for 4:2:2
-no-alpha; v1 otherwise). Typed accessors `FrameHeader::interlace_kind`,
-`PictureHeader::mbs_per_slice`, and `SliceHeader::qscale` fold the
-respective reverse mappings onto the parsed headers.
-
-### Version-variant forward compatibility (RDD 36 §6.4)
-
-§6.4 lets a future *version variant* append informative bytes after a
-structure's defined syntax without breaking existing decoders, and
-mandates that "decoders shall use the specified size — rather than
-inference from the syntax itself — to determine the start of the
-immediately following syntax structure." The decoder therefore locates
-the next `picture()` (the second field of an interlaced frame) from the
-first picture's **declared** `picture_size` (§6.2.1) rather than from the
-sum of the picture header, slice table, and slice payloads it parsed: a
-stream that carries `picture_size > header + slice_table + Σslice` (the
-trailing variant bytes) decodes identically to its base-bitstream twin,
-while a stream whose parsed payload *exceeds* its declared `picture_size`
-is refused as corrupt. Base bitstreams (where the two totals are equal)
-are byte-unaffected.
-
-The same declared-size advance is honoured at the **frame-header** (§6.1.1
-`frame_header_size`) and **slice-header** (§6.3.1 `slice_header_size`)
-levels: the first `picture()` starts at `frame_header_size`, and each
-slice's compressed luma data starts at `slice_header_size`, so a version
-variant that appends informative bytes inside either header decodes
-identically to its base twin. `tests/version_variant_picture.rs` injects
-filler at all three levels (frame header — progressive + interlaced —
-picture, and slice header), bumping the enclosing size fields in lock-step,
-and asserts byte-identical output; it also pins the inverse guard (a
-declared `picture_size` smaller than the real payload is rejected).
-
-## ProRes RAW is detected and refused
-
-Apple **ProRes RAW** (`aprn` / `aprh`) is a separate format outside the
-scope of SMPTE RDD 36. This crate refuses it cleanly at the FourCC level
-([`is_prores_raw_fourcc`] / [`PRORES_RAW_FOURCCS`]) and in-stream (the
-`aprh` marker at the `icpf` offset yields a specific `Unsupported`
-error), so a dispatcher can tell "ProRes RAW, unsupported" apart from
-"not ProRes at all" rather than mis-decoding it.
-
-ProRes RAW has **no public bitstream specification**: there is no
-SMPTE-registered document for it (RDD 36 explicitly scopes itself to
-the six YUV/RGB profiles), and the only document Apple publishes is a
-marketing white paper with no frame/slice syntax, entropy coding,
-transform, or quantisation description (see the corpus
-source-provenance note `docs/video/prores/prores-raw-provenance.md`).
-There is therefore no normative source to implement it from; the clean
-typed refusal above is the correct and final behaviour until an actual
-specification exists.
-
-## FourCC routing helpers
-
-The crate root exposes the FourCC ⇄ profile mapping in both directions
-so a demuxer and muxer share one source of truth:
-[`profile_for_fourcc`] / [`codec_id_for_fourcc`] (on-wire → profile /
-codec id) and [`fourcc_for_profile`] (encoder profile → canonical
-lowercase FourCC), with [`PRORES_FOURCCS`] listing the six codes. The
-QuickTime / MXF sample-table assembly itself lives in the container
-crate.
-
-## Interop validation
-
-The crate self-roundtrips every profile bit-exactly and cross-decodes
-against an external ProRes decoder (used as a black-box validator only,
-no source consulted) across 8-/10-/12-bit, progressive and interlaced
-(TFF/BFF), and 4444 ± alpha at 58–65 dB luma PSNR. In-tree fixtures
-under `docs/video/prores/fixtures/` ship a reference YUV sidecar with a
-pinned SHA; `tests/{progressive,interlaced}_decode_sha.rs` and
-`tests/encoder_output_sha.rs` lock the decode and encode byte streams,
-reporting the fixture's fixed-point reference SHA alongside ours so the
-~1-LSB float-vs-fixed IDCT divergence permitted by §7.4 stays visible.
-`tests/idct_annex_a.rs` runs the full RDD 36 Annex A IDCT accuracy
-qualification against the production [`dct::idct8x8`] — all five
-acceptance criteria hold with large margin. `tests/alpha_bit_depth.rs`
-(plus white-box unit tests in `decoder.rs`) lock the §7.5.2 decoded-alpha
-→ pixel-alpha bit-depth conversion `alphaSample = round((2^b − 1) *
-alpha ÷ mask)` without the external validator: an 8-bit-alpha 4444 frame
-decoded at 8-/10-/12-bit output matches the §7.5.2 formula exactly (alpha
-is coded losslessly per §7.1.2), covering the identity, promotion,
-demotion, endpoint, and round-half-up cases — including non-MB-aligned
-progressive heights and widths (`tests/roundtrip.rs` covers the §7.5.3
-partial-bottom-MB-row array, the right-edge column exclusion, and a
-both-axes-partial corner MB with 16→12-bit demotion). The interlaced
-counterpart in `tests/interlaced_alpha_partial_field.rs` combines the
-§6.2 field split, the §7.5.3 top/bottom deinterleave, and the partial-row
-alpha array across TFF/BFF at 8/10/12-bit output for **both** 8-bit
-(Table 13) and 16-bit (Table 14) coded alpha, and at a non-MB-aligned
-width as well as a non-MB-aligned field height (the per-field corner MB).
-
-Streams produced by this crate's encoder use the spec's entropy coder
-for colour and the §5.3.3 / §7.1.2 `scanned_alpha()` code for alpha —
-differential VLC (Table 13 / Table 14, small-magnitude path when the
-difference fits, escape FLC otherwise) plus Table 12 run lengths; both
-are bit-exact with this crate's decoder.
-
-The alpha-typed surface is black-box validated in both directions:
-streams from a `Yuva444P`-typed encoder (progressive, interlaced,
-rate-controlled) decode in the external validator with the lossless
-alpha recovered exactly, and an externally encoded ap4h +
-16-bit-alpha gradient decoded through `Yuva444P` matches the external
-decoder's own 8-bit YUVA output — luma measured bit-identical, alpha
-within ±1 code (this crate demotes 16→8 in a single §7.5.2 rounding
-where the external pipeline rounds twice via its 12-bit surface).
-`tests/yuva_pixel_format.rs` additionally pins the typed decode of the
-`4444-with-alpha` reference fixture byte-identical to the untyped
-8-bit decode.
-
-The §6.4 bitstream-version-1 **4:2:2 + alpha** combination — which the
-external toolchain's own encoder cannot produce — is honoured by its
-decoder: a `Yuva422P`-typed encode round-trips through it with the
-alpha plane recovered byte-exactly (the colour metadata must be
-tagged, e.g. BT.709; the 4:4:4 interop note above applies to
-alpha-bearing 4:2:2 as well).
-
-### Rate/quality vs the reference encoder
-
-`tests/rate_quality_reference.rs` measures rate/quality per profile
-head-to-head against black-box reference encodes of a byte-identical
-10-bit source (raw planar file fed to both encoders; every stream
-decoded by the reference decoder and scored as luma PSNR against the
-source). At the equal-rate point (our encoder rate-controlled to the
-reference packet size, signature quantisation matrices) this encoder
-measures **above** the reference on every profile at 256×128:
-
-| Profile  | reference        | ours @ equal rate | Δ PSNR |
-|----------|------------------|-------------------|--------|
-| Proxy    | 3 637 B, 46.2 dB | 3 774 B, 46.4 dB  | +0.2   |
-| LT       | 10 815 B, 51.0 dB| 11 415 B, 54.9 dB | +3.9   |
-| Standard | 15 686 B, 53.8 dB| 14 697 B, 59.3 dB | +5.5   |
-| HQ       | 23 801 B, 59.5 dB| 22 589 B, 67.1 dB | +7.6   |
-| 4444     | 35 893 B, 59.0 dB| 34 556 B, 64.7 dB | +5.7   |
-| 4444 XQ  | 51 640 B, 63.4 dB| 48 572 B, 69.6 dB | +6.2   |
-
-Pinned acceptance bars are looser than the measurements (equal-rate
-within ±20 % of the reference rate and within 6 dB of its PSNR;
-default-qi ≥ 40 dB) so ordinary reference-build drift cannot flake the
-suite.
-
-## Usage
-
-```toml
-[dependencies]
-oxideav-core = "0.1"
-oxideav-codec = "0.1"
-oxideav-prores = "0.0"
+let mut enc = ctx.codecs.make_encoder(&params)?;
+let mut dec = ctx.codecs.make_decoder(&params)?;
 ```
 
 The encoder picks a profile from `pixel_format` + `bit_rate`:
@@ -539,73 +61,179 @@ The encoder picks a profile from `pixel_format` + `bit_rate`:
 | `Yuv444P` / `Yuva444P`  | `>= 400_000_000`           | 4444 XQ  |
 | `Yuv444P` / `Yuva444P`  | anything else              | 4444     |
 
-```rust
-use oxideav_codec::CodecRegistry;
-use oxideav_core::{CodecId, CodecParameters, PixelFormat};
+## Using the codec directly
 
-let mut reg = CodecRegistry::new();
-oxideav_prores::register(&mut reg);
+Without the framework, pull `oxideav-core` for the shared types and use
+the crate's own entry points:
 
-let mut params = CodecParameters::video(CodecId::new("prores"));
-params.width = Some(1920);
-params.height = Some(1080);
-params.pixel_format = Some(PixelFormat::Yuv422P);
-params.bit_rate = Some(220_000_000); // -> 422 HQ
-
-let mut enc = reg.make_encoder(&params)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+```toml
+[dependencies]
+oxideav-core = "0.1"
+oxideav-prores = "0.0"
 ```
 
-All ProRes frames are intra (keyframe-only). Accepted pixel formats:
-`Yuv4(2|4)4P` (8-bit), `Yuv4(2|4)4P10Le` / `Yuv4(2|4)4P12Le`
-(10-/12-bit), and the alpha-typed `Yuva4(2|4)4P` (8-bit, 4-plane
-contract).
+The direct factories `decoder::make_decoder(&params)` /
+`encoder::make_encoder(&params)` take the same `CodecParameters` as
+above; `encoder::make_encoder_with_config(&params, cfg)` adds the
+[`EncoderConfig`](#encoder-controls) knobs, and the free functions
+(`decoder::decode_packet_with_depth` / `decode_packet_with_format` /
+`decode_packet_with_options`, `encoder::encode_frame_with_alpha` /
+`encode_frame_interlaced`) work packet-by-packet with no state beyond
+the call. See [docs.rs](https://docs.rs/oxideav-prores) for the full
+surface.
 
-## Performance
+## Bit depth and output range
 
-Criterion benchmarks cover the decode and encode hot paths. Inputs are
-synthesised in-process via this crate's own encoder (no external
-fixtures). The decoder and encoder both probe each 8×8 block and
-dispatch to a constant-time fast path — `dct::idct8x8_dc_only` (all 63
-AC = 0) on decode, `dct::fdct8x8_constant` (all 64 samples identical) on
-encode — each verified bit-exact against the general DCT loops.
+RDD 36 carries no per-frame bit-depth syntax; §7.5.1 defines the
+conversion to samples of arbitrary depth `b`. Request the depth via
+`CodecParameters::pixel_format`: `Yuv422P`/`Yuv444P` (or nothing) for
+8-bit, `*P10Le` for 10-bit (`0..=1023`), `*P12Le` for 12-bit
+(`0..=4095`).
 
-```sh
-cargo bench --bench decode -- --warm-up-time 1 --measurement-time 3
-cargo bench --bench encode -- --warm-up-time 1 --measurement-time 3
-```
+The §7.5.1 clamp has two spec-offered choices, exposed as
+`decoder::OutputRange`: **`Full`** (default — samples use all `2^b`
+levels) and **`Video`** (`1..=2^b−2`, avoiding the BT.601/709
+sync-reference codes). Only the Y/Cb/Cr clamp changes; alpha always
+maps the full opacity range per §7.5.2.
 
-## Fuzzing
+## Alpha
 
-A `cargo-fuzz` harness under `fuzz/` ships five panic-free targets
-driving attacker-controlled bytes through the public decode entry
-points, header parsers, and entropy coders: `decode_packet`,
-`decode_packet_with_depth` (which also derives request bits routing
-through the alpha-typed `Yuva4(2|4)4P` surface of
-`decode_packet_with_format` and the §7.5.1 `OutputRange::Video` clamp),
-`parse_headers`, `decode_entropy` (the §7.1.1 run/level/sign coder),
-and `decode_alpha` (the §7.1.2 alpha VLC).
-Pipeline harnesses bail on `width × height > 65_536` and the
-entropy-coder harnesses cap the declared block / value counts so a
-worker never commits a huge allocation. A daily 30-minute GitHub Actions
-run is scheduled under `.github/workflows/fuzz.yml`.
+4444 / 4444 XQ code a lossless per-pixel alpha channel (§5.3.3 +
+§7.1.2 run-length + differential VLC); 4:2:2 + alpha is emitted as
+`bitstream_version` 1 per §6.4 — a combination this decoder and the
+reference decoder both honour even though common encoders never emit
+it.
 
-```sh
-cd fuzz && cargo +nightly fuzz run decode_packet -- -max_total_time=60
-```
+Two ways to consume/produce it:
 
-The malformed-input behaviour the fuzzers explore is *also* pinned by
-ordinary `cargo test` cases that run in the standard (nightly-free) CI
-matrix, so a refactor of the coders cannot silently regress it even
-between fuzz runs: `tests/entropy_alpha_robustness.rs` asserts the
-§7.1.1 coefficient coder and the §7.1.2 / Table 12-14 alpha coder
-round-trip exactly, terminate at the declared count, and surface a clean
-`Err` (never a panic / debug overflow / out-of-bounds index) on every
-truncation and on a spread of adversarial byte patterns. The
-§7.3 / Table 15 `qScale` map — including its slope-1 → slope-4
-discontinuity at the 128/129 boundary, both printed-anchor rows, and the
-reserved-index `None` arm of `SliceHeader::qscale` — is pinned
-exhaustively over `1..=224` by `tests/qscale_table15.rs`.
+* **Typed contract** — request `Yuva422P` / `Yuva444P` (oxideav-core
+  ≥ 0.1.30): decode *always* returns 4 planes (16-bit coded alpha is
+  demoted per §7.5.2, streams without alpha get an opaque plane);
+  encode requires 4-plane 8-bit-alpha input and rejects anything else
+  with a self-explaining error.
+* **Untyped convention** — request `Yuv4(2|4)4P{,10Le,12Le}`: a 4th
+  plane is appended when the stream codes alpha (detect via
+  `planes.len() == 4`), preserving 10/12-bit colour with
+  §7.5.2-converted alpha and 16-bit alpha input on the encoder. Deep
+  *typed* alpha would need `Yuva*P10/12/16Le` core formats (not yet in
+  the enum).
+
+The encoder auto-detects 4-plane input on the config path (8- vs
+16-bit alpha inferred from the plane), and rate control carries the
+lossless alpha blob through every trial. One reference-bitstream
+finding worth knowing: the §7.5.3 per-slice alpha array is always the
+full 16-row macroblock height — the visible-row exclusion governs
+which rows are *written*, not the coded length (pinned directly
+against reference bytes; standing DOCS-GAP candidate on the §7.5.3
+wording).
+
+## Frame-header metadata
+
+The descriptive header fields (aspect ratio, frame rate, colour
+primaries / transfer / matrix) are filled automatically from
+`CodecParameters::frame_rate` or explicitly via
+`EncoderConfig::with_meta(FrameMeta { .. })`. Each field has symmetric
+code⇄value helpers and typed `Option<…>` accessors on the parsed
+`FrameHeader` (Tables 3–6, §6.1.1), and `FrameHeader::meta` folds a
+parsed header back into a `FrameMeta` so a transcode forwards the
+source's metadata verbatim. This crate writes encoder identifier
+`oxav`.
+
+**4:4:4 interop note:** all-zero (= "unknown") colour metadata is
+spec-legal, but at least one common third-party decoder guesses RGB
+for unknown 4444 metadata and then rejects the stream downstream. Tag
+real metadata (e.g. `1/1/1` for BT.709) via `with_meta` on any 4444 /
+4444 XQ / alpha-bearing stream that leaves this crate.
+
+## Quantisation matrices
+
+The §6.1.1 flags select custom vs default (all-4s) weight matrices,
+with the chroma flag falling back to the *luma* matrix when clear. The
+parsed header exposes both raw flags plus
+`FrameHeader::quantization_matrix_source` (`CustomChroma` /
+`LumaCustom` / `Default`). The encoder emits the smallest carriage
+that reproduces the configured pair (0, 1, or 2 inline tables — 20-,
+84-, or 148-byte header); `EncoderConfig::with_explicit_qmat_carriage`
+opts into the always-both-tables form the reference streams ship, for
+byte-level header parity. Presets: `EncoderConfig::perceptual*`
+(JPEG-derived, quality-blended) and `signature_for_profile` (each
+profile's native in-the-wild matrix, pinned byte-for-byte against the
+reference corpus). Tables are stored in **natural raster order** (DC
+at index 0) — never zigzag.
+
+## Encoder controls
+
+All through `EncoderConfig` + `make_encoder_with_config`:
+
+* `with_quantization_index` — §7.3/Table 15, `1..=224`; per-profile
+  defaults `8/6/4/2/2/1`.
+* `with_mbs_per_slice` — `{1,2,4,8}` (§5.3), default 8.
+* `with_profile` / `for_profile` — override the bit-rate heuristic.
+* `with_rate_control` — two-pass per-frame binary search to
+  `bit_rate / fps` within ±5 %.
+* `with_alpha_channel_type` — explicit 8-/16-bit alpha; default
+  auto-detects 4-plane input.
+* `with_quant_matrices` / `perceptual*` / `signature_for_profile` —
+  see above.
+* `with_min_frame_size` — §5.1.2 constant-frame-size stuffing (padded
+  frames decode bit-identically).
+* `with_interlace_mode` — 0 progressive / 1 TFF / 2 BFF.
+
+Inputs are validated up front (ranges above, matrix weights `2..=63`,
+dimensions `1..=65535` per the u16 header fields — out-of-range is
+refused, never truncated).
+
+## Conformance notes
+
+* Every §6.4 "decoder shall refuse" clause is enforced:
+  `bitstream_version > 1`, v0 streams that aren't 4:2:2-no-alpha,
+  reserved `interlace_mode` 3, matrix entries outside `2..=63`. The
+  encoder picks the lowest legal version (v0 / v1).
+* **Declared-size advance** (§6.4 version-variant forward
+  compatibility): the decoder locates the next syntax structure from
+  the *declared* `frame_header_size` / `picture_size` /
+  `slice_header_size` — never by summing what it parsed — so future
+  version variants that append informative bytes decode identically,
+  while payloads exceeding their declared size are refused as corrupt.
+* `FrameHeader::picture_geometry` surfaces the §6.2 derivation
+  (MB grid, interlaced field split, §7.5.3 crop) for muxer /
+  stream-inspection callers.
+* **ProRes RAW is detected and refused** cleanly (`aprn`/`aprh`
+  FourCCs + in-stream marker → typed `Unsupported`). RAW has no
+  public bitstream specification — no SMPTE document, no published
+  syntax — so a typed refusal is the correct behaviour until one
+  exists.
+* FourCC ⇄ profile routing helpers live at the crate root
+  (`profile_for_fourcc` / `codec_id_for_fourcc` /
+  `fourcc_for_profile`); sample-table assembly belongs to the
+  container crates.
+
+## Validation
+
+Every profile self-roundtrips bit-exactly and cross-decodes against an
+external ProRes decoder (black-box only) at 58–68 dB luma PSNR across
+8/10/12-bit, progressive + interlaced, and 4444 ± alpha; the
+alpha-typed surface is black-box validated in both directions. The
+full RDD 36 Annex A IDCT accuracy qualification passes with margin,
+and reference fixtures under `docs/video/prores/fixtures/` pin decode
+and encode SHAs. At equal rate with signature matrices, the encoder
+measures **above** the reference encoder on every profile:
+
+| Profile  | reference        | ours @ equal rate | Δ PSNR |
+|----------|------------------|-------------------|--------|
+| Proxy    | 3 637 B, 46.2 dB | 3 774 B, 46.4 dB  | +0.2   |
+| LT       | 10 815 B, 51.0 dB| 11 415 B, 54.9 dB | +3.9   |
+| Standard | 15 686 B, 53.8 dB| 14 697 B, 59.3 dB | +5.5   |
+| HQ       | 23 801 B, 59.5 dB| 22 589 B, 67.1 dB | +7.6   |
+| 4444     | 35 893 B, 59.0 dB| 34 556 B, 64.7 dB | +5.7   |
+| 4444 XQ  | 51 640 B, 63.4 dB| 48 572 B, 69.6 dB | +6.2   |
+
+Five panic-free `cargo-fuzz` targets drive the decode entry points,
+header parsers, and entropy coders (30-minute daily CI run), with the
+malformed-input behaviour also pinned by ordinary `cargo test` cases;
+Criterion benches cover the decode/encode hot paths with
+constant-block fast-path dispatch verified bit-exact against the
+general DCT loops.
 
 ## License
 
