@@ -5,10 +5,12 @@
 //! Standard / HQ, fourccs `apco`/`apcs`/`apcn`/`apch`) on 8-bit 4:2:2
 //! input, and the two 4:4:4 profiles (4444 / 4444 XQ, `ap4h`/`ap4x`) on
 //! 8-bit 4:4:4 input. Each profile is benched at its default
-//! `quantization_index`. Two extra cases exercise the deeper-bit and
-//! interlaced paths: a 10-bit 4:2:2 Standard encode and an interlaced
-//! (top-field-first) 8-bit 4:2:2 Standard encode (field-split per
-//! §7.5.3, two pictures sharing one frame_header()).
+//! `quantization_index`. Three extra cases exercise the deeper-bit,
+//! interlaced, and alpha paths: a 10-bit 4:2:2 Standard encode, an
+//! interlaced (top-field-first) 8-bit 4:2:2 Standard encode
+//! (field-split per §7.5.3, two pictures sharing one frame_header()),
+//! and an 8-bit 4:4:4 + alpha 4444 encode (the §5.3.3 / §7.1.2
+//! lossless alpha coder on top of the ap4h colour baseline).
 //!
 //! Every input is synthesized in-process, so the bench needs no
 //! external fixtures.
@@ -23,8 +25,11 @@ use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::VideoFrame;
 
+use oxideav_prores::alpha::AlphaChannelType;
 use oxideav_prores::decoder::BitDepth;
-use oxideav_prores::encoder::{encode_frame_interlaced, encode_frame_with_depth};
+use oxideav_prores::encoder::{
+    encode_frame_interlaced, encode_frame_with_alpha, encode_frame_with_depth,
+};
 use oxideav_prores::frame::{ChromaFormat, Profile};
 
 const W: u32 = 128;
@@ -220,6 +225,37 @@ fn bench_encode(c: &mut Criterion) {
                 1, // top-field-first
             )
             .expect("encode interlaced")
+        });
+    });
+
+    // 8-bit 4:4:4 + diagonal 8-bit alpha gradient — the §5.3.3 / §7.1.2
+    // lossless alpha coder rides every slice; same colour content as
+    // the ap4h case above, so the delta isolates the alpha coding cost.
+    let src_444_alpha = {
+        let mut src = source_444_8bit(W, H);
+        let (w, h) = (W as usize, H as usize);
+        let mut a = vec![0u8; w * h];
+        for j in 0..h {
+            for i in 0..w {
+                a[j * w + i] = (((i + j) * 255) / (w + h - 2)) as u8;
+            }
+        }
+        src.planes.push(VideoPlane { stride: w, data: a });
+        src
+    };
+    group.bench_function("ap4h_444a_8bit_alpha_128x96", |b| {
+        b.iter(|| {
+            encode_frame_with_alpha(
+                black_box(&src_444_alpha),
+                W,
+                H,
+                ChromaFormat::Y444,
+                BitDepth::Eight,
+                Profile::Prores4444,
+                Profile::Prores4444.default_quant_index(),
+                Some(AlphaChannelType::Eight),
+            )
+            .expect("encode 444 + alpha")
         });
     });
 

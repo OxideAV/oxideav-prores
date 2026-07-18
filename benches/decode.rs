@@ -1,11 +1,14 @@
 //! Criterion benchmark for the ProRes decode hot path.
 //!
-//! Three representative inputs are benched: a 4:2:2 8-bit Standard
-//! (`apcn`) frame, a 4:4:4 8-bit ProRes 4444 (`ap4h`) frame, and a
-//! 4:2:2 10-bit frame decoded to packed-LE `Yuv422P10Le`. Every input
-//! is synthesized in-process via this crate's own encoder, so the bench
-//! needs no external fixtures — the encode cost is paid once during
-//! setup and excluded from the measured region.
+//! Four representative inputs are benched: a 4:2:2 8-bit Standard
+//! (`apcn`) frame, a 4:4:4 8-bit ProRes 4444 (`ap4h`) frame, a
+//! 4:2:2 10-bit frame decoded to packed-LE `Yuv422P10Le`, and a 4:4:4
+//! 8-bit + alpha frame decoded through the alpha-typed `Yuva444P`
+//! surface (adds the §7.1.2 alpha entropy decode + §7.5.2 conversion
+//! to the ap4h baseline). Every input is synthesized in-process via
+//! this crate's own encoder, so the bench needs no external fixtures —
+//! the encode cost is paid once during setup and excluded from the
+//! measured region.
 //!
 //! Run with e.g.:
 //! `cargo bench --bench decode -- --warm-up-time 1 --measurement-time 3`
@@ -19,7 +22,9 @@ use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, Frame, MediaType, PixelFormat, VideoFrame,
 };
 
-use oxideav_prores::decoder::{decode_packet, decode_packet_with_depth, BitDepth};
+use oxideav_prores::decoder::{
+    decode_packet, decode_packet_with_depth, decode_packet_with_format, BitDepth, OutputRange,
+};
 use oxideav_prores::frame::ChromaFormat;
 
 const W: u32 = 128;
@@ -160,6 +165,21 @@ fn bench_decode(c: &mut Criterion) {
     let ap4h = encode_packet(&source_444_8bit(W, H), PixelFormat::Yuv444P);
     // 4:2:2 10-bit, decoded to packed-LE Yuv422P10Le.
     let ten = encode_packet(&source_422_10bit(W, H), PixelFormat::Yuv422P10Le);
+    // 4:4:4 8-bit + diagonal 8-bit alpha gradient, via the alpha-typed
+    // registry surface (same colour content as the ap4h case, so the
+    // delta vs `ap4h_444_8bit` isolates the §7.1.2 alpha decode cost).
+    let ap4h_alpha = {
+        let mut src = source_444_8bit(W, H);
+        let (w, h) = (W as usize, H as usize);
+        let mut a = vec![0u8; w * h];
+        for j in 0..h {
+            for i in 0..w {
+                a[j * w + i] = (((i + j) * 255) / (w + h - 2)) as u8;
+            }
+        }
+        src.planes.push(VideoPlane { stride: w, data: a });
+        encode_packet(&src, PixelFormat::Yuva444P)
+    };
 
     let mut group = c.benchmark_group("decode_frame");
 
@@ -179,6 +199,18 @@ fn bench_decode(c: &mut Criterion) {
                 Some((BitDepth::Ten, ChromaFormat::Y422)),
             )
             .expect("decode 10-bit")
+        });
+    });
+
+    group.bench_function("ap4h_444a_8bit_yuva_128x96", |b| {
+        b.iter(|| {
+            decode_packet_with_format(
+                black_box(&ap4h_alpha),
+                None,
+                Some(PixelFormat::Yuva444P),
+                OutputRange::Full,
+            )
+            .expect("decode ap4h + alpha (Yuva444P)")
         });
     });
 

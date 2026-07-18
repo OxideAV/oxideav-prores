@@ -73,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     metadata must be tagged — the README's 4444 GBR-guess interop
     wrinkle applies to alpha-bearing 4:2:2 too, so the test tags
     BT.709 via `FrameMeta`).
+  - **Alpha-path benchmarks**: `benches/decode.rs` gains
+    `ap4h_444a_8bit_yuva` (the typed `Yuva444P` decode surface) and
+    `benches/encode.rs` gains `ap4h_444a_8bit_alpha` — each pairs with
+    the existing alpha-free ap4h case on identical colour content, so
+    the delta isolates the §7.1.2 alpha coder cost (measured locally
+    at 128×96: decode 96 → 133 µs, encode 112 → 170 µs on a
+    full-range diagonal alpha gradient).
   - **Fuzz coverage**: the `decode_packet_with_depth` harness now
     derives two more request bits from the input — one routes through
     `decode_packet_with_format` with the alpha-typed `Yuva4(2|4)4P`
