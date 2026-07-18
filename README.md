@@ -5,7 +5,8 @@
 Pure-Rust **Apple ProRes** codec — decoder + encoder for all six
 ProRes video profiles (422 Proxy / LT / Standard / HQ and 4444 /
 4444 XQ). 8-bit, 10-bit, and 12-bit Y'CbCr; lossless alpha plane on the
-4444 / 4444 XQ profiles.
+4444 / 4444 XQ profiles, with an alpha-typed `Yuva422P` / `Yuva444P`
+frame surface on both codec directions.
 
 Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace)
 framework but usable standalone. Implemented from SMPTE RDD 36 (no C
@@ -13,14 +14,18 @@ codec libraries linked or wrapped, no `*-sys` crates).
 
 ## Status
 
-| Profile        | FourCC | Pixel formats                                      | State           |
-|----------------|--------|----------------------------------------------------|-----------------|
-| 422 Proxy      | `apco` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`            | decode + encode |
-| 422 LT         | `apcs` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`            | decode + encode |
-| 422 Standard   | `apcn` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`            | decode + encode |
-| 422 HQ         | `apch` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`            | decode + encode |
-| 4444           | `ap4h` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le` (+ alpha)  | decode + encode |
-| 4444 XQ        | `ap4x` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le` (+ alpha)  | decode + encode |
+| Profile        | FourCC | Pixel formats                                        | State           |
+|----------------|--------|------------------------------------------------------|-----------------|
+| 422 Proxy      | `apco` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  | decode + encode |
+| 422 LT         | `apcs` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  | decode + encode |
+| 422 Standard   | `apcn` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  | decode + encode |
+| 422 HQ         | `apch` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  | decode + encode |
+| 4444           | `ap4h` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  | decode + encode |
+| 4444 XQ        | `ap4x` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  | decode + encode |
+
+The `Yuv*` formats optionally carry alpha as an untyped 4th plane; the
+alpha-typed `Yuva422P` / `Yuva444P` formats make the 4-plane layout a
+contract on both codec directions (see the Alpha plane section).
 
 Both progressive and interlaced (top-field-first / bottom-field-first)
 modes decode and encode across all six profiles.
@@ -78,11 +83,40 @@ same shape through **both** API levels:
   (`tests/encoder_output_sha.rs` pins the equivalence by SHA).
 
 A 4:2:2 + alpha stream is emitted as `bitstream_version` 1 per §6.4.
-The core `PixelFormat` enum does not yet carry `Yuva422P` / `Yuva444P`
-variants, so pixel-format reporting stays `Yuv4(2|4)4P*` — the caller
-checks `frame.planes.len() == 4` to detect alpha.
 `FrameHeader::alpha_kind()` returns the named Table 7 variant (`None` /
 `Bits8` / `Bits16`).
+
+### Alpha-typed surface (`Yuva422P` / `Yuva444P`)
+
+The core `PixelFormat` enum carries `Yuva422P` / `Yuva444P`
+(oxideav-core ≥ 0.1.30): 8-bit planar Y/Cb/Cr plus a full-resolution
+8-bit alpha plane at index 3. Requesting one of them in
+`CodecParameters::pixel_format` (or via the new free function
+[`decoder::decode_packet_with_format`]) turns the 4-plane layout from a
+probe-the-plane-count convention into a **format contract**:
+
+- **Decode** — the frame *always* has 4 planes. Coded alpha rides
+  plane 3; 16-bit coded alpha (Table 7 type 2) is demoted per §7.5.2
+  (`round(255 · a / 65535)`), mirroring the §7.5.1 demotion Y/Cb/Cr
+  undergo at 8-bit output. A stream with no coded alpha gets a
+  synthesised fully-opaque plane. The chroma format must match the
+  frame header, as for every other request.
+- **Encode** — input frames must carry 4 planes with 1-byte alpha
+  samples; every frame is coded with 8-bit alpha (bitstream version 1
+  per §6.4), and the wire bytes are identical to the free-function /
+  auto-detect paths. A 3-plane frame, a 2-bytes-per-sample alpha
+  plane, or an explicit `AlphaChannelType::Sixteen` config under a
+  `Yuva*` format are each rejected with a self-explaining error.
+
+**Bit-depth policy**: the `Yuva*` formats are defined as 8-bit
+surfaces, so the typed path demotes everything to 8 bits. Deeper
+output — 10-/12-bit Y'CbCr with a §7.5.2-converted 10-/12-bit alpha
+plane, or 16-bit coded alpha input on the encoder — remains available
+through the untyped `Yuv4(2|4)4P{10,12}Le` requests exactly as before
+(4th plane appended when the stream codes alpha, detected via
+`frame.planes.len() == 4`). Carrying RDD 36's up-to-16-bit alpha *in
+the type system* would need `Yuva*P10Le` / `Yuva*P12Le` (and for full
+fidelity `Yuva*P16Le`) core formats, which the enum does not have yet.
 
 ### §7.5.3 scanned-alpha array length (reference-bitstream note)
 
@@ -440,6 +474,18 @@ differential VLC (Table 13 / Table 14, small-magnitude path when the
 difference fits, escape FLC otherwise) plus Table 12 run lengths; both
 are bit-exact with this crate's decoder.
 
+The alpha-typed surface is black-box validated in both directions:
+streams from a `Yuva444P`-typed encoder (progressive, interlaced,
+rate-controlled) decode in the external validator with the lossless
+alpha recovered exactly, and an externally encoded ap4h +
+16-bit-alpha gradient decoded through `Yuva444P` matches the external
+decoder's own 8-bit YUVA output — luma measured bit-identical, alpha
+within ±1 code (this crate demotes 16→8 in a single §7.5.2 rounding
+where the external pipeline rounds twice via its 12-bit surface).
+`tests/yuva_pixel_format.rs` additionally pins the typed decode of the
+`4444-with-alpha` reference fixture byte-identical to the untyped
+8-bit decode.
+
 ### Rate/quality vs the reference encoder
 
 `tests/rate_quality_reference.rs` measures rate/quality per profile
@@ -475,14 +521,14 @@ oxideav-prores = "0.0"
 
 The encoder picks a profile from `pixel_format` + `bit_rate`:
 
-| `pixel_format` | `bit_rate` hint (bps)      | Profile  |
-|----------------|----------------------------|----------|
-| `Yuv422P`      | `<= 70_000_000`            | Proxy    |
-| `Yuv422P`      | `<= 125_000_000`           | LT       |
-| `Yuv422P`      | `<= 180_000_000` or `None` | Standard |
-| `Yuv422P`      | `> 180_000_000`            | HQ       |
-| `Yuv444P`      | `>= 400_000_000`           | 4444 XQ  |
-| `Yuv444P`      | anything else              | 4444     |
+| `pixel_format`          | `bit_rate` hint (bps)      | Profile  |
+|-------------------------|----------------------------|----------|
+| `Yuv422P` / `Yuva422P`  | `<= 70_000_000`            | Proxy    |
+| `Yuv422P` / `Yuva422P`  | `<= 125_000_000`           | LT       |
+| `Yuv422P` / `Yuva422P`  | `<= 180_000_000` or `None` | Standard |
+| `Yuv422P` / `Yuva422P`  | `> 180_000_000`            | HQ       |
+| `Yuv444P` / `Yuva444P`  | `>= 400_000_000`           | 4444 XQ  |
+| `Yuv444P` / `Yuva444P`  | anything else              | 4444     |
 
 ```rust
 use oxideav_codec::CodecRegistry;
@@ -501,8 +547,10 @@ let mut enc = reg.make_encoder(&params)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-All ProRes frames are intra (keyframe-only); accepted pixel formats are
-`Yuv422P` and `Yuv444P`.
+All ProRes frames are intra (keyframe-only). Accepted pixel formats:
+`Yuv4(2|4)4P` (8-bit), `Yuv4(2|4)4P10Le` / `Yuv4(2|4)4P12Le`
+(10-/12-bit), and the alpha-typed `Yuva4(2|4)4P` (8-bit, 4-plane
+contract).
 
 ## Performance
 
@@ -523,8 +571,11 @@ cargo bench --bench encode -- --warm-up-time 1 --measurement-time 3
 A `cargo-fuzz` harness under `fuzz/` ships five panic-free targets
 driving attacker-controlled bytes through the public decode entry
 points, header parsers, and entropy coders: `decode_packet`,
-`decode_packet_with_depth`, `parse_headers`, `decode_entropy` (the
-§7.1.1 run/level/sign coder), and `decode_alpha` (the §7.1.2 alpha VLC).
+`decode_packet_with_depth` (which also derives request bits routing
+through the alpha-typed `Yuva4(2|4)4P` surface of
+`decode_packet_with_format` and the §7.5.1 `OutputRange::Video` clamp),
+`parse_headers`, `decode_entropy` (the §7.1.1 run/level/sign coder),
+and `decode_alpha` (the §7.1.2 alpha VLC).
 Pipeline harnesses bail on `width × height > 65_536` and the
 entropy-coder harnesses cap the declared block / value counts so a
 worker never commits a huge allocation. A daily 30-minute GitHub Actions
