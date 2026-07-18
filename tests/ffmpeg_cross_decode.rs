@@ -3165,3 +3165,172 @@ fn cross_decode_encoder_alpha_yuva444_typed_rate_controlled() {
 fn cross_decode_encoder_alpha_yuva444_typed_progressive_larger() {
     cross_decode_encoder_alpha(128, 96, 0, false, false, PixelFormat::Yuva444P);
 }
+
+// ───────── alpha-typed 4:2:2 (Yuva422P) — v1 4:2:2+alpha in the reference decoder ─────────
+//
+// RDD 36 §6.4 admits alpha on 4:2:2 chroma at bitstream_version 1. The
+// reference toolchain has no 4:2:2+alpha *encoder* pixel format, so the
+// wild rarely carries such streams — but its decoder honours the frame
+// header: it reports our v1 4:2:2+alpha stream as 4:2:2 10-bit + alpha
+// and recovers the §7.1.2 lossless alpha plane byte-exactly (measured:
+// zero mismatches). One wrinkle: with all-zero ("unknown") colour
+// metadata the reference format converter refuses the stream after its
+// GBR colourspace guess (the same interop wrinkle the README documents
+// for the 4444 profiles), so the encoder tags BT.709 via FrameMeta.
+
+#[test]
+fn cross_decode_encoder_alpha_yuva422_typed_progressive() {
+    use oxideav_prores::frame::FrameMeta;
+
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping Yuva422P typed cross-decode");
+        return;
+    }
+    let (width, height) = (64u32, 48u32);
+    let tmp = tempdir().expect("tempdir");
+    let template_path = tmp.join("tmpl_yuva422_typed.mov");
+    if !ffmpeg_make_template_mov_422_progressive(
+        3, // apch
+        width,
+        height,
+        "yuv422p10le",
+        &template_path,
+    ) {
+        eprintln!("apch template MOV unavailable — skipping");
+        return;
+    }
+    let template = std::fs::read(&template_path).expect("read template");
+
+    // 8-bit 4:2:2 source + diagonal 8-bit alpha gradient.
+    let (w, h) = (width as usize, height as usize);
+    let cw = w / 2;
+    let mut y = vec![0u8; w * h];
+    let mut a = vec![0u8; w * h];
+    for j in 0..h {
+        for i in 0..w {
+            y[j * w + i] = (24 + ((i * 5 + j * 3) % 200)) as u8;
+            a[j * w + i] = (((i + j) * 255) / (w + h - 2)) as u8;
+        }
+    }
+    let src_alpha = a.clone();
+    let src_luma = y.clone();
+    let src = VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane { stride: w, data: y },
+            VideoPlane {
+                stride: cw,
+                data: vec![120u8; cw * h],
+            },
+            VideoPlane {
+                stride: cw,
+                data: vec![136u8; cw * h],
+            },
+            VideoPlane { stride: w, data: a },
+        ],
+    };
+
+    let mut params = CodecParameters::video(CodecId::new("prores"));
+    params.media_type = MediaType::Video;
+    params.width = Some(width);
+    params.height = Some(height);
+    params.pixel_format = Some(PixelFormat::Yuva422P);
+    let cfg = EncoderConfig::for_profile(Profile::Hq).with_meta(FrameMeta {
+        aspect_ratio_information: 0,
+        frame_rate_code: 6, // 25 fps (Table 4)
+        color_primaries: 1,
+        transfer_characteristic: 1,
+        matrix_coefficients: 1,
+    });
+    let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder_with_config");
+    enc.send_frame(&Frame::Video(src)).expect("send_frame");
+    let pkt = enc.receive_packet().expect("receive_packet");
+
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt.data).expect("parse our packet");
+    assert_eq!(fh.chroma_format, ChromaFormat::Y422);
+    assert_eq!(
+        fh.alpha_channel_type, 1,
+        "typed 4:2:2 surface codes 8-bit alpha"
+    );
+    assert_eq!(
+        fh.bitstream_version, 1,
+        "4:2:2 + alpha must be version 1 (§6.4)"
+    );
+
+    let patched = patch_mov_with_packet(&template, &pkt.data);
+    let patched_path = tmp.join("patched_yuva422_typed.mov");
+    std::fs::write(&patched_path, &patched).expect("write patched");
+
+    // Decode via the reference decoder to 8-bit 4:2:2 + alpha planes.
+    let decoded_path = tmp.join("decoded_yuva422_typed.raw");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            patched_path.to_str().unwrap(),
+            "-pix_fmt",
+            "yuva422p",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            decoded_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode");
+    assert!(
+        status.success(),
+        "reference decoder refused our v1 4:2:2+alpha (Yuva422P) packet"
+    );
+    let decoded = std::fs::read(&decoded_path).expect("read decoded");
+    let expected_len = w * h + 2 * (cw * h) + w * h; // Y + Cb + Cr + A, 8-bit
+    assert!(
+        decoded.len() >= expected_len,
+        "expected {} bytes of yuva422p, got {}",
+        expected_len,
+        decoded.len()
+    );
+    let dec_y = &decoded[..w * h];
+    let dec_a = &decoded[w * h + 2 * (cw * h)..expected_len];
+
+    // Alpha: §7.1.2 lossless, same 8-bit surface on both sides —
+    // measured byte-exact; allow ±1 code against reference-build drift.
+    let mut a_abs_err = 0u64;
+    let mut a_max_err = 0u8;
+    for (&ours, &theirs) in src_alpha.iter().zip(dec_a.iter()) {
+        let d = ours.abs_diff(theirs);
+        a_abs_err += d as u64;
+        a_max_err = a_max_err.max(d);
+    }
+    let a_mae = a_abs_err as f64 / (w * h) as f64;
+
+    // Luma PSNR vs the 8-bit source (lossy colour path).
+    let mut se = 0f64;
+    for (&s, &d) in src_luma.iter().zip(dec_y.iter()) {
+        let e = s as f64 - d as f64;
+        se += e * e;
+    }
+    let mse = se / (w * h) as f64;
+    let psnr = if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (255.0f64 * 255.0 / mse).log10()
+    };
+    eprintln!(
+        "cross-decode Yuva422P typed ({width}x{height}): packet={} bytes, luma \
+         PSNR={psnr:.2} dB, alpha MAE={a_mae:.4}, max |err|={a_max_err}",
+        pkt.data.len()
+    );
+    assert!(
+        a_max_err <= 1 && a_mae < 0.01,
+        "4:2:2 typed-surface alpha not recovered by the reference decoder \
+         (MAE={a_mae:.4}, max |err|={a_max_err})"
+    );
+    assert!(
+        psnr >= 30.0,
+        "4:2:2 typed-surface luma PSNR {psnr:.2} dB under 30 dB bar"
+    );
+}

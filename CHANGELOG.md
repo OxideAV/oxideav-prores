@@ -60,6 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     path, and the in-tree `4444-with-alpha` 1920×1080 reference
     fixture (real third-party encoder bytes, 16-bit coded alpha) pins
     the typed decode byte-identical to the untyped 8-bit decode.
+  - **§7.5.1 Video clamp × typed surface**: `OutputRange::Video`
+    confines Y/Cb/Cr to `1..=254` on the `Yuva444P` surface while the
+    alpha plane stays byte-exact across the full opacity range
+    (extreme codes 0 and 255 included) — §7.5.2 is clamp-independent.
+  - **4:2:2 + alpha externally validated**: the reference decoder
+    honours our bitstream-version-1 4:2:2+alpha frame header (a
+    combination its own encoder cannot produce), reporting the stream
+    as 4:2:2 + alpha and recovering the §7.1.2 lossless plane
+    byte-exactly from a `Yuva422P`-typed encode
+    (`cross_decode_encoder_alpha_yuva422_typed_progressive`; colour
+    metadata must be tagged — the README's 4444 GBR-guess interop
+    wrinkle applies to alpha-bearing 4:2:2 too, so the test tags
+    BT.709 via `FrameMeta`).
   - **Fuzz coverage**: the `decode_packet_with_depth` harness now
     derives two more request bits from the input — one routes through
     `decode_packet_with_format` with the alpha-typed `Yuva4(2|4)4P`

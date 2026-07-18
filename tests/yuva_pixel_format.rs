@@ -715,3 +715,82 @@ fn yuva444_typed_surface_on_reference_fixture() {
     assert_eq!(typed.planes[0].data.len(), 1920 * 1080, "8-bit luma size");
     assert_eq!(typed.planes[3].data.len(), 1920 * 1080, "8-bit alpha size");
 }
+
+// ─────────────── §7.5.1 Video clamp × typed surface interplay ───────────────
+
+/// `OutputRange::Video` confines Y/Cb/Cr to `1..=254` at 8-bit output,
+/// but §7.5.2 always maps decoded alpha across the full opacity range —
+/// the typed surface must keep alpha byte-exact (extreme codes 0 and
+/// 255 included) while the colour planes clamp.
+#[test]
+fn yuva444_video_range_clamps_colour_not_alpha() {
+    let (w, h) = (W as usize, H as usize);
+    // Push luma to both extremes so the Video clamp is observable, and
+    // give alpha both extreme codes.
+    let mut y = vec![0u8; w * h];
+    for (i, v) in y.iter_mut().enumerate() {
+        *v = if i % 2 == 0 { 0 } else { 255 };
+    }
+    let planes = vec![
+        VideoPlane { stride: w, data: y },
+        VideoPlane {
+            stride: w,
+            data: vec![128u8; w * h],
+        },
+        VideoPlane {
+            stride: w,
+            data: vec![128u8; w * h],
+        },
+        {
+            let mut a = alpha_plane_8(w, h);
+            a.data[0] = 0;
+            a.data[w * h - 1] = 255;
+            a
+        },
+    ];
+    let src_alpha = planes[3].data.clone();
+    let vf = VideoFrame {
+        pts: Some(0),
+        planes,
+    };
+    let pkt = encode_frame_with_alpha(
+        &vf,
+        W,
+        H,
+        ChromaFormat::Y444,
+        BitDepth::Eight,
+        Profile::Prores4444,
+        Profile::Prores4444.default_quant_index(),
+        Some(AlphaChannelType::Eight),
+    )
+    .expect("encode 4444 + alpha extremes");
+
+    let video = decode_packet_with_format(
+        &pkt,
+        Some(0),
+        Some(PixelFormat::Yuva444P),
+        OutputRange::Video,
+    )
+    .expect("typed decode, Video range");
+    assert_eq!(video.planes.len(), 4);
+    for (p, name) in video.planes.iter().take(3).zip(["Y", "Cb", "Cr"]) {
+        assert!(
+            p.data.iter().all(|&s| (1..=254).contains(&s)),
+            "{name} plane must clamp to the permissible video levels 1..=254"
+        );
+    }
+    assert!(
+        video.planes[0].data.contains(&1) && video.planes[0].data.contains(&254),
+        "premise: the source extremes actually hit the Video clamp bounds"
+    );
+    assert_eq!(
+        video.planes[3].data, src_alpha,
+        "alpha is unaffected by the Video clamp (§7.5.2 full opacity range)"
+    );
+    assert_eq!(video.planes[3].data[0], 0, "extreme alpha code 0 survives");
+    assert_eq!(
+        video.planes[3].data[w * h - 1],
+        255,
+        "extreme alpha code 255 survives"
+    );
+}

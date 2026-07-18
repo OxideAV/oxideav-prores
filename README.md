@@ -486,6 +486,13 @@ where the external pipeline rounds twice via its 12-bit surface).
 `4444-with-alpha` reference fixture byte-identical to the untyped
 8-bit decode.
 
+The §6.4 bitstream-version-1 **4:2:2 + alpha** combination — which the
+external toolchain's own encoder cannot produce — is honoured by its
+decoder: a `Yuva422P`-typed encode round-trips through it with the
+alpha plane recovered byte-exactly (the colour metadata must be
+tagged, e.g. BT.709; the 4:4:4 interop note above applies to
+alpha-bearing 4:2:2 as well).
+
 ### Rate/quality vs the reference encoder
 
 `tests/rate_quality_reference.rs` measures rate/quality per profile
