@@ -794,3 +794,39 @@ fn yuva444_video_range_clamps_colour_not_alpha() {
         "extreme alpha code 255 survives"
     );
 }
+
+// ─────────────── surface-reporting parity pins ───────────────
+
+/// `decode_packet_with_format(None)` must behave exactly like
+/// `decode_packet` (8-bit, chroma from the frame header, alpha plane
+/// only when coded) — the typed entry point is a superset, not a fork.
+#[test]
+fn with_format_none_matches_decode_packet() {
+    let (pkt, _) = packet_4444_alpha8();
+    let a = decode_packet_with_format(&pkt, Some(0), None, OutputRange::Full)
+        .expect("decode with None format");
+    let b = decode_packet(&pkt, Some(0)).expect("decode_packet");
+    assert_eq!(a.planes.len(), b.planes.len());
+    for (i, (pa, pb)) in a.planes.iter().zip(b.planes.iter()).enumerate() {
+        assert_eq!(pa.stride, pb.stride, "plane {i} stride");
+        assert_eq!(pa.data, pb.data, "plane {i} bytes");
+    }
+}
+
+/// A `Yuva444P`-typed encoder reports the typed format in
+/// `output_params()` so a muxer / container layer sees the declared
+/// alpha-carrying surface, not a 3-plane `Yuv444P`.
+#[test]
+fn yuva_encoder_output_params_report_typed_format() {
+    let enc = make_encoder(&params(PixelFormat::Yuva444P)).expect("make_encoder");
+    assert_eq!(
+        enc.output_params().pixel_format,
+        Some(PixelFormat::Yuva444P),
+        "output_params must carry the declared alpha-typed format"
+    );
+    let enc = make_encoder(&params(PixelFormat::Yuva422P)).expect("make_encoder");
+    assert_eq!(
+        enc.output_params().pixel_format,
+        Some(PixelFormat::Yuva422P)
+    );
+}
