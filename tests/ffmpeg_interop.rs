@@ -651,3 +651,135 @@ fn rdd36_decode_apcn_interlaced_from_ffmpeg() {
     // Standard-profile interlaced path at the lower-quality preset.
     try_decode_interlaced(2, 128, 128, true);
 }
+
+// ───────── alpha-typed decode surface (Yuva444P) vs the reference decoder ─────────
+
+/// Decode an externally encoded ap4h + alpha-gradient stream through the
+/// alpha-typed `Yuva444P` surface (8-bit, 4 planes guaranteed) and
+/// cross-check every plane against the reference decoder's own 8-bit
+/// YUVA output of the *same* container.
+///
+/// The stream's coded alpha is 16-bit (the reference 4444 encoder's
+/// native alpha width), so this drives the §7.5.2 16→8-bit demote on a
+/// stream this crate did not produce. Alpha coding is lossless (§7.1.2),
+/// but the two 8-bit surfaces come from different demote chains: this
+/// crate applies §7.5.2 directly (`round(255 * a / 65535)`), while the
+/// reference pipeline decodes alpha to its native 12-bit surface and
+/// *then* format-converts 12 → 8 bits — two roundings instead of one.
+/// The chains agree within ±1 code on every sample (measured: ~32 % of
+/// samples land 1 code apart on a full-range gradient), so the pin is
+/// max |err| ≤ 1 with sub-LSB mean absolute error. The luma plane
+/// differs only by the ±1-LSB float-vs-fixed IDCT divergence §7.4
+/// permits, giving a very high PSNR floor (measured: bit-identical).
+#[test]
+fn rdd36_decode_ap4h_alpha_gradient_yuva444_typed_surface() {
+    use oxideav_core::PixelFormat;
+    use oxideav_prores::decoder::{decode_packet_with_format, OutputRange};
+
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping Yuva444P typed-surface interop test");
+        return;
+    }
+    let (width, height) = (128u32, 128u32);
+    let Some(mov) = ffmpeg_make_prores_ap4h_with_alpha_gradient(width, height) else {
+        eprintln!("ffmpeg ap4h+alphamerge unavailable, skipping");
+        return;
+    };
+    let pkt = extract_prores_packet(&mov).expect("extract icpf");
+
+    // Our decode at the typed 8-bit alpha surface.
+    let frame = decode_packet_with_format(
+        &pkt,
+        Some(0),
+        Some(PixelFormat::Yuva444P),
+        OutputRange::Full,
+    )
+    .unwrap_or_else(|e| panic!("Yuva444P typed decode failed: {e:?}"));
+    let n = (width * height) as usize;
+    assert_eq!(frame.planes.len(), 4, "typed surface must yield 4 planes");
+    for (i, p) in frame.planes.iter().enumerate() {
+        assert_eq!(p.stride, width as usize, "plane {i}: 8-bit full-res stride");
+        assert_eq!(p.data.len(), n, "plane {i}: 8-bit full-res size");
+    }
+
+    // Reference decode of the same container to 8-bit YUVA planes.
+    let tmp = tempdir().expect("tempdir");
+    let mov_path = tmp.join("ap4h_alpha_yuva_typed.mov");
+    std::fs::write(&mov_path, &mov).expect("write mov");
+    let raw_path = tmp.join("ap4h_alpha_yuva_typed.raw");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            mov_path.to_str().unwrap(),
+            "-pix_fmt",
+            "yuva444p",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            raw_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode to yuva444p");
+    assert!(status.success(), "reference decode to yuva444p failed");
+    let raw = std::fs::read(&raw_path).expect("read reference raw");
+    assert!(
+        raw.len() >= n * 4,
+        "expected 4 8-bit planes ({} bytes), got {}",
+        n * 4,
+        raw.len()
+    );
+    let ref_y = &raw[..n];
+    let ref_a = &raw[n * 3..n * 4];
+
+    // Alpha: lossless code, one-rounding (§7.5.2 direct) vs two-rounding
+    // (12-bit surface then 12→8 conversion) demote chains ⇒ ±1 code.
+    let mut a_abs_err = 0u64;
+    let mut a_max_err = 0u8;
+    let mut a_min = u8::MAX;
+    let mut a_max = 0u8;
+    for (&ours, &theirs) in frame.planes[3].data.iter().zip(ref_a.iter()) {
+        let d = ours.abs_diff(theirs);
+        a_abs_err += d as u64;
+        a_max_err = a_max_err.max(d);
+        a_min = a_min.min(ours);
+        a_max = a_max.max(ours);
+    }
+    let a_mae = a_abs_err as f64 / n as f64;
+
+    // Luma: same stream, both decoders — only §7.4 IDCT precision and
+    // any final 8-bit rounding differ.
+    let mut se = 0f64;
+    for (&ours, &theirs) in frame.planes[0].data.iter().zip(ref_y.iter()) {
+        let d = ours as f64 - theirs as f64;
+        se += d * d;
+    }
+    let mse = se / n as f64;
+    let psnr = if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (255.0f64 * 255.0 / mse).log10()
+    };
+    eprintln!(
+        "Yuva444P typed decode vs reference 8-bit YUVA ({width}x{height}): luma \
+         PSNR={psnr:.2} dB, alpha range={a_min}..{a_max}, alpha MAE={a_mae:.4}, \
+         alpha max |err|={a_max_err}"
+    );
+    assert!(
+        a_max - a_min > 128,
+        "decoded alpha gradient range {a_min}..{a_max} is trivial — alpha lost?"
+    );
+    assert!(
+        a_max_err <= 1 && a_mae < 0.5,
+        "typed-surface alpha diverges from the reference decoder beyond the \
+         one-rounding-vs-two demote tolerance (MAE={a_mae:.4}, max |err|={a_max_err})"
+    );
+    assert!(
+        psnr >= 45.0,
+        "same-stream luma PSNR {psnr:.2} dB vs reference decoder is too low"
+    );
+}

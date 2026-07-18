@@ -54,6 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     4:2:2+alpha version-1 streams, §7.5.2 16→8-bit demotion, chroma
     mismatch and contract-violation errors, rate-control alpha
     carriage, and a registry-built encode→decode round trip.
+  - **Black-box validation both directions**: the encoder-alpha
+    cross-decode driver now also runs with `pixel_format = Yuva444P`
+    and no alpha config at all (progressive, interlaced TFF,
+    rate-controlled, larger grid — reference decoder recovers the
+    lossless alpha exactly), and a new interop test decodes an
+    externally encoded ap4h + 16-bit-alpha gradient through the typed
+    surface and compares every plane against the reference decoder's
+    own 8-bit YUVA output (luma measured bit-identical; alpha within
+    ±1 code — this crate demotes 16→8 in one §7.5.2 rounding where
+    the reference pipeline rounds twice via its 12-bit surface).
 - **Encoder-output SHA corpus extension** — pinned SHAs for the
   Table 14 16-bit alpha codeword family (ap4x progressive) and the
   interlaced field-pair + alpha combination (ap4h TFF), plus four

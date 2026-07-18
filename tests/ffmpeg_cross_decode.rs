@@ -2925,13 +2925,17 @@ fn upshift_8_to_12_le(plane8: &[u8]) -> Vec<u8> {
 
 /// Drive the config-path alpha encoder (explicit `Eight`, auto-detected,
 /// progressive or interlaced, optionally rate-controlled) and validate
-/// the emitted stream in the black-box reference decoder.
+/// the emitted stream in the black-box reference decoder. `pixel_format`
+/// selects the declared input surface: the untyped `Yuv444P` (alpha via
+/// config / auto-detection) or the alpha-typed `Yuva444P` (4-plane
+/// contract, alpha coded on every frame).
 fn cross_decode_encoder_alpha(
     width: u32,
     height: u32,
     interlace_mode: u8,
     explicit: bool,
     rate_control: bool,
+    pixel_format: PixelFormat,
 ) {
     if !have_ffmpeg() {
         eprintln!("ffmpeg missing — skipping encoder-alpha cross-decode");
@@ -2964,7 +2968,7 @@ fn cross_decode_encoder_alpha(
     params.media_type = MediaType::Video;
     params.width = Some(width);
     params.height = Some(height);
-    params.pixel_format = Some(PixelFormat::Yuv444P);
+    params.pixel_format = Some(pixel_format);
     let mut cfg = EncoderConfig::for_profile(Profile::Prores4444);
     if explicit {
         cfg = cfg.with_alpha_channel_type(AlphaChannelType::Eight);
@@ -3102,34 +3106,62 @@ fn cross_decode_encoder_alpha(
 
 #[test]
 fn cross_decode_encoder_alpha_progressive_explicit() {
-    cross_decode_encoder_alpha(64, 48, 0, true, false);
+    cross_decode_encoder_alpha(64, 48, 0, true, false, PixelFormat::Yuv444P);
 }
 
 #[test]
 fn cross_decode_encoder_alpha_progressive_autodetect() {
     // No with_alpha_channel_type at all — the 4-plane frame must enable
     // alpha by itself and still produce a reference-decodable stream.
-    cross_decode_encoder_alpha(64, 48, 0, false, false);
+    cross_decode_encoder_alpha(64, 48, 0, false, false, PixelFormat::Yuv444P);
 }
 
 #[test]
 fn cross_decode_encoder_alpha_interlaced_tff() {
-    cross_decode_encoder_alpha(64, 48, 1, true, false);
+    cross_decode_encoder_alpha(64, 48, 1, true, false, PixelFormat::Yuv444P);
 }
 
 #[test]
 fn cross_decode_encoder_alpha_interlaced_bff() {
-    cross_decode_encoder_alpha(64, 48, 2, true, false);
+    cross_decode_encoder_alpha(64, 48, 2, true, false, PixelFormat::Yuv444P);
 }
 
 #[test]
 fn cross_decode_encoder_alpha_rate_controlled() {
     // Rate control + alpha: every trial encode carries the lossless
     // alpha blob and the final packet still decodes externally.
-    cross_decode_encoder_alpha(64, 48, 0, true, true);
+    cross_decode_encoder_alpha(64, 48, 0, true, true, PixelFormat::Yuv444P);
 }
 
 #[test]
 fn cross_decode_encoder_alpha_progressive_larger() {
-    cross_decode_encoder_alpha(128, 96, 0, true, false);
+    cross_decode_encoder_alpha(128, 96, 0, true, false, PixelFormat::Yuv444P);
+}
+
+// ───────── alpha-typed pixel format (Yuva444P) through the Encoder trait ─────────
+//
+// The same driver with `pixel_format = Yuva444P` and no alpha config at
+// all: the typed surface must code alpha purely from the declared
+// format, and the emitted stream must decode in the black-box reference
+// decoder with the alpha recovered exactly (§7.1.2 lossless, §7.5.2
+// 12-bit promote at the reference decoder's output).
+
+#[test]
+fn cross_decode_encoder_alpha_yuva444_typed_progressive() {
+    cross_decode_encoder_alpha(64, 48, 0, false, false, PixelFormat::Yuva444P);
+}
+
+#[test]
+fn cross_decode_encoder_alpha_yuva444_typed_interlaced_tff() {
+    cross_decode_encoder_alpha(64, 48, 1, false, false, PixelFormat::Yuva444P);
+}
+
+#[test]
+fn cross_decode_encoder_alpha_yuva444_typed_rate_controlled() {
+    cross_decode_encoder_alpha(64, 48, 0, false, true, PixelFormat::Yuva444P);
+}
+
+#[test]
+fn cross_decode_encoder_alpha_yuva444_typed_progressive_larger() {
+    cross_decode_encoder_alpha(128, 96, 0, false, false, PixelFormat::Yuva444P);
 }
