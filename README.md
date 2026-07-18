@@ -12,16 +12,18 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace)
 framework but usable standalone. Implemented from SMPTE RDD 36 (no C
 codec libraries linked or wrapped, no `*-sys` crates).
 
-## Status
+## Supported profiles
 
-| Profile        | FourCC | Pixel formats                                        | State           |
-|----------------|--------|------------------------------------------------------|-----------------|
-| 422 Proxy      | `apco` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  | decode + encode |
-| 422 LT         | `apcs` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  | decode + encode |
-| 422 Standard   | `apcn` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  | decode + encode |
-| 422 HQ         | `apch` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  | decode + encode |
-| 4444           | `ap4h` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  | decode + encode |
-| 4444 XQ        | `ap4x` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  | decode + encode |
+Every profile decodes and encodes.
+
+| Profile        | FourCC | Pixel formats                                        |
+|----------------|--------|------------------------------------------------------|
+| 422 Proxy      | `apco` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  |
+| 422 LT         | `apcs` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  |
+| 422 Standard   | `apcn` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  |
+| 422 HQ         | `apch` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  |
+| 4444           | `ap4h` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  |
+| 4444 XQ        | `ap4x` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  |
 
 The `Yuv*` formats optionally carry alpha as an untyped 4th plane; the
 alpha-typed `Yuva422P` / `Yuva444P` formats make the 4-plane layout a
