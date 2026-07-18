@@ -28,10 +28,22 @@
 //! converted to the output bit depth per §7.5.2. The resulting alpha
 //! plane is appended as the **fourth** entry of `VideoFrame::planes`, in
 //! the same per-sample format as the chroma planes (8-bit byte stride for
-//! 8-bit output, 16-bit LE for 10/12-bit). The pixel-format enum still
-//! reports `Yuv4..P*` because the core `PixelFormat` does not yet carry
-//! `Yuva422P`/`Yuva444P` variants — callers detect alpha by checking
-//! `frame.planes.len() == 4`.
+//! 8-bit output, 16-bit LE for 10/12-bit).
+//!
+//! Two request shapes expose it:
+//!
+//! * **Alpha-typed surface** — `PixelFormat::Yuva422P` / `Yuva444P`
+//!   requests an 8-bit four-plane frame whose layout is *guaranteed* by
+//!   the format: decoded alpha rides plane 3 (16-bit coded alpha is
+//!   demoted per §7.5.2), and a stream that carries no coded alpha gets a
+//!   synthesised fully-opaque plane so the declared plane count always
+//!   holds.
+//! * **As-coded surface** — the historical `Yuv4(2|4)4P*` requests append
+//!   the 4th plane only when the stream codes alpha; callers detect it by
+//!   checking `frame.planes.len() == 4`. This remains the only path to
+//!   deeper-than-8-bit alpha output (the §7.5.2 conversion to the 10-/12-
+//!   bit surface), since the core `PixelFormat` enum has no 10/12/16-bit
+//!   `Yuva` variants yet.
 
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::Decoder;
@@ -143,35 +155,55 @@ impl OutputRange {
     }
 }
 
+/// Fully resolved output surface for one decode: bit depth, chroma
+/// format, and whether the caller's requested pixel format *guarantees*
+/// a 4th alpha plane (`Yuva422P` / `Yuva444P`).
+type OutputSurface = (BitDepth, ChromaFormat, bool);
+
+/// Resolve a caller-requested `PixelFormat` to the decoder's output
+/// surface. The third element is `true` for the alpha-typed formats
+/// (`Yuva422P` / `Yuva444P`), whose plane layout promises alpha at plane
+/// index 3 regardless of what the stream carries — see
+/// [`decode_packet_with_format`].
+fn resolve_pixel_format(pf: PixelFormat) -> Result<OutputSurface> {
+    Ok(match pf {
+        PixelFormat::Yuv422P => (BitDepth::Eight, ChromaFormat::Y422, false),
+        PixelFormat::Yuv444P => (BitDepth::Eight, ChromaFormat::Y444, false),
+        PixelFormat::Yuv422P10Le => (BitDepth::Ten, ChromaFormat::Y422, false),
+        PixelFormat::Yuv444P10Le => (BitDepth::Ten, ChromaFormat::Y444, false),
+        PixelFormat::Yuv422P12Le => (BitDepth::Twelve, ChromaFormat::Y422, false),
+        PixelFormat::Yuv444P12Le => (BitDepth::Twelve, ChromaFormat::Y444, false),
+        // Alpha-typed 8-bit surfaces: full-resolution 8-bit alpha as
+        // plane 3. RDD 36 alpha up to 16-bit demotes per §7.5.2, matching
+        // how the Y/Cb/Cr planes demote per §7.5.1 at 8-bit output.
+        PixelFormat::Yuva422P => (BitDepth::Eight, ChromaFormat::Y422, true),
+        PixelFormat::Yuva444P => (BitDepth::Eight, ChromaFormat::Y444, true),
+        other => {
+            return Err(Error::unsupported(format!(
+                "prores decoder: requested pixel_format {other:?} not supported \
+                 (expected Yuv4(2|4)4P / Yuv4(2|4)4P10Le / Yuv4(2|4)4P12Le / Yuva4(2|4)4P)"
+            )));
+        }
+    })
+}
+
 /// Resolve the requested output bit depth + chroma format from a caller's
 /// `CodecParameters::pixel_format`. Returns `Ok(None)` if no pixel
 /// format was set — caller defaults to 8-bit at decode time, derives
 /// chroma from the frame header.
-fn pick_output_format(params: &CodecParameters) -> Result<Option<(BitDepth, ChromaFormat)>> {
-    let Some(pf) = params.pixel_format else {
-        return Ok(None);
-    };
-    Ok(Some(match pf {
-        PixelFormat::Yuv422P => (BitDepth::Eight, ChromaFormat::Y422),
-        PixelFormat::Yuv444P => (BitDepth::Eight, ChromaFormat::Y444),
-        PixelFormat::Yuv422P10Le => (BitDepth::Ten, ChromaFormat::Y422),
-        PixelFormat::Yuv444P10Le => (BitDepth::Ten, ChromaFormat::Y444),
-        PixelFormat::Yuv422P12Le => (BitDepth::Twelve, ChromaFormat::Y422),
-        PixelFormat::Yuv444P12Le => (BitDepth::Twelve, ChromaFormat::Y444),
-        other => {
-            return Err(Error::unsupported(format!(
-                "prores decoder: requested pixel_format {other:?} \
-                 not supported (expected Yuv4(2|4)4P / Yuv4(2|4)4P10Le / Yuv4(2|4)4P12Le)"
-            )));
-        }
-    }))
+fn pick_output_format(params: &CodecParameters) -> Result<Option<OutputSurface>> {
+    params.pixel_format.map(resolve_pixel_format).transpose()
 }
 
 pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
-    let requested = pick_output_format(params)?;
+    let (requested, alpha_typed) = match pick_output_format(params)? {
+        Some((bd, cf, alpha)) => (Some((bd, cf)), alpha),
+        None => (None, false),
+    };
     Ok(Box::new(ProResDecoder {
         codec_id: params.codec_id.clone(),
         requested,
+        alpha_typed,
         range: OutputRange::Full,
         pending: None,
         eof: false,
@@ -187,6 +219,11 @@ pub struct ProResDecoder {
     /// Caller-requested output (bit-depth, chroma) pair. `None` means
     /// "infer from the frame header, default to 8-bit".
     requested: Option<(BitDepth, ChromaFormat)>,
+    /// `true` when the caller requested an alpha-typed pixel format
+    /// (`Yuva422P` / `Yuva444P`): every emitted frame carries exactly 4
+    /// planes, with a synthesised fully-opaque plane when the stream
+    /// codes no alpha.
+    alpha_typed: bool,
     /// RDD 36 §7.5.1 clamp range applied during sample generation.
     range: OutputRange,
     pending: Option<Packet>,
@@ -229,7 +266,13 @@ impl Decoder for ProResDecoder {
                 Err(Error::NeedMore)
             };
         };
-        let vf = decode_packet_with_options(&pkt.data, pkt.pts, self.requested, self.range)?;
+        let vf = decode_packet_inner(
+            &pkt.data,
+            pkt.pts,
+            self.requested,
+            self.range,
+            self.alpha_typed,
+        )?;
         Ok(Frame::Video(vf))
     }
 
@@ -273,6 +316,52 @@ pub fn decode_packet_with_options(
     pts: Option<i64>,
     requested: Option<(BitDepth, ChromaFormat)>,
     range: OutputRange,
+) -> Result<VideoFrame> {
+    decode_packet_inner(data, pts, requested, range, false)
+}
+
+/// Decode a packet to the surface a `PixelFormat` describes — the
+/// free-function twin of the registry path's
+/// `CodecParameters::pixel_format` handling.
+///
+/// Accepts the six `Yuv4(2|4)4P{,10Le,12Le}` requests of
+/// [`decode_packet_with_depth`] plus the alpha-typed 8-bit formats
+/// `Yuva422P` / `Yuva444P`. For the alpha-typed formats the returned
+/// frame *always* has 4 planes:
+///
+/// * a stream that codes alpha (RDD 36 §6.1.1 Table 7,
+///   `alpha_channel_type` 1 or 2) delivers it as plane 3 at 8 bits per
+///   sample, 16-bit coded alpha demoted per §7.5.2 — consistent with the
+///   §7.5.1 demotion the Y/Cb/Cr planes undergo at 8-bit output;
+/// * a stream with no coded alpha gets a synthesised fully-opaque
+///   (all-255) plane, so the declared plane layout is a hard contract.
+///
+/// `None` behaves like [`decode_packet`] (8-bit, chroma from the frame
+/// header, alpha plane only when coded). The chroma format of a `Some`
+/// request must match the frame header's, as elsewhere.
+pub fn decode_packet_with_format(
+    data: &[u8],
+    pts: Option<i64>,
+    pixel_format: Option<PixelFormat>,
+    range: OutputRange,
+) -> Result<VideoFrame> {
+    let (requested, alpha_typed) = match pixel_format.map(resolve_pixel_format).transpose()? {
+        Some((bd, cf, alpha)) => (Some((bd, cf)), alpha),
+        None => (None, false),
+    };
+    decode_packet_inner(data, pts, requested, range, alpha_typed)
+}
+
+/// Shared decode core. `alpha_typed` requests the 4-plane surface
+/// guarantee of the `Yuva*` pixel formats (see
+/// [`decode_packet_with_format`]); the coded-stream handling is
+/// otherwise identical.
+fn decode_packet_inner(
+    data: &[u8],
+    pts: Option<i64>,
+    requested: Option<(BitDepth, ChromaFormat)>,
+    range: OutputRange,
+    alpha_typed: bool,
 ) -> Result<VideoFrame> {
     let (fh, after_frame) = parse_frame(data)?;
 
@@ -453,8 +542,36 @@ pub fn decode_packet_with_options(
             stride: width * bps,
             data: a_cropped,
         });
+    } else if alpha_typed {
+        // The caller's pixel format (`Yuva422P` / `Yuva444P`) promises a
+        // 4-plane layout, but the stream codes no alpha
+        // (alpha_channel_type == 0, §6.1.1 Table 7): synthesise a fully
+        // opaque plane — §7.5.2 maps full opacity to the all-ones code
+        // at the output depth.
+        planes.push(opaque_alpha_plane(width, height, bit_depth));
     }
     Ok(VideoFrame { pts, planes })
+}
+
+/// Build a fully opaque full-resolution alpha plane at the output
+/// depth: every sample is the depth's maximum (§7.5.2 maps full opacity
+/// to `2^b − 1`).
+fn opaque_alpha_plane(width: usize, height: usize, bit_depth: BitDepth) -> VideoPlane {
+    let bps = bit_depth.bytes_per_sample();
+    let max = bit_depth.max_value();
+    let mut data = vec![0u8; width * height * bps];
+    if bps == 1 {
+        data.fill(max as u8);
+    } else {
+        let le = (max as u16).to_le_bytes();
+        for s in data.chunks_exact_mut(2) {
+            s.copy_from_slice(&le);
+        }
+    }
+    VideoPlane {
+        stride: width * bps,
+        data,
+    }
 }
 
 /// Field-row mapping. For progressive: `step=1, offset=0` (rows are

@@ -1,9 +1,9 @@
 //! ProRes encoder following SMPTE RDD 36 §5 + §7.
 //!
-//! Reads a `Yuv422P` or `Yuv444P` `VideoFrame`, walks 16x16 macroblocks,
-//! forward DCTs each 8x8 block, quantises by `qmat * qScale / 8`,
-//! per-component slice-scans, and emits the entropy-coded slice payload
-//! per RDD 36.
+//! Reads a `Yuv422P` / `Yuv444P` (or alpha-typed `Yuva422P` /
+//! `Yuva444P`) `VideoFrame`, walks 16x16 macroblocks, forward DCTs each
+//! 8x8 block, quantises by `qmat * qScale / 8`, per-component
+//! slice-scans, and emits the entropy-coded slice payload per RDD 36.
 
 use std::collections::VecDeque;
 
@@ -532,20 +532,38 @@ pub fn make_encoder_with_config(
         .ok_or_else(|| Error::invalid("prores encoder: missing height"))?;
     let pix = params.pixel_format.unwrap_or(PixelFormat::Yuv422P);
 
-    let (chroma, bit_depth) = match pix {
-        PixelFormat::Yuv422P => (ChromaFormat::Y422, BitDepth::Eight),
-        PixelFormat::Yuv444P => (ChromaFormat::Y444, BitDepth::Eight),
-        PixelFormat::Yuv422P10Le => (ChromaFormat::Y422, BitDepth::Ten),
-        PixelFormat::Yuv444P10Le => (ChromaFormat::Y444, BitDepth::Ten),
-        PixelFormat::Yuv422P12Le => (ChromaFormat::Y422, BitDepth::Twelve),
-        PixelFormat::Yuv444P12Le => (ChromaFormat::Y444, BitDepth::Twelve),
+    let (chroma, bit_depth, alpha_typed) = match pix {
+        PixelFormat::Yuv422P => (ChromaFormat::Y422, BitDepth::Eight, false),
+        PixelFormat::Yuv444P => (ChromaFormat::Y444, BitDepth::Eight, false),
+        PixelFormat::Yuv422P10Le => (ChromaFormat::Y422, BitDepth::Ten, false),
+        PixelFormat::Yuv444P10Le => (ChromaFormat::Y444, BitDepth::Ten, false),
+        PixelFormat::Yuv422P12Le => (ChromaFormat::Y422, BitDepth::Twelve, false),
+        PixelFormat::Yuv444P12Le => (ChromaFormat::Y444, BitDepth::Twelve, false),
+        // Alpha-typed 8-bit input surfaces: 4 planes with a
+        // full-resolution 1-byte-per-sample alpha plane at index 3.
+        // Every frame is coded with alpha (RDD 36 §5.3.3 + §7.1.2) and
+        // therefore emitted as bitstream_version 1 per §6.4.
+        PixelFormat::Yuva422P => (ChromaFormat::Y422, BitDepth::Eight, true),
+        PixelFormat::Yuva444P => (ChromaFormat::Y444, BitDepth::Eight, true),
         other => {
             return Err(Error::unsupported(format!(
                 "prores encoder: pixel format {other:?} not supported \
-                 (expected Yuv4(2|4)4P / Yuv4(2|4)4P10Le / Yuv4(2|4)4P12Le)"
+                 (expected Yuv4(2|4)4P / Yuv4(2|4)4P10Le / Yuv4(2|4)4P12Le / Yuva4(2|4)4P)"
             )));
         }
     };
+    // The Yuva formats define the alpha plane as 8-bit samples, so a
+    // 16-bit alpha coding request cannot read them correctly. A caller
+    // that wants 16-bit coded alpha keeps the 3-plane-format route:
+    // declare `Yuv4(2|4)4P*` and pass a 4-plane frame whose alpha plane
+    // is 16-bit LE (auto-detected), or set the type explicitly.
+    if alpha_typed && config.alpha_channel_type == Some(AlphaChannelType::Sixteen) {
+        return Err(Error::invalid(
+            "prores encoder: pixel_format Yuva4(2|4)4P carries 8-bit alpha samples; \
+             AlphaChannelType::Sixteen would mis-read them — declare a Yuv4(2|4)4P* \
+             pixel_format and supply a 16-bit LE alpha plane instead",
+        ));
+    }
     let profile = if let Some(p) = config.profile {
         if p.chroma_format() != chroma {
             return Err(Error::invalid(format!(
@@ -605,6 +623,7 @@ pub fn make_encoder_with_config(
 
     Ok(Box::new(ProResEncoder {
         alpha_channel_type,
+        alpha_typed,
         output_params,
         width,
         height,
@@ -646,6 +665,11 @@ struct ProResEncoder {
     /// auto-detects from the input frame's plane count per
     /// [`EncoderConfig::alpha_channel_type`].
     alpha_channel_type: Option<AlphaChannelType>,
+    /// `true` when `CodecParameters::pixel_format` was an alpha-typed
+    /// format (`Yuva422P` / `Yuva444P`): every input frame must carry 4
+    /// planes with 8-bit alpha samples, and every emitted frame codes
+    /// alpha.
+    alpha_typed: bool,
     config: EncoderConfig,
     time_base: TimeBase,
     /// Target bytes per frame for rate control, or 0 when disabled.
@@ -666,6 +690,20 @@ impl Encoder for ProResEncoder {
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         match frame {
             Frame::Video(v) => {
+                // An alpha-typed pixel_format (Yuva422P / Yuva444P) is a
+                // hard input contract: 4 planes, 8-bit alpha samples.
+                // Refuse a 3-plane frame up front with a format-specific
+                // message (the generic plane-count check downstream
+                // would fire too, but without saying why 4 planes were
+                // expected).
+                if self.alpha_typed && v.planes.len() != 4 {
+                    return Err(Error::invalid(format!(
+                        "prores encoder: pixel_format {:?} declares a 4-plane frame \
+                         (Y, Cb, Cr, alpha) but the input has {} plane(s)",
+                        self.output_params.pixel_format.unwrap(),
+                        v.planes.len()
+                    )));
+                }
                 // Resolve the effective alpha coding for THIS frame: an
                 // explicit config request wins; otherwise a 4-plane
                 // input auto-enables alpha with the depth inferred from
@@ -681,6 +719,17 @@ impl Encoder for ProResEncoder {
                     )?),
                     None => None,
                 };
+                // Under an alpha-typed pixel_format the alpha plane is
+                // 8-bit by definition; a 2-bytes-per-sample plane means
+                // the frame does not match the declared format.
+                if self.alpha_typed && alpha_channel_type == Some(AlphaChannelType::Sixteen) {
+                    return Err(Error::invalid(format!(
+                        "prores encoder: pixel_format {:?} declares 8-bit alpha samples \
+                         but the input alpha plane is 2 bytes per sample; declare a \
+                         Yuv4(2|4)4P* pixel_format for 16-bit alpha input",
+                        self.output_params.pixel_format.unwrap()
+                    )));
+                }
                 let data = if self.target_bytes > 0 {
                     encode_frame_with_rate_control(
                         v,

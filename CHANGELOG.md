@@ -26,6 +26,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Alpha-typed pixel-format surface** (`PixelFormat::Yuva422P` /
+  `Yuva444P`, added in oxideav-core 0.1.30) on both codec directions.
+  Requesting a `Yuva*` format makes the 4-plane 8-bit layout part of
+  the format contract instead of a probe-the-plane-count convention:
+  - **Decoder** — `decoder::decode_packet_with_format` (new free
+    function) and the registry path (`CodecParameters::pixel_format =
+    Yuva422P | Yuva444P`) always emit 4 planes: decoded alpha rides
+    plane 3 (16-bit coded alpha demoted per RDD 36 §7.5.2, consistent
+    with the §7.5.1 Y/Cb/Cr demotion at 8-bit output), and a stream
+    with no coded alpha gets a synthesised fully-opaque plane. The
+    historical `Yuv4(2|4)4P*` requests are byte-unchanged and remain
+    the only route to 10-/12-bit alpha output (the core enum has no
+    deep `Yuva` variants yet).
+  - **Encoder** — `make_encoder` / `make_encoder_with_config` accept
+    `Yuva422P` / `Yuva444P` input surfaces: every frame must carry 4
+    planes with 1-byte alpha samples and is coded with 8-bit alpha
+    (§5.3.3 + §7.1.2, bitstream version 1 per §6.4); the emitted bytes
+    are identical to the established free-function / auto-detect
+    paths (pinned by test). A 3-plane frame, a 2-bytes-per-sample
+    alpha plane, or an explicit `AlphaChannelType::Sixteen` config
+    under a `Yuva*` format each return a clean, self-explaining
+    `Error::invalid`.
+  - **Registry capabilities** now advertise `Yuva422P` and `Yuva444P`.
+  - `tests/yuva_pixel_format.rs` pins the surface end-to-end: typed
+    decode vs. untyped byte-equivalence, opaque-plane synthesis,
+    4:2:2+alpha version-1 streams, §7.5.2 16→8-bit demotion, chroma
+    mismatch and contract-violation errors, rate-control alpha
+    carriage, and a registry-built encode→decode round trip.
 - **Encoder-output SHA corpus extension** — pinned SHAs for the
   Table 14 16-bit alpha codeword family (ap4x progressive) and the
   interlaced field-pair + alpha combination (ap4h TFF), plus four

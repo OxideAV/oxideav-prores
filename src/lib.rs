@@ -16,6 +16,13 @@
 //!   decoded alpha lands as a 4th `VideoPlane` on the output
 //!   `VideoFrame`; the encoder accepts the same shape on input through
 //!   [`encoder::encode_frame_with_alpha`].
+//! * Alpha-typed 8-bit surfaces on both codec directions: request
+//!   `PixelFormat::Yuva422P` / `Yuva444P` in `CodecParameters` to make
+//!   the 4-plane layout part of the format contract — the decoder then
+//!   always emits 4 planes (16-bit coded alpha demoted per §7.5.2; a
+//!   no-alpha stream gets a synthesised opaque plane), and the encoder
+//!   requires 4-plane input and codes alpha on every frame (bitstream
+//!   version 1 per §6.4). See [`decoder::decode_packet_with_format`].
 //!
 //! ### Bitstream
 //!
@@ -56,8 +63,8 @@
 //! * [`slice`]     — Per-slice pack/unpack: per-component encode +
 //!   inverse slice scan into natural-order blocks.
 //! * [`frame`]     — Frame / picture / slice header layouts.
-//! * [`decoder`]   — `Packet -> VideoFrame` (Yuv4(2|4)4P{,10Le,12Le},
-//!   optional 4th alpha plane).
+//! * [`decoder`]   — `Packet -> VideoFrame` (Yuv4(2|4)4P{,10Le,12Le} /
+//!   Yuva4(2|4)4P, optional 4th alpha plane).
 //! * [`encoder`]   — `VideoFrame` -> `Packet`, with optional alpha.
 
 pub mod alpha;
@@ -188,7 +195,9 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
         .with_pixel_format(PixelFormat::Yuv422P10Le)
         .with_pixel_format(PixelFormat::Yuv444P10Le)
         .with_pixel_format(PixelFormat::Yuv422P12Le)
-        .with_pixel_format(PixelFormat::Yuv444P12Le);
+        .with_pixel_format(PixelFormat::Yuv444P12Le)
+        .with_pixel_format(PixelFormat::Yuva422P)
+        .with_pixel_format(PixelFormat::Yuva444P);
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)
