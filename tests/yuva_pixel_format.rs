@@ -575,3 +575,143 @@ fn registry_yuva444_end_to_end() {
     assert_eq!(vf.planes[0].data.len(), w * h);
     assert_eq!(vf.planes[3].data, src_alpha, "lossless alpha round-trip");
 }
+
+// ─────────────── interlaced streams through the typed surface ───────────────
+
+/// Interlaced (TFF) 4:4:4 + 8-bit alpha through `Yuva444P`: the §6.2
+/// field split, the §7.5.3 deinterleave, and the typed 4-plane
+/// guarantee compose; alpha still round-trips byte-exactly.
+#[test]
+fn yuva444_interlaced_alpha_roundtrip() {
+    use oxideav_prores::encoder::encode_frame_interlaced;
+    let (w, h) = (W as usize, H as usize);
+    let mut planes = yuv444_8(w, h);
+    let alpha = alpha_plane_8(w, h);
+    let src_alpha = alpha.data.clone();
+    planes.push(alpha);
+    let vf = VideoFrame {
+        pts: Some(0),
+        planes,
+    };
+    let pkt = encode_frame_interlaced(
+        &vf,
+        W,
+        H,
+        ChromaFormat::Y444,
+        BitDepth::Eight,
+        Profile::Prores4444,
+        Profile::Prores4444.default_quant_index(),
+        Some(AlphaChannelType::Eight),
+        1, // top-field-first
+    )
+    .expect("encode interlaced 4444 + alpha");
+    let (fh, _) = parse_frame(&pkt).expect("parse");
+    assert_eq!(fh.interlace_mode, 1, "premise: TFF stream");
+    assert_eq!(fh.alpha_channel_type, 1, "premise: 8-bit alpha");
+
+    let typed = decode_packet_with_format(
+        &pkt,
+        Some(0),
+        Some(PixelFormat::Yuva444P),
+        OutputRange::Full,
+    )
+    .expect("decode Yuva444P interlaced");
+    assert_eq!(typed.planes.len(), 4);
+    assert_eq!(typed.planes[3].data, src_alpha, "lossless alpha round-trip");
+}
+
+/// Interlaced (BFF) no-alpha stream through `Yuva444P`: the opaque
+/// plane synthesis must hold on the interlaced decode path too.
+#[test]
+fn yuva444_interlaced_no_alpha_synthesises_opaque_plane() {
+    use oxideav_prores::encoder::encode_frame_interlaced;
+    let (w, h) = (W as usize, H as usize);
+    let vf = VideoFrame {
+        pts: Some(0),
+        planes: yuv444_8(w, h),
+    };
+    let pkt = encode_frame_interlaced(
+        &vf,
+        W,
+        H,
+        ChromaFormat::Y444,
+        BitDepth::Eight,
+        Profile::Prores4444,
+        Profile::Prores4444.default_quant_index(),
+        None,
+        2, // bottom-field-first
+    )
+    .expect("encode interlaced 4444 without alpha");
+    let typed = decode_packet_with_format(
+        &pkt,
+        Some(0),
+        Some(PixelFormat::Yuva444P),
+        OutputRange::Full,
+    )
+    .expect("decode Yuva444P interlaced no-alpha");
+    assert_eq!(typed.planes.len(), 4, "typed surface: 4 planes guaranteed");
+    assert!(
+        typed.planes[3].data.iter().all(|&s| s == 0xFF),
+        "synthesised alpha must be fully opaque"
+    );
+    assert_eq!(typed.planes[3].data.len(), w * h);
+}
+
+// ─────────────── real reference bitstream through the typed surface ───────────────
+
+/// Decode the first frame of the in-tree `4444-with-alpha` reference
+/// fixture (1920×1080 ap4h, 16-bit coded alpha, real third-party
+/// encoder bytes) through `Yuva444P` and pin byte-equality with the
+/// untyped 8-bit decode — the typed surface is pure routing on top of
+/// the same decode core, on real-world bytes as well as synthetic ones.
+///
+/// Skips when the workspace `docs/` corpus is not checked out next to
+/// the crate (standalone CI).
+#[test]
+fn yuva444_typed_surface_on_reference_fixture() {
+    let path =
+        std::path::PathBuf::from("../../docs/video/prores/fixtures/4444-with-alpha/input.mov");
+    let mov = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "skip: missing {} ({e}). docs/ fixtures live in the workspace checkout only.",
+                path.display()
+            );
+            return;
+        }
+    };
+    // First ProRes frame container: scan for 'icpf', read the preceding
+    // big-endian frame_size (RDD 36 §5.1).
+    let mut frame_bytes: Option<&[u8]> = None;
+    let mut i = 4usize;
+    while i + 4 <= mov.len() {
+        if &mov[i..i + 4] == b"icpf" {
+            let size_off = i - 4;
+            let fs = u32::from_be_bytes(mov[size_off..size_off + 4].try_into().unwrap()) as usize;
+            if fs >= 8 && size_off + fs <= mov.len() {
+                frame_bytes = Some(&mov[size_off..size_off + fs]);
+                break;
+            }
+        }
+        i += 1;
+    }
+    let pkt = frame_bytes.expect("no icpf frame in fixture container");
+
+    let (fh, _) = parse_frame(pkt).expect("parse fixture frame");
+    assert_eq!(fh.alpha_channel_type, 2, "fixture premise: 16-bit alpha");
+    assert_eq!(fh.chroma_format, ChromaFormat::Y444);
+
+    let typed =
+        decode_packet_with_format(pkt, Some(0), Some(PixelFormat::Yuva444P), OutputRange::Full)
+            .expect("typed decode of reference fixture");
+    let untyped = decode_packet(pkt, Some(0)).expect("untyped 8-bit decode");
+    assert_eq!(typed.planes.len(), 4);
+    assert_eq!(untyped.planes.len(), 4);
+    for (i, (a, b)) in typed.planes.iter().zip(untyped.planes.iter()).enumerate() {
+        assert_eq!(a.stride, b.stride, "plane {i} stride");
+        assert_eq!(a.data, b.data, "plane {i} bytes");
+    }
+    assert_eq!(typed.planes[0].data.len(), 1920 * 1080, "8-bit luma size");
+    assert_eq!(typed.planes[3].data.len(), 1920 * 1080, "8-bit alpha size");
+}

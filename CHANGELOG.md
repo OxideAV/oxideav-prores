@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     4:2:2+alpha version-1 streams, §7.5.2 16→8-bit demotion, chroma
     mismatch and contract-violation errors, rate-control alpha
     carriage, and a registry-built encode→decode round trip.
+  - **Interlaced + real-bitstream coverage of the typed surface**:
+    TFF 4:4:4+alpha decodes through `Yuva444P` with byte-exact alpha,
+    the opaque-plane synthesis holds on the interlaced (BFF) no-alpha
+    path, and the in-tree `4444-with-alpha` 1920×1080 reference
+    fixture (real third-party encoder bytes, 16-bit coded alpha) pins
+    the typed decode byte-identical to the untyped 8-bit decode.
   - **Fuzz coverage**: the `decode_packet_with_depth` harness now
     derives two more request bits from the input — one routes through
     `decode_packet_with_format` with the alpha-typed `Yuva4(2|4)4P`
