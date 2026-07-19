@@ -6,23 +6,27 @@
 //!
 //! Scope: all six ProRes video profiles, dispatched by container FourCC:
 //!
-//! * 422 Proxy / LT / Standard / HQ for 4:2:2 Y'CbCr at 8-, 10-, or
-//!   12-bit depth (`Yuv422P` / `Yuv422P10Le` / `Yuv422P12Le`, fourccs
+//! * 422 Proxy / LT / Standard / HQ for 4:2:2 Y'CbCr at 8-, 10-, 12-,
+//!   or 16-bit depth (`Yuv422P{,10Le,12Le,16Le}`, fourccs
 //!   `apco`/`apcs`/`apcn`/`apch`).
-//! * 4444 + 4444 XQ for 4:4:4 Y'CbCr at 8-/10-/12-bit (`Yuv444P{,10,12}`,
-//!   fourccs `ap4h`/`ap4x`). These profiles also carry an optional
-//!   per-pixel alpha plane (RDD 36 §5.3.3) coded losslessly via the
-//!   raster-scan run-length code from §7.1.2 (Tables 12-14). The
-//!   decoded alpha lands as a 4th `VideoPlane` on the output
-//!   `VideoFrame`; the encoder accepts the same shape on input through
+//! * 4444 + 4444 XQ for 4:4:4 Y'CbCr at 8-/10-/12-/16-bit
+//!   (`Yuv444P{,10Le,12Le,16Le}`, fourccs `ap4h`/`ap4x`). These
+//!   profiles also carry an optional per-pixel alpha plane (RDD 36
+//!   §5.3.3) coded losslessly via the raster-scan run-length code from
+//!   §7.1.2 (Tables 12-14). The decoded alpha lands as a 4th
+//!   `VideoPlane` on the output `VideoFrame`; the encoder accepts the
+//!   same shape on input through
 //!   [`encoder::encode_frame_with_alpha`].
-//! * Alpha-typed 8-bit surfaces on both codec directions: request
-//!   `PixelFormat::Yuva422P` / `Yuva444P` in `CodecParameters` to make
-//!   the 4-plane layout part of the format contract — the decoder then
-//!   always emits 4 planes (16-bit coded alpha demoted per §7.5.2; a
+//! * Alpha-typed surfaces on both codec directions: request
+//!   `PixelFormat::Yuva4(2|4)4P{,10Le,12Le,16Le}` in `CodecParameters`
+//!   to make the 4-plane layout part of the format contract — the
+//!   decoder then always emits 4 planes (coded alpha converted to the
+//!   surface depth per §7.5.2, exact at the 16-bit surfaces; a
 //!   no-alpha stream gets a synthesised opaque plane), and the encoder
 //!   requires 4-plane input and codes alpha on every frame (bitstream
-//!   version 1 per §6.4). See [`decoder::decode_packet_with_format`].
+//!   version 1 per §6.4) — 16-bit coded alpha for the deep formats, so
+//!   no input precision is dropped on the wire. See
+//!   [`decoder::decode_packet_with_format`].
 //!
 //! ### Bitstream
 //!
@@ -63,8 +67,9 @@
 //! * [`slice`]     — Per-slice pack/unpack: per-component encode +
 //!   inverse slice scan into natural-order blocks.
 //! * [`frame`]     — Frame / picture / slice header layouts.
-//! * [`decoder`]   — `Packet -> VideoFrame` (Yuv4(2|4)4P{,10Le,12Le} /
-//!   Yuva4(2|4)4P, optional 4th alpha plane).
+//! * [`decoder`]   — `Packet -> VideoFrame`
+//!   (Yuv4(2|4)4P{,10Le,12Le,16Le} / Yuva4(2|4)4P{,10Le,12Le,16Le},
+//!   optional 4th alpha plane).
 //! * [`encoder`]   — `VideoFrame` -> `Packet`, with optional alpha.
 
 pub mod alpha;
@@ -196,8 +201,16 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
         .with_pixel_format(PixelFormat::Yuv444P10Le)
         .with_pixel_format(PixelFormat::Yuv422P12Le)
         .with_pixel_format(PixelFormat::Yuv444P12Le)
+        .with_pixel_format(PixelFormat::Yuv422P16Le)
+        .with_pixel_format(PixelFormat::Yuv444P16Le)
         .with_pixel_format(PixelFormat::Yuva422P)
-        .with_pixel_format(PixelFormat::Yuva444P);
+        .with_pixel_format(PixelFormat::Yuva444P)
+        .with_pixel_format(PixelFormat::Yuva422P10Le)
+        .with_pixel_format(PixelFormat::Yuva444P10Le)
+        .with_pixel_format(PixelFormat::Yuva422P12Le)
+        .with_pixel_format(PixelFormat::Yuva444P12Le)
+        .with_pixel_format(PixelFormat::Yuva422P16Le)
+        .with_pixel_format(PixelFormat::Yuva444P16Le);
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)
@@ -325,6 +338,52 @@ mod tests {
             let p = psnr(&o.data, &d.data);
             assert!(p > 30.0, "plane {i} PSNR too low: {p:.2} dB (want > 30)");
             eprintln!("plane {i} PSNR = {p:.2} dB");
+        }
+    }
+
+    #[test]
+    fn registry_caps_advertise_every_supported_pixel_format() {
+        // The advertised capability list is the discovery surface a
+        // framework caller negotiates against — it must name every
+        // format the factories accept: the 8 colour-only requests plus
+        // the 8 alpha-typed ones (8/10/12/16-bit at 4:2:2 and 4:4:4).
+        let mut reg = oxideav_core::CodecRegistry::new();
+        register_codecs(&mut reg);
+        let impls = reg.implementations(&CodecId::new(CODEC_ID_STR));
+        assert_eq!(impls.len(), 1);
+        let advertised = &impls[0].caps.accepted_pixel_formats;
+        let expected = [
+            PixelFormat::Yuv422P,
+            PixelFormat::Yuv444P,
+            PixelFormat::Yuv422P10Le,
+            PixelFormat::Yuv444P10Le,
+            PixelFormat::Yuv422P12Le,
+            PixelFormat::Yuv444P12Le,
+            PixelFormat::Yuv422P16Le,
+            PixelFormat::Yuv444P16Le,
+            PixelFormat::Yuva422P,
+            PixelFormat::Yuva444P,
+            PixelFormat::Yuva422P10Le,
+            PixelFormat::Yuva444P10Le,
+            PixelFormat::Yuva422P12Le,
+            PixelFormat::Yuva444P12Le,
+            PixelFormat::Yuva422P16Le,
+            PixelFormat::Yuva444P16Le,
+        ];
+        assert_eq!(advertised.len(), expected.len());
+        for pf in expected {
+            assert!(
+                advertised.contains(&pf),
+                "capabilities must advertise {pf:?}"
+            );
+            // And every advertised format actually builds both factories.
+            let mut p = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+            p.media_type = MediaType::Video;
+            p.width = Some(64);
+            p.height = Some(48);
+            p.pixel_format = Some(pf);
+            assert!(reg.first_decoder(&p).is_ok(), "decoder for {pf:?}");
+            assert!(reg.first_encoder(&p).is_ok(), "encoder for {pf:?}");
         }
     }
 
