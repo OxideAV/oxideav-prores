@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Yuva444P16Le` (oxideav-core ≥ 0.1.31) guarantee a 4-plane frame
   with §7.5.2-converted alpha at the surface depth on plane 3 and a
   synthesised fully-opaque plane on streams that code no alpha.
+- Deep alpha-typed encode surfaces: the same six formats on
+  `make_encoder` / `make_encoder_with_config` accept 4-plane input
+  with 16-bit-word alpha samples at the format's depth. 10-/12-bit
+  alpha promotes to 16-bit coded alpha (`alpha_channel_type = 2`) via
+  the §7.5.2-mirror conversion — exactly invertible by the decode-side
+  §7.5.2 demotion — and 16-bit alpha input codes verbatim, so
+  `AlphaChannelType::Sixteen` fidelity is now expressible in the type
+  system on both directions. Matched-width paths stay byte-exact with
+  the historical free-function/untyped wire output.
 
 ### Documentation
 

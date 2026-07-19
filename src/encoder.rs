@@ -1,9 +1,14 @@
 //! ProRes encoder following SMPTE RDD 36 §5 + §7.
 //!
-//! Reads a `Yuv422P` / `Yuv444P` (or alpha-typed `Yuva422P` /
-//! `Yuva444P`) `VideoFrame`, walks 16x16 macroblocks, forward DCTs each
-//! 8x8 block, quantises by `qmat * qScale / 8`, per-component
-//! slice-scans, and emits the entropy-coded slice payload per RDD 36.
+//! Reads a `Yuv4(2|4)4P{,10Le,12Le,16Le}` (or alpha-typed
+//! `Yuva4(2|4)4P{,10Le,12Le,16Le}`) `VideoFrame`, walks 16x16
+//! macroblocks, forward DCTs each 8x8 block, quantises by
+//! `qmat * qScale / 8`, per-component slice-scans, and emits the
+//! entropy-coded slice payload per RDD 36. The alpha-typed formats
+//! require 4-plane input and code alpha on every frame: 8-bit input
+//! codes `alpha_channel_type = 1`; the deep formats code 16-bit alpha
+//! (`alpha_channel_type = 2`) via the §7.5.2-mirror promotion, so no
+//! input precision is dropped on the wire.
 
 use std::collections::VecDeque;
 
@@ -205,6 +210,13 @@ pub struct EncoderConfig {
     /// input frame is an error (the plane the caller promised is
     /// missing), as is a 4-plane frame whose alpha stride is neither 1
     /// nor 2 bytes per sample under auto-detection.
+    ///
+    /// Under an alpha-typed `CodecParameters::pixel_format`
+    /// (`Yuva4(2|4)4P{,10Le,12Le,16Le}`) the coded width is fixed by
+    /// the format instead — 8-bit input codes `alpha_channel_type = 1`,
+    /// deep (10/12/16-bit) input codes `alpha_channel_type = 2` via the
+    /// §7.5.2-mirror promotion — and an explicit request that
+    /// contradicts the format is refused at construction.
     pub alpha_channel_type: Option<AlphaChannelType>,
 }
 
@@ -393,6 +405,78 @@ impl EncoderConfig {
     }
 }
 
+/// Alpha coding request threaded through the internal encode paths:
+/// which RDD 36 §6.1.1 Table 7 wire code to emit (`act`) and the sample
+/// layout of the caller's 4th input plane (`input_depth`). Input
+/// samples convert into the coded domain via [`alpha_input_to_coded`]
+/// (the §7.5.2-mirror mapping); when the input depth equals the coded
+/// width the conversion is the identity, so the historical
+/// 8-bit-plane→8-bit-wire and 16-bit-plane→16-bit-wire paths stay
+/// byte-exact.
+#[derive(Copy, Clone, Debug)]
+struct AlphaCoding {
+    act: AlphaChannelType,
+    input_depth: BitDepth,
+}
+
+impl AlphaCoding {
+    /// The historical shape: the input plane is laid out exactly as the
+    /// wire codes it (1 byte/sample for 8-bit alpha, LE `u16` for
+    /// 16-bit alpha), so the input→coded conversion is the identity.
+    fn matched(act: AlphaChannelType) -> Self {
+        let input_depth = match act {
+            AlphaChannelType::Eight => BitDepth::Eight,
+            AlphaChannelType::Sixteen => BitDepth::Sixteen,
+        };
+        Self { act, input_depth }
+    }
+
+    /// The alpha-typed shape: the input plane holds samples at the
+    /// pixel format's depth, and the wire codes the narrowest RDD 36
+    /// alpha width that loses none of that precision — 8-bit input
+    /// codes `alpha_channel_type = 1`, deeper input codes 16-bit alpha
+    /// (`alpha_channel_type = 2`) via the §7.5.2-mirror promotion.
+    fn for_typed_depth(input_depth: BitDepth) -> Self {
+        let act = match input_depth {
+            BitDepth::Eight => AlphaChannelType::Eight,
+            BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => AlphaChannelType::Sixteen,
+        };
+        Self { act, input_depth }
+    }
+}
+
+/// Read one alpha sample from the 4th input plane at its declared
+/// input depth. 8-bit planes hold 1 byte per sample; deep planes hold
+/// little-endian 16-bit words with the low `b` bits significant,
+/// masked to the depth exactly like [`read_sample`] masks the colour
+/// planes. `stride` is in **bytes**.
+fn read_alpha_input(plane: &[u8], stride: usize, x: usize, y: usize, depth: BitDepth) -> u16 {
+    match depth {
+        BitDepth::Eight => plane[y * stride + x] as u16,
+        BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => {
+            let off = y * stride + x * 2;
+            let w = u16::from_le_bytes([plane[off], plane[off + 1]]);
+            (w as u32 & depth.max_value()) as u16
+        }
+    }
+}
+
+/// Convert an input alpha sample of `input_depth` into the coded alpha
+/// domain of `act` — the encode-side mirror of the decoder's §7.5.2
+/// conversion: `coded = round(mask * alpha / (2^b − 1))`, where `mask`
+/// is the coded full-scale (255 or 65535, §5.3.3) and `b` the input
+/// depth. Matched widths are the exact identity; the 10→16 and 12→16
+/// promotions round-trip losslessly through the decoder's §7.5.2
+/// demotion (the promotion error is under half an input step).
+fn alpha_input_to_coded(raw: u16, input_depth: BitDepth, act: AlphaChannelType) -> u16 {
+    let in_max = input_depth.max_value() as u64;
+    let coded_max = act.mask() as u64;
+    if in_max == coded_max {
+        return raw;
+    }
+    ((coded_max * raw as u64 + in_max / 2) / in_max) as u16
+}
+
 /// Infer the coded alpha width from the 4th input plane's layout under
 /// [`EncoderConfig::alpha_channel_type`] auto-detection: an alpha plane
 /// at full luma resolution stores `width` samples per row, so its
@@ -532,41 +616,83 @@ pub fn make_encoder_with_config(
         .ok_or_else(|| Error::invalid("prores encoder: missing height"))?;
     let pix = params.pixel_format.unwrap_or(PixelFormat::Yuv422P);
 
-    let (chroma, bit_depth, alpha_typed) = match pix {
-        PixelFormat::Yuv422P => (ChromaFormat::Y422, BitDepth::Eight, false),
-        PixelFormat::Yuv444P => (ChromaFormat::Y444, BitDepth::Eight, false),
-        PixelFormat::Yuv422P10Le => (ChromaFormat::Y422, BitDepth::Ten, false),
-        PixelFormat::Yuv444P10Le => (ChromaFormat::Y444, BitDepth::Ten, false),
-        PixelFormat::Yuv422P12Le => (ChromaFormat::Y422, BitDepth::Twelve, false),
-        PixelFormat::Yuv444P12Le => (ChromaFormat::Y444, BitDepth::Twelve, false),
+    let (chroma, bit_depth, typed_alpha) = match pix {
+        PixelFormat::Yuv422P => (ChromaFormat::Y422, BitDepth::Eight, None),
+        PixelFormat::Yuv444P => (ChromaFormat::Y444, BitDepth::Eight, None),
+        PixelFormat::Yuv422P10Le => (ChromaFormat::Y422, BitDepth::Ten, None),
+        PixelFormat::Yuv444P10Le => (ChromaFormat::Y444, BitDepth::Ten, None),
+        PixelFormat::Yuv422P12Le => (ChromaFormat::Y422, BitDepth::Twelve, None),
+        PixelFormat::Yuv444P12Le => (ChromaFormat::Y444, BitDepth::Twelve, None),
         // 16-bit input surfaces (§7.5.1 with b = 16): LE words, all 16
         // bits significant.
-        PixelFormat::Yuv422P16Le => (ChromaFormat::Y422, BitDepth::Sixteen, false),
-        PixelFormat::Yuv444P16Le => (ChromaFormat::Y444, BitDepth::Sixteen, false),
-        // Alpha-typed 8-bit input surfaces: 4 planes with a
-        // full-resolution 1-byte-per-sample alpha plane at index 3.
-        // Every frame is coded with alpha (RDD 36 §5.3.3 + §7.1.2) and
-        // therefore emitted as bitstream_version 1 per §6.4.
-        PixelFormat::Yuva422P => (ChromaFormat::Y422, BitDepth::Eight, true),
-        PixelFormat::Yuva444P => (ChromaFormat::Y444, BitDepth::Eight, true),
+        PixelFormat::Yuv422P16Le => (ChromaFormat::Y422, BitDepth::Sixteen, None),
+        PixelFormat::Yuv444P16Le => (ChromaFormat::Y444, BitDepth::Sixteen, None),
+        // Alpha-typed input surfaces: 4 planes with a full-resolution
+        // alpha plane at index 3, holding samples at the format's depth
+        // (1 byte for the 8-bit pair, 16-bit LE words with the low
+        // 10/12/16 bits significant for the deep formats). Every frame
+        // is coded with alpha (RDD 36 §5.3.3 + §7.1.2) and therefore
+        // emitted as bitstream_version 1 per §6.4.
+        PixelFormat::Yuva422P => (ChromaFormat::Y422, BitDepth::Eight, Some(BitDepth::Eight)),
+        PixelFormat::Yuva444P => (ChromaFormat::Y444, BitDepth::Eight, Some(BitDepth::Eight)),
+        PixelFormat::Yuva422P10Le => (ChromaFormat::Y422, BitDepth::Ten, Some(BitDepth::Ten)),
+        PixelFormat::Yuva444P10Le => (ChromaFormat::Y444, BitDepth::Ten, Some(BitDepth::Ten)),
+        PixelFormat::Yuva422P12Le => (ChromaFormat::Y422, BitDepth::Twelve, Some(BitDepth::Twelve)),
+        PixelFormat::Yuva444P12Le => (ChromaFormat::Y444, BitDepth::Twelve, Some(BitDepth::Twelve)),
+        PixelFormat::Yuva422P16Le => (
+            ChromaFormat::Y422,
+            BitDepth::Sixteen,
+            Some(BitDepth::Sixteen),
+        ),
+        PixelFormat::Yuva444P16Le => (
+            ChromaFormat::Y444,
+            BitDepth::Sixteen,
+            Some(BitDepth::Sixteen),
+        ),
         other => {
             return Err(Error::unsupported(format!(
                 "prores encoder: pixel format {other:?} not supported \
-                 (expected Yuv4(2|4)4P / Yuv4(2|4)4P10Le / Yuv4(2|4)4P12Le / Yuva4(2|4)4P)"
+                 (expected Yuv4(2|4)4P / Yuva4(2|4)4P, plain or with a 10Le/12Le/16Le \
+                 depth suffix)"
             )));
         }
     };
-    // The Yuva formats define the alpha plane as 8-bit samples, so a
-    // 16-bit alpha coding request cannot read them correctly. A caller
-    // that wants 16-bit coded alpha keeps the 3-plane-format route:
-    // declare `Yuv4(2|4)4P*` and pass a 4-plane frame whose alpha plane
-    // is 16-bit LE (auto-detected), or set the type explicitly.
-    if alpha_typed && config.alpha_channel_type == Some(AlphaChannelType::Sixteen) {
-        return Err(Error::invalid(
-            "prores encoder: pixel_format Yuva4(2|4)4P carries 8-bit alpha samples; \
-             AlphaChannelType::Sixteen would mis-read them — declare a Yuv4(2|4)4P* \
-             pixel_format and supply a 16-bit LE alpha plane instead",
-        ));
+    // An alpha-typed pixel format fixes both the input plane layout and
+    // the coded alpha width (8-bit input codes alpha_channel_type = 1;
+    // the deep formats code 16-bit alpha, alpha_channel_type = 2, so no
+    // input precision is dropped on the wire). An explicit
+    // EncoderConfig::alpha_channel_type that contradicts the format's
+    // natural coding is refused rather than silently converting.
+    if let Some(d) = typed_alpha {
+        match (d, config.alpha_channel_type) {
+            // The 8-bit Yuva formats define the alpha plane as 8-bit
+            // samples, so a 16-bit alpha coding request cannot read
+            // them correctly. A caller that wants 16-bit coded alpha
+            // uses a deep Yuva format, or keeps the 3-plane-format
+            // route: declare `Yuv4(2|4)4P*` and pass a 4-plane frame
+            // whose alpha plane is 16-bit LE (auto-detected).
+            (BitDepth::Eight, Some(AlphaChannelType::Sixteen)) => {
+                return Err(Error::invalid(
+                    "prores encoder: pixel_format Yuva4(2|4)4P carries 8-bit alpha samples; \
+                     AlphaChannelType::Sixteen would mis-read them — declare a deep \
+                     Yuva4(2|4)4P1?Le pixel_format (or a Yuv4(2|4)4P* format with a 16-bit \
+                     LE alpha plane) instead",
+                ));
+            }
+            (
+                BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen,
+                Some(AlphaChannelType::Eight),
+            ) => {
+                return Err(Error::invalid(format!(
+                    "prores encoder: pixel_format {pix:?} codes 16-bit alpha \
+                     (alpha_channel_type = 2) so the deep input samples lose no wire \
+                     precision; AlphaChannelType::Eight contradicts the declared format — \
+                     for 8-bit coded alpha declare Yuva4(2|4)4P or a Yuv4(2|4)4P* format \
+                     with an 8-bit alpha plane"
+                )));
+            }
+            _ => {}
+        }
     }
     let profile = if let Some(p) = config.profile {
         if p.chroma_format() != chroma {
@@ -627,7 +753,7 @@ pub fn make_encoder_with_config(
 
     Ok(Box::new(ProResEncoder {
         alpha_channel_type,
-        alpha_typed,
+        typed_alpha,
         output_params,
         width,
         height,
@@ -669,11 +795,14 @@ struct ProResEncoder {
     /// auto-detects from the input frame's plane count per
     /// [`EncoderConfig::alpha_channel_type`].
     alpha_channel_type: Option<AlphaChannelType>,
-    /// `true` when `CodecParameters::pixel_format` was an alpha-typed
-    /// format (`Yuva422P` / `Yuva444P`): every input frame must carry 4
-    /// planes with 8-bit alpha samples, and every emitted frame codes
-    /// alpha.
-    alpha_typed: bool,
+    /// `Some(depth)` when `CodecParameters::pixel_format` was an
+    /// alpha-typed format (`Yuva4(2|4)4P{,10Le,12Le,16Le}`): every
+    /// input frame must carry 4 planes with alpha samples at `depth`
+    /// (1 byte for `Eight`, 16-bit LE words otherwise), and every
+    /// emitted frame codes alpha — 8-bit input codes
+    /// `alpha_channel_type = 1`, deep input codes 16-bit alpha
+    /// (`alpha_channel_type = 2`) via the §7.5.2-mirror promotion.
+    typed_alpha: Option<BitDepth>,
     config: EncoderConfig,
     time_base: TimeBase,
     /// Target bytes per frame for rate control, or 0 when disabled.
@@ -694,13 +823,13 @@ impl Encoder for ProResEncoder {
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         match frame {
             Frame::Video(v) => {
-                // An alpha-typed pixel_format (Yuva422P / Yuva444P) is a
-                // hard input contract: 4 planes, 8-bit alpha samples.
-                // Refuse a 3-plane frame up front with a format-specific
-                // message (the generic plane-count check downstream
-                // would fire too, but without saying why 4 planes were
-                // expected).
-                if self.alpha_typed && v.planes.len() != 4 {
+                // An alpha-typed pixel_format (Yuva4(2|4)4P{,10Le,12Le,
+                // 16Le}) is a hard input contract: 4 planes with alpha
+                // samples at the declared depth. Refuse a 3-plane frame
+                // up front with a format-specific message (the generic
+                // plane-count check downstream would fire too, but
+                // without saying why 4 planes were expected).
+                if self.typed_alpha.is_some() && v.planes.len() != 4 {
                     return Err(Error::invalid(format!(
                         "prores encoder: pixel_format {:?} declares a 4-plane frame \
                          (Y, Cb, Cr, alpha) but the input has {} plane(s)",
@@ -708,32 +837,57 @@ impl Encoder for ProResEncoder {
                         v.planes.len()
                     )));
                 }
-                // Resolve the effective alpha coding for THIS frame: an
-                // explicit config request wins; otherwise a 4-plane
-                // input auto-enables alpha with the depth inferred from
-                // the alpha plane's bytes-per-sample (see
+                // Resolve the effective alpha coding for THIS frame. An
+                // alpha-typed pixel_format fixes both the input layout
+                // and the wire code (validated against the plane's
+                // actual bytes-per-sample below). Otherwise an explicit
+                // config request wins; failing that, a 4-plane input
+                // auto-enables alpha with the width inferred from the
+                // alpha plane's bytes-per-sample (see
                 // `EncoderConfig::alpha_channel_type`). A 3-plane input
                 // with no request stays alpha-free — byte-identical to
                 // the pre-alpha-config encoder.
-                let alpha_channel_type = match self.alpha_channel_type {
-                    Some(act) => Some(act),
-                    None if v.planes.len() == 4 => Some(detect_alpha_channel_type(
-                        &v.planes[3],
-                        self.width as usize,
-                    )?),
-                    None => None,
+                let alpha: Option<AlphaCoding> = if let Some(depth) = self.typed_alpha {
+                    let detected = detect_alpha_channel_type(&v.planes[3], self.width as usize)?;
+                    let expected_bps = depth.bytes_per_sample();
+                    let actual_bps = match detected {
+                        AlphaChannelType::Eight => 1usize,
+                        AlphaChannelType::Sixteen => 2usize,
+                    };
+                    if actual_bps != expected_bps {
+                        return if expected_bps == 1 {
+                            // Under an 8-bit alpha-typed pixel_format the
+                            // alpha plane is 1 byte/sample by definition.
+                            Err(Error::invalid(format!(
+                                "prores encoder: pixel_format {:?} declares 8-bit alpha \
+                                 samples but the input alpha plane is 2 bytes per sample; \
+                                 declare a deep Yuva4(2|4)4P1?Le (or Yuv4(2|4)4P*) \
+                                 pixel_format for 16-bit-word alpha input",
+                                self.output_params.pixel_format.unwrap()
+                            )))
+                        } else {
+                            // Deep alpha-typed formats store every alpha
+                            // sample as a 16-bit LE word.
+                            Err(Error::invalid(format!(
+                                "prores encoder: pixel_format {:?} declares 16-bit-word \
+                                 alpha samples (low {} bits significant) but the input \
+                                 alpha plane is 1 byte per sample; declare Yuva4(2|4)4P \
+                                 for 8-bit alpha input",
+                                self.output_params.pixel_format.unwrap(),
+                                depth.bits()
+                            )))
+                        };
+                    }
+                    Some(AlphaCoding::for_typed_depth(depth))
+                } else {
+                    match self.alpha_channel_type {
+                        Some(act) => Some(AlphaCoding::matched(act)),
+                        None if v.planes.len() == 4 => Some(AlphaCoding::matched(
+                            detect_alpha_channel_type(&v.planes[3], self.width as usize)?,
+                        )),
+                        None => None,
+                    }
                 };
-                // Under an alpha-typed pixel_format the alpha plane is
-                // 8-bit by definition; a 2-bytes-per-sample plane means
-                // the frame does not match the declared format.
-                if self.alpha_typed && alpha_channel_type == Some(AlphaChannelType::Sixteen) {
-                    return Err(Error::invalid(format!(
-                        "prores encoder: pixel_format {:?} declares 8-bit alpha samples \
-                         but the input alpha plane is 2 bytes per sample; declare a \
-                         Yuv4(2|4)4P* pixel_format for 16-bit alpha input",
-                        self.output_params.pixel_format.unwrap()
-                    )));
-                }
                 let data = if self.target_bytes > 0 {
                     encode_frame_with_rate_control(
                         v,
@@ -749,7 +903,7 @@ impl Encoder for ProResEncoder {
                         self.target_bytes,
                         self.interlace_mode,
                         self.log2_slice_mb_width,
-                        alpha_channel_type,
+                        alpha,
                     )?
                 } else {
                     encode_frame_full(
@@ -760,7 +914,7 @@ impl Encoder for ProResEncoder {
                         self.bit_depth,
                         self.profile,
                         self.quant_index,
-                        alpha_channel_type,
+                        alpha,
                         self.interlace_mode,
                         self.config.quant_matrices,
                         self.config.explicit_qmat_carriage,
@@ -908,11 +1062,15 @@ pub fn encode_frame_with_qmats(
 /// channel coding (RDD 36 §5.3.3 + §7.1.2).
 ///
 /// When `alpha_channel_type` is `Some`, the input frame must carry a
-/// 4th `VideoPlane` with a per-pixel alpha array at full luma resolution.
-/// Each sample is read as one byte (`Eight`) — alpha values are
-/// promoted to the spec's 16-bit internal representation and emitted as
-/// `scanned_alpha()` blobs at the tail of every slice. The frame header
-/// `alpha_channel_type` field is set accordingly.
+/// 4th `VideoPlane` with a per-pixel alpha array at full luma
+/// resolution, laid out exactly as the wire codes it: one byte per
+/// sample for `Eight`, little-endian `u16` for `Sixteen`. The samples
+/// are emitted as `scanned_alpha()` blobs at the tail of every slice
+/// and the frame header `alpha_channel_type` field is set accordingly.
+/// (The alpha-typed registry surfaces additionally accept 10-/12-bit
+/// alpha input planes, promoted to 16-bit coded alpha via the
+/// §7.5.2-mirror conversion — see `CodecParameters::pixel_format` with
+/// a deep `Yuva*` format on [`make_encoder`].)
 ///
 /// When `alpha_channel_type` is `None`, behaviour is identical to
 /// [`encode_frame_with_depth`] (3-plane input, no alpha emission).
@@ -935,7 +1093,7 @@ pub fn encode_frame_with_alpha(
         bit_depth,
         profile,
         quantization_index,
-        alpha_channel_type,
+        alpha_channel_type.map(AlphaCoding::matched),
         0,
         None,
         false,
@@ -975,7 +1133,7 @@ pub fn encode_frame_interlaced(
         bit_depth,
         profile,
         quantization_index,
-        alpha_channel_type,
+        alpha_channel_type.map(AlphaCoding::matched),
         interlace_mode,
         None,
         false,
@@ -1058,7 +1216,7 @@ fn encode_frame_with_rate_control(
     target_bytes: usize,
     interlace_mode: u8,
     log2_slice_mb_width: u8,
-    alpha_channel_type: Option<AlphaChannelType>,
+    alpha: Option<AlphaCoding>,
 ) -> Result<Vec<u8>> {
     let tol_lo = (target_bytes as f64 * (1.0 - RATE_CTRL_TOLERANCE)) as usize;
     let tol_hi = (target_bytes as f64 * (1.0 + RATE_CTRL_TOLERANCE)) as usize;
@@ -1075,7 +1233,7 @@ fn encode_frame_with_rate_control(
         bit_depth,
         profile,
         seed_qi,
-        alpha_channel_type,
+        alpha,
         interlace_mode,
         qmats,
         explicit_qmat_carriage,
@@ -1123,7 +1281,7 @@ fn encode_frame_with_rate_control(
             bit_depth,
             profile,
             mid,
-            alpha_channel_type,
+            alpha,
             interlace_mode,
             qmats,
             explicit_qmat_carriage,
@@ -1178,7 +1336,7 @@ fn encode_frame_full(
     bit_depth: BitDepth,
     profile: Profile,
     quantization_index: u8,
-    alpha_channel_type: Option<AlphaChannelType>,
+    alpha: Option<AlphaCoding>,
     interlace_mode: u8,
     qmats: Option<QuantMatrices>,
     explicit_qmat_carriage: bool,
@@ -1196,7 +1354,7 @@ fn encode_frame_full(
              (RDD 36 §5.2.2 — two-bit picture-header field)",
         ));
     }
-    let expected_planes = if alpha_channel_type.is_some() { 4 } else { 3 };
+    let expected_planes = if alpha.is_some() { 4 } else { 3 };
     if frame.planes.len() != expected_planes {
         return Err(Error::invalid(format!(
             "prores encoder: expected {expected_planes} planes (got {})",
@@ -1305,7 +1463,7 @@ fn encode_frame_full(
             quantization_index,
             luma_qmat,
             chroma_qmat,
-            alpha_channel_type,
+            alpha,
             log2_slice_mb_width,
             interlaced,
             *field,
@@ -1336,7 +1494,7 @@ fn encode_frame_full(
         chroma_qmat,
         load_luma,
         load_chroma,
-        alpha_channel_type.map_or(0, |a| a.code()),
+        alpha.map_or(0, |a| a.act.code()),
         meta,
     );
     for blob in &picture_blobs {
@@ -1385,7 +1543,7 @@ fn encode_one_picture(
     quantization_index: u8,
     luma_qmat: &[u8; 64],
     chroma_qmat: &[u8; 64],
-    alpha_channel_type: Option<AlphaChannelType>,
+    alpha: Option<AlphaCoding>,
     log2_slice_mb_width: u8,
     interlaced: bool,
     field: FieldStride,
@@ -1469,7 +1627,7 @@ fn encode_one_picture(
                 ));
             }
 
-            let alpha_blob: Vec<u8> = if let Some(act) = alpha_channel_type {
+            let alpha_blob: Vec<u8> = if let Some(ac) = alpha {
                 // Emit alpha for the FULL macroblock-row height (16
                 // sample rows) regardless of visible picture clipping —
                 // matching what real reference ProRes 4444 streams carry
@@ -1495,24 +1653,21 @@ fn encode_one_picture(
                         .min(frame_h.saturating_sub(1));
                     for c in 0..cols {
                         let x = (mx * MB_SIDE_PX + c).min(frame_w.saturating_sub(1));
-                        let v: u16 = match act {
-                            AlphaChannelType::Eight => {
-                                a_plane.data[frame_row * a_stride + x] as u16
-                            }
-                            AlphaChannelType::Sixteen => {
-                                let off = frame_row * a_stride + x * 2;
-                                u16::from_le_bytes([a_plane.data[off], a_plane.data[off + 1]])
-                            }
-                        };
-                        samples.push(v);
+                        // Read at the input plane's declared depth, then
+                        // map into the coded alpha domain (the
+                        // §7.5.2-mirror conversion; identity when the
+                        // input depth equals the coded width).
+                        let raw =
+                            read_alpha_input(&a_plane.data, a_stride, x, frame_row, ac.input_depth);
+                        samples.push(alpha_input_to_coded(raw, ac.input_depth, ac.act));
                     }
                 }
-                encode_scanned_alpha(&samples, act)?
+                encode_scanned_alpha(&samples, ac.act)?
             } else {
                 Vec::new()
             };
 
-            let cr_field = if alpha_channel_type.is_some() {
+            let cr_field = if alpha.is_some() {
                 Some(cr_data.len() as u16)
             } else {
                 None
@@ -1916,5 +2071,96 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod alpha_input_tests {
+    //! White-box coverage for the encode-side alpha input handling: the
+    //! per-depth plane read (`read_alpha_input`) and the §7.5.2-mirror
+    //! input→coded conversion (`alpha_input_to_coded`). The end-to-end
+    //! typed-surface behaviour is pinned by the integration suites;
+    //! these cases lock the pure arithmetic directly.
+    use super::{alpha_input_to_coded, read_alpha_input, AlphaChannelType, BitDepth};
+
+    /// Matched widths are the exact identity — the historical untyped
+    /// paths (8-bit plane → 8-bit wire, 16-bit plane → 16-bit wire)
+    /// must stay byte-exact.
+    #[test]
+    fn matched_width_conversion_is_identity() {
+        for a in (0u32..=255).step_by(7).chain([255]) {
+            assert_eq!(
+                alpha_input_to_coded(a as u16, BitDepth::Eight, AlphaChannelType::Eight),
+                a as u16
+            );
+        }
+        for a in (0u32..=65535).step_by(251).chain([65535]) {
+            assert_eq!(
+                alpha_input_to_coded(a as u16, BitDepth::Sixteen, AlphaChannelType::Sixteen),
+                a as u16
+            );
+        }
+    }
+
+    /// Deep-input promotion into 16-bit coded alpha follows the §7.5.2
+    /// mirror `round(65535 * a / (2^b − 1))` and round-trips exactly
+    /// through the decoder's §7.5.2 demotion `round((2^b − 1) * A /
+    /// 65535)` for every representable input value — the typed deep
+    /// alpha path is lossless end to end.
+    #[test]
+    fn deep_promotion_roundtrips_losslessly() {
+        for (depth, max_in) in [(BitDepth::Ten, 1023u32), (BitDepth::Twelve, 4095u32)] {
+            for a in 0..=max_in {
+                let coded = alpha_input_to_coded(a as u16, depth, AlphaChannelType::Sixteen);
+                // Independent §7.5.2 promotion oracle.
+                let want = ((65535u64 * a as u64 + max_in as u64 / 2) / max_in as u64) as u16;
+                assert_eq!(coded, want, "promotion mismatch at {depth:?} alpha {a}");
+                // Decode-side §7.5.2 demotion back to the input depth.
+                let back = ((max_in as u64 * coded as u64 * 2 + 65535) / (65535 * 2)) as u32;
+                assert_eq!(back, a, "round-trip mismatch at {depth:?} alpha {a}");
+            }
+        }
+    }
+
+    /// Endpoint mapping: zero opacity codes 0 and full opacity codes
+    /// the coded full-scale, for every input depth.
+    #[test]
+    fn promotion_endpoints_hit_full_scale() {
+        for depth in [BitDepth::Ten, BitDepth::Twelve, BitDepth::Sixteen] {
+            assert_eq!(alpha_input_to_coded(0, depth, AlphaChannelType::Sixteen), 0);
+            assert_eq!(
+                alpha_input_to_coded(depth.max_value() as u16, depth, AlphaChannelType::Sixteen),
+                65535
+            );
+        }
+    }
+
+    /// `read_alpha_input` reads 1 byte/sample at `Eight` and masked LE
+    /// words at the deep depths, honouring the byte stride — exactly
+    /// like `read_sample` does for the colour planes.
+    #[test]
+    fn plane_reads_honour_depth_and_stride() {
+        // 3 samples/row × 2 rows, 8-bit.
+        let plane8 = [10u8, 20, 30, 40, 50, 60];
+        assert_eq!(read_alpha_input(&plane8, 3, 2, 1, BitDepth::Eight), 60);
+        // 2 samples/row × 2 rows, 16-bit LE words. Top bits beyond the
+        // significant depth are masked off (low-bits-anchored storage).
+        let w = |v: u16| v.to_le_bytes();
+        let mut plane16 = Vec::new();
+        for v in [0x1234u16, 0xFFFF, 0x8001, 0x03FF] {
+            plane16.extend_from_slice(&w(v));
+        }
+        assert_eq!(
+            read_alpha_input(&plane16, 4, 1, 0, BitDepth::Sixteen),
+            0xFFFF
+        );
+        assert_eq!(
+            read_alpha_input(&plane16, 4, 0, 1, BitDepth::Ten),
+            0x8001 & 0x03FF
+        );
+        assert_eq!(
+            read_alpha_input(&plane16, 4, 1, 1, BitDepth::Twelve),
+            0x03FF
+        );
     }
 }
