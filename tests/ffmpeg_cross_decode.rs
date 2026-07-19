@@ -384,7 +384,9 @@ fn cross_decode_interlaced_depth(
     let src = match bit_depth {
         BitDepth::Eight => synthetic_field_distinct(width, height),
         BitDepth::Ten => synthetic_field_distinct_10(width, height),
-        BitDepth::Twelve => unreachable!("12-bit not exercised here"),
+        BitDepth::Twelve | BitDepth::Sixteen => {
+            unreachable!("12-/16-bit not exercised here")
+        }
     };
     let pkt = encode_frame_interlaced(
         &src,
@@ -459,7 +461,9 @@ fn cross_decode_interlaced_depth(
     let src_y_10 = match bit_depth {
         BitDepth::Eight => upshift_8_to_10_le(&src.planes[0].data),
         BitDepth::Ten => src.planes[0].data.clone(),
-        BitDepth::Twelve => unreachable!("12-bit not exercised here"),
+        BitDepth::Twelve | BitDepth::Sixteen => {
+            unreachable!("12-/16-bit not exercised here")
+        }
     };
     let psnr = psnr_10bit(&src_y_10, decoded_y);
     eprintln!(
@@ -1447,6 +1451,7 @@ fn synthetic_progressive_422(width: u32, height: u32, depth: BitDepth) -> VideoF
         BitDepth::Eight => (16, 235, 16, 240, 128, 219),
         BitDepth::Ten => (64, 940, 64, 960, 512, 876),
         BitDepth::Twelve => (256, 3760, 256, 3840, 2048, 3504),
+        BitDepth::Sixteen => (4096, 60160, 4096, 61440, 32768, 56064),
     };
     let bytes_per = if matches!(depth, BitDepth::Eight) {
         1
@@ -1671,15 +1676,17 @@ fn cross_decode_progressive_422(profile: Profile, width: u32, height: u32, depth
 
     // Build the 10-bit reference luma plane from the source at whatever
     // depth it was encoded: 8-bit upshift `<< 2`; 10-bit as-is; 12-bit
-    // downshift `>> 2` (ffmpeg's 4:2:2 decode is 10-bit internally).
+    // downshift `>> 2`, 16-bit downshift `>> 6` (the reference 4:2:2
+    // decode surface is 10-bit).
     let src_y_10: Vec<u8> = match depth {
         BitDepth::Eight => upshift_8_to_10_le(&src.planes[0].data),
         BitDepth::Ten => src.planes[0].data.clone(),
-        BitDepth::Twelve => {
+        BitDepth::Twelve | BitDepth::Sixteen => {
+            let shift = if depth == BitDepth::Twelve { 2 } else { 6 };
             let mut out = Vec::with_capacity(src.planes[0].data.len());
             for chunk in src.planes[0].data.chunks_exact(2) {
-                let v12 = u16::from_le_bytes([chunk[0], chunk[1]]);
-                out.extend_from_slice(&(v12 >> 2).to_le_bytes());
+                let v = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.extend_from_slice(&(v >> shift).to_le_bytes());
             }
             out
         }
@@ -1824,6 +1831,7 @@ fn synthetic_progressive_444(width: u32, height: u32, depth: BitDepth) -> VideoF
         BitDepth::Eight => (16, 235, 16, 240, 128, 219),
         BitDepth::Ten => (64, 940, 64, 960, 512, 876),
         BitDepth::Twelve => (256, 3760, 256, 3840, 2048, 3504),
+        BitDepth::Sixteen => (4096, 60160, 4096, 61440, 32768, 56064),
     };
     let bytes_per = if matches!(depth, BitDepth::Eight) {
         1
@@ -2051,7 +2059,8 @@ fn cross_decode_progressive_444(profile: Profile, width: u32, height: u32, depth
 
     // Build the 12-bit reference luma plane from the source at whatever
     // depth it was encoded: 8-bit upshift `<< 4`; 10-bit upshift `<< 2`;
-    // 12-bit as-is (ffmpeg's 4:4:4 decode is 12-bit internally).
+    // 12-bit as-is; 16-bit downshift `>> 4` (the reference 4:4:4 decode
+    // surface is 12-bit).
     let src_y_12: Vec<u8> = match depth {
         BitDepth::Eight => {
             let mut out = Vec::with_capacity(src.planes[0].data.len() * 2);
@@ -2070,6 +2079,14 @@ fn cross_decode_progressive_444(profile: Profile, width: u32, height: u32, depth
             out
         }
         BitDepth::Twelve => src.planes[0].data.clone(),
+        BitDepth::Sixteen => {
+            let mut out = Vec::with_capacity(src.planes[0].data.len());
+            for chunk in src.planes[0].data.chunks_exact(2) {
+                let v16 = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.extend_from_slice(&(v16 >> 4).to_le_bytes());
+            }
+            out
+        }
     };
     let psnr = psnr_12bit_444(&src_y_12, decoded_y);
     eprintln!(
@@ -2320,11 +2337,12 @@ fn cross_decode_progressive_422_perceptual(
     let src_y_10: Vec<u8> = match depth {
         BitDepth::Eight => upshift_8_to_10_le(&src.planes[0].data),
         BitDepth::Ten => src.planes[0].data.clone(),
-        BitDepth::Twelve => {
+        BitDepth::Twelve | BitDepth::Sixteen => {
+            let shift = if depth == BitDepth::Twelve { 2 } else { 6 };
             let mut out = Vec::with_capacity(src.planes[0].data.len());
             for chunk in src.planes[0].data.chunks_exact(2) {
-                let v12 = u16::from_le_bytes([chunk[0], chunk[1]]);
-                out.extend_from_slice(&(v12 >> 2).to_le_bytes());
+                let v = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.extend_from_slice(&(v >> shift).to_le_bytes());
             }
             out
         }
@@ -2515,6 +2533,14 @@ fn cross_decode_progressive_444_perceptual(
             out
         }
         BitDepth::Twelve => src.planes[0].data.clone(),
+        BitDepth::Sixteen => {
+            let mut out = Vec::with_capacity(src.planes[0].data.len());
+            for chunk in src.planes[0].data.chunks_exact(2) {
+                let v16 = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.extend_from_slice(&(v16 >> 4).to_le_bytes());
+            }
+            out
+        }
     };
     let psnr = psnr_12bit_444(&src_y_12, decoded_y);
     eprintln!(

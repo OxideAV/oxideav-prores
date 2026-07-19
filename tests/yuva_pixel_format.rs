@@ -373,11 +373,15 @@ fn yuva_chroma_mismatch_rejected() {
 #[test]
 fn unsupported_pixel_formats_still_rejected() {
     let (pkt, _) = packet_4444_alpha8();
+    // 4:2:0 samplings and packed formats are outside RDD 36's 4:2:2 /
+    // 4:4:4 scope at every depth (the 16-bit-word formats at ProRes
+    // chroma samplings — Yuv4(2|4)4P16Le / Yuva4(2|4)4P16Le — are
+    // supported surfaces and are pinned elsewhere).
     for pf in [
         PixelFormat::Rgb24,
         PixelFormat::Yuv420P,
         PixelFormat::Yuva420P,
-        PixelFormat::Yuv444P16Le,
+        PixelFormat::Yuv420P16Le,
     ] {
         decode_packet_with_format(&pkt, Some(0), Some(pf), OutputRange::Full)
             .expect_err("non-ProRes pixel format request must fail");

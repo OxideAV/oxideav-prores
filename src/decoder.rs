@@ -17,6 +17,9 @@
 //!   packed as little-endian u16 pairs in `[0, 1023]`.
 //! * `PixelFormat::Yuv422P12Le` / `Yuv444P12Le` → 12-bit planes
 //!   packed as little-endian u16 pairs in `[0, 4095]`.
+//! * `PixelFormat::Yuv422P16Le` / `Yuv444P16Le` → 16-bit planes
+//!   packed as little-endian u16 pairs in `[0, 65535]` (§7.5.1 with
+//!   `b = 16`; all 16 bits of every word are significant).
 //!
 //! The `chroma_format` of the requested pixel format must agree with the
 //! frame header's `chroma_format`; mismatches return `Error::invalid`.
@@ -33,17 +36,23 @@
 //! Two request shapes expose it:
 //!
 //! * **Alpha-typed surface** — `PixelFormat::Yuva422P` / `Yuva444P`
-//!   requests an 8-bit four-plane frame whose layout is *guaranteed* by
-//!   the format: decoded alpha rides plane 3 (16-bit coded alpha is
-//!   demoted per §7.5.2), and a stream that carries no coded alpha gets a
+//!   (8-bit) and the deep `Yuva4(2|4)4P{10,12,16}Le` formats request a
+//!   four-plane frame whose layout is *guaranteed* by the format:
+//!   decoded alpha rides plane 3 converted to the surface depth per
+//!   §7.5.2, and a stream that carries no coded alpha gets a
 //!   synthesised fully-opaque plane so the declared plane count always
-//!   holds.
-//! * **As-coded surface** — the historical `Yuv4(2|4)4P*` requests append
-//!   the 4th plane only when the stream codes alpha; callers detect it by
-//!   checking `frame.planes.len() == 4`. This remains the only path to
-//!   deeper-than-8-bit alpha output (the §7.5.2 conversion to the 10-/12-
-//!   bit surface), since the core `PixelFormat` enum has no 10/12/16-bit
-//!   `Yuva` variants yet.
+//!   holds. On the `*P16Le` surfaces a 16-bit coded alpha channel
+//!   (`alpha_channel_type == 2`) passes through **exactly** — the
+//!   §7.5.2 conversion at `b = 16` is the identity — so the full
+//!   RDD 36 alpha fidelity is expressible in the type system.
+//! * **As-coded surface** — the plane-count convention: `Yuv4(2|4)4P*`
+//!   requests append the 4th plane only when the stream codes alpha;
+//!   callers detect it by checking `frame.planes.len() == 4`. The 4th
+//!   plane is converted to the same §7.5.2 surface depth as the colour
+//!   planes, so its significant depth never differs from what the
+//!   requested `PixelFormat` already declares (which is why no
+//!   per-plane significant-bits side-channel is attached to decoded
+//!   frames — it would restate the pixel format).
 
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::Decoder;
@@ -81,13 +90,17 @@ pub enum BitDepth {
     /// 12-bit planar output (`Yuv422P12Le` / `Yuv444P12Le`). Two bytes
     /// per sample, low-byte-first; valid range `0..=4095`.
     Twelve,
+    /// 16-bit planar output (`Yuv422P16Le` / `Yuv444P16Le`). Two bytes
+    /// per sample, low-byte-first; valid range `0..=65535` — all 16
+    /// bits of every word are significant (§7.5.1 with `b = 16`).
+    Sixteen,
 }
 
 impl BitDepth {
     pub fn bytes_per_sample(self) -> usize {
         match self {
             Self::Eight => 1,
-            Self::Ten | Self::Twelve => 2,
+            Self::Ten | Self::Twelve | Self::Sixteen => 2,
         }
     }
 
@@ -96,6 +109,7 @@ impl BitDepth {
             Self::Eight => 255,
             Self::Ten => 1023,
             Self::Twelve => 4095,
+            Self::Sixteen => 65535,
         }
     }
 
@@ -105,6 +119,7 @@ impl BitDepth {
             Self::Eight => 8,
             Self::Ten => 10,
             Self::Twelve => 12,
+            Self::Sixteen => 16,
         }
     }
 }
@@ -173,15 +188,32 @@ fn resolve_pixel_format(pf: PixelFormat) -> Result<OutputSurface> {
         PixelFormat::Yuv444P10Le => (BitDepth::Ten, ChromaFormat::Y444, false),
         PixelFormat::Yuv422P12Le => (BitDepth::Twelve, ChromaFormat::Y422, false),
         PixelFormat::Yuv444P12Le => (BitDepth::Twelve, ChromaFormat::Y444, false),
+        // 16-bit surfaces (§7.5.1 with b = 16): every sample word is
+        // fully significant. A stream's 16-bit coded alpha reaches the
+        // as-coded 4th plane exactly (the §7.5.2 conversion at b = 16
+        // is the identity).
+        PixelFormat::Yuv422P16Le => (BitDepth::Sixteen, ChromaFormat::Y422, false),
+        PixelFormat::Yuv444P16Le => (BitDepth::Sixteen, ChromaFormat::Y444, false),
         // Alpha-typed 8-bit surfaces: full-resolution 8-bit alpha as
         // plane 3. RDD 36 alpha up to 16-bit demotes per §7.5.2, matching
         // how the Y/Cb/Cr planes demote per §7.5.1 at 8-bit output.
         PixelFormat::Yuva422P => (BitDepth::Eight, ChromaFormat::Y422, true),
         PixelFormat::Yuva444P => (BitDepth::Eight, ChromaFormat::Y444, true),
+        // Alpha-typed deep surfaces: 16-bit-word planes with the low
+        // 10/12 bits significant (or all 16 for the *P16Le pair), and
+        // full-resolution alpha at the same depth as plane 3, converted
+        // per §7.5.2.
+        PixelFormat::Yuva422P10Le => (BitDepth::Ten, ChromaFormat::Y422, true),
+        PixelFormat::Yuva444P10Le => (BitDepth::Ten, ChromaFormat::Y444, true),
+        PixelFormat::Yuva422P12Le => (BitDepth::Twelve, ChromaFormat::Y422, true),
+        PixelFormat::Yuva444P12Le => (BitDepth::Twelve, ChromaFormat::Y444, true),
+        PixelFormat::Yuva422P16Le => (BitDepth::Sixteen, ChromaFormat::Y422, true),
+        PixelFormat::Yuva444P16Le => (BitDepth::Sixteen, ChromaFormat::Y444, true),
         other => {
             return Err(Error::unsupported(format!(
                 "prores decoder: requested pixel_format {other:?} not supported \
-                 (expected Yuv4(2|4)4P / Yuv4(2|4)4P10Le / Yuv4(2|4)4P12Le / Yuva4(2|4)4P)"
+                 (expected Yuv4(2|4)4P / Yuva4(2|4)4P, plain or with a 10Le/12Le/16Le \
+                 depth suffix)"
             )));
         }
     })
@@ -324,17 +356,20 @@ pub fn decode_packet_with_options(
 /// free-function twin of the registry path's
 /// `CodecParameters::pixel_format` handling.
 ///
-/// Accepts the six `Yuv4(2|4)4P{,10Le,12Le}` requests of
-/// [`decode_packet_with_depth`] plus the alpha-typed 8-bit formats
-/// `Yuva422P` / `Yuva444P`. For the alpha-typed formats the returned
-/// frame *always* has 4 planes:
+/// Accepts the eight `Yuv4(2|4)4P{,10Le,12Le,16Le}` requests of
+/// [`decode_packet_with_depth`] plus the alpha-typed formats
+/// `Yuva4(2|4)4P{,10Le,12Le,16Le}`. For the alpha-typed formats the
+/// returned frame *always* has 4 planes:
 ///
 /// * a stream that codes alpha (RDD 36 §6.1.1 Table 7,
-///   `alpha_channel_type` 1 or 2) delivers it as plane 3 at 8 bits per
-///   sample, 16-bit coded alpha demoted per §7.5.2 — consistent with the
-///   §7.5.1 demotion the Y/Cb/Cr planes undergo at 8-bit output;
+///   `alpha_channel_type` 1 or 2) delivers it as plane 3 at the
+///   surface depth, converted per §7.5.2 — consistent with the §7.5.1
+///   conversion the Y/Cb/Cr planes undergo at that depth. On the
+///   `*P16Le` surfaces 16-bit coded alpha passes through exactly (the
+///   §7.5.2 conversion at `b = 16` is the identity);
 /// * a stream with no coded alpha gets a synthesised fully-opaque
-///   (all-255) plane, so the declared plane layout is a hard contract.
+///   (all-`2^b − 1`) plane, so the declared plane layout is a hard
+///   contract.
 ///
 /// `None` behaves like [`decode_packet`] (8-bit, chroma from the frame
 /// header, alpha plane only when coded). The chroma format of a `Some`
@@ -910,8 +945,9 @@ fn dequant_to_f32(blk: &[i32; 64], qmat: &[u8; 64], quantization_index: u8) -> [
 /// `s = clamp(round(2^b * (v + 256) / 512))`,
 ///
 /// where `clamp(n)` restricts `n` to `(nmin, nmax)`. For `b = 8` the
-/// `2^b / 512` factor is `0.5`, for `b = 10` it is `2.0`, and for
-/// `b = 12` it is `8.0`. The clamp bounds are `(0, 2^b − 1)` for
+/// `2^b / 512` factor is `0.5`, for `b = 10` it is `2.0`, for `b = 12`
+/// it is `8.0`, and for `b = 16` it is `128.0`. The clamp bounds are
+/// `(0, 2^b − 1)` for
 /// [`OutputRange::Full`] and `(1, 2^b − 2)` for [`OutputRange::Video`].
 ///
 /// Pulled out of [`paste_block`] as a pure function so the §7.5.1
@@ -923,6 +959,7 @@ fn color_to_sample(v: f32, bit_depth: BitDepth, range: OutputRange) -> u32 {
         BitDepth::Eight => 0.5,
         BitDepth::Ten => 2.0,
         BitDepth::Twelve => 8.0,
+        BitDepth::Sixteen => 128.0,
     };
     let (nmin, nmax) = range.bounds(bit_depth);
     let s = (v + 256.0) * scale;
@@ -956,7 +993,7 @@ fn paste_block(
                 }
             }
         }
-        BitDepth::Ten | BitDepth::Twelve => {
+        BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => {
             for j in 0..8 {
                 let row = field.map(y0 + j);
                 for i in 0..8 {
@@ -1013,7 +1050,7 @@ fn paste_alpha(
                 BitDepth::Eight => {
                     plane[off] = s as u8;
                 }
-                BitDepth::Ten | BitDepth::Twelve => {
+                BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => {
                     plane[off] = (s & 0xFF) as u8;
                     plane[off + 1] = (s >> 8) as u8;
                 }
@@ -1078,7 +1115,12 @@ mod alpha_sample_tests {
     fn endpoints_map_to_full_opacity_range() {
         for act in [AlphaChannelType::Eight, AlphaChannelType::Sixteen] {
             let max_in = act.mask() as u16;
-            for depth in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+            for depth in [
+                BitDepth::Eight,
+                BitDepth::Ten,
+                BitDepth::Twelve,
+                BitDepth::Sixteen,
+            ] {
                 assert_eq!(
                     alpha_to_sample(0, act, depth),
                     0,
@@ -1115,6 +1157,30 @@ mod alpha_sample_tests {
                 alpha_to_sample(alpha as u16, AlphaChannelType::Eight, BitDepth::Twelve),
                 expect(alpha, 4095, 255),
                 "8->12 promotion mismatch at alpha {alpha}"
+            );
+            // 8-bit -> 16-bit (max 65535, mask 255). 65535 = 255 * 257,
+            // so the §7.5.2 promotion is the exact integer 257 * alpha.
+            assert_eq!(
+                alpha_to_sample(alpha as u16, AlphaChannelType::Eight, BitDepth::Sixteen),
+                (alpha * 257) as u16,
+                "8->16 promotion mismatch at alpha {alpha}"
+            );
+        }
+    }
+
+    /// §7.5.2 at matched 16-bit depths: 16-bit decoded alpha
+    /// (alpha_channel_type == 2) into a 16-bit pixel sample is the exact
+    /// identity — "If the pixel component sample bit depth matches that
+    /// of the decoded alpha values, the pixel alpha component samples
+    /// shall be the decoded values themselves." This is the full-alpha-
+    /// fidelity guarantee of the `*P16Le` surfaces.
+    #[test]
+    fn sixteen_bit_alpha_to_sixteen_bit_is_identity() {
+        for a in (0u32..=65535).step_by(97).chain([65535]) {
+            assert_eq!(
+                alpha_to_sample(a as u16, AlphaChannelType::Sixteen, BitDepth::Sixteen),
+                a as u16,
+                "16-bit alpha {a} must map to itself at 16-bit output"
             );
         }
     }
@@ -1167,7 +1233,12 @@ mod alpha_sample_tests {
         // straddles .5 — use the general invariant against a brute float.
         for act in [AlphaChannelType::Eight, AlphaChannelType::Sixteen] {
             let mask = act.mask();
-            for depth in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+            for depth in [
+                BitDepth::Eight,
+                BitDepth::Ten,
+                BitDepth::Twelve,
+                BitDepth::Sixteen,
+            ] {
                 let max_out = depth.max_value();
                 for alpha in [1u32, 7, 19, 99, 100, mask / 2, mask / 2 + 1] {
                     let alpha = alpha.min(mask);
@@ -1205,6 +1276,7 @@ mod color_sample_tests {
             assert_eq!(color_to_sample(0.0, BitDepth::Eight, range), 128);
             assert_eq!(color_to_sample(0.0, BitDepth::Ten, range), 512);
             assert_eq!(color_to_sample(0.0, BitDepth::Twelve, range), 2048);
+            assert_eq!(color_to_sample(0.0, BitDepth::Sixteen, range), 32768);
         }
     }
 
@@ -1226,6 +1298,14 @@ mod color_sample_tests {
         assert_eq!(color_to_sample(-256.0, BitDepth::Ten, OutputRange::Full), 0);
         assert_eq!(
             color_to_sample(-256.0, BitDepth::Twelve, OutputRange::Video),
+            1
+        );
+        assert_eq!(
+            color_to_sample(-256.0, BitDepth::Sixteen, OutputRange::Full),
+            0
+        );
+        assert_eq!(
+            color_to_sample(-256.0, BitDepth::Sixteen, OutputRange::Video),
             1
         );
 
@@ -1254,6 +1334,14 @@ mod color_sample_tests {
             color_to_sample(1000.0, BitDepth::Twelve, OutputRange::Video),
             4094
         );
+        assert_eq!(
+            color_to_sample(1000.0, BitDepth::Sixteen, OutputRange::Full),
+            65535
+        );
+        assert_eq!(
+            color_to_sample(1000.0, BitDepth::Sixteen, OutputRange::Video),
+            65534
+        );
     }
 
     /// Round-to-nearest: at 8-bit the scale is 0.5, so `v = 1` →
@@ -1281,7 +1369,12 @@ mod color_sample_tests {
     #[test]
     fn video_equals_full_away_from_the_extremes() {
         for &v in &[-200.0f32, -64.0, -1.0, 0.0, 1.0, 64.0, 200.0] {
-            for depth in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+            for depth in [
+                BitDepth::Eight,
+                BitDepth::Ten,
+                BitDepth::Twelve,
+                BitDepth::Sixteen,
+            ] {
                 assert_eq!(
                     color_to_sample(v, depth, OutputRange::Full),
                     color_to_sample(v, depth, OutputRange::Video),

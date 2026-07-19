@@ -293,7 +293,7 @@ fn assert_decodes_cleanly(
     // (1 byte for 8-bit, 2 bytes for 10-bit / 12-bit LE-packed planes).
     let bps = match bit_depth {
         BitDepth::Eight => 1,
-        BitDepth::Ten | BitDepth::Twelve => 2,
+        BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => 2,
     };
     assert_eq!(
         decoded.planes[0].stride,

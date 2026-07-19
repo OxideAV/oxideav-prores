@@ -66,6 +66,7 @@ fn out_max_for(depth: BitDepth) -> u64 {
         BitDepth::Eight => 255,
         BitDepth::Ten => 1023,
         BitDepth::Twelve => 4095,
+        BitDepth::Sixteen => 65535,
     }
 }
 
@@ -260,7 +261,7 @@ fn check_at_depth(frame: &[u8], pic: &Picture, depth: BitDepth) {
         for x in 0..pic.width {
             let got = match depth {
                 BitDepth::Eight => row[x] as u16,
-                BitDepth::Ten | BitDepth::Twelve => {
+                BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => {
                     u16::from_le_bytes([row[x * 2], row[x * 2 + 1]])
                 }
             };

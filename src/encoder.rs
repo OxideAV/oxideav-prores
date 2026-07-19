@@ -539,6 +539,10 @@ pub fn make_encoder_with_config(
         PixelFormat::Yuv444P10Le => (ChromaFormat::Y444, BitDepth::Ten, false),
         PixelFormat::Yuv422P12Le => (ChromaFormat::Y422, BitDepth::Twelve, false),
         PixelFormat::Yuv444P12Le => (ChromaFormat::Y444, BitDepth::Twelve, false),
+        // 16-bit input surfaces (§7.5.1 with b = 16): LE words, all 16
+        // bits significant.
+        PixelFormat::Yuv422P16Le => (ChromaFormat::Y422, BitDepth::Sixteen, false),
+        PixelFormat::Yuv444P16Le => (ChromaFormat::Y444, BitDepth::Sixteen, false),
         // Alpha-typed 8-bit input surfaces: 4 planes with a
         // full-resolution 1-byte-per-sample alpha plane at index 3.
         // Every frame is coded with alpha (RDD 36 §5.3.3 + §7.1.2) and
@@ -1585,6 +1589,14 @@ fn read_sample(plane: &[u8], stride: usize, x: usize, y: usize, bit_depth: BitDe
             let hi = plane[off + 1] as u16;
             let s = (lo | (hi << 8)) & 0x0FFF;
             (s as f32) / 8.0 - 256.0
+        }
+        // b = 16: every bit of the LE word is significant, no mask.
+        BitDepth::Sixteen => {
+            let off = y * stride + x * 2;
+            let lo = plane[off] as u16;
+            let hi = plane[off + 1] as u16;
+            let s = lo | (hi << 8);
+            (s as f32) / 128.0 - 256.0
         }
     }
 }

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 16-bit surfaces: `BitDepth::Sixteen` (§7.5.1 with `b = 16`) and the
+  `PixelFormat::Yuv422P16Le` / `Yuv444P16Le` requests on both codec
+  directions. On the as-coded decode surface a 16-bit coded alpha
+  channel now reaches the caller exactly (the §7.5.2 conversion at
+  `b = 16` is the identity).
+- Deep alpha-typed decode surfaces: `PixelFormat::Yuva422P10Le` /
+  `Yuva422P12Le` / `Yuva422P16Le` / `Yuva444P10Le` / `Yuva444P12Le` /
+  `Yuva444P16Le` (oxideav-core ≥ 0.1.31) guarantee a 4-plane frame
+  with §7.5.2-converted alpha at the surface depth on plane 3 and a
+  synthesised fully-opaque plane on streams that code no alpha.
+
+### Documentation
+
+- Recorded the decision on oxideav-core 0.1.31's per-plane
+  significant-bits side-channel: decoded frames never attach it,
+  because the 4th plane is always converted to the same §7.5.2 depth
+  as the colour planes — the record would only restate what the
+  requested `PixelFormat` already declares.
+
 ## [0.1.0](https://github.com/OxideAV/oxideav-prores/compare/v0.0.10...v0.1.0) - 2026-07-18
 
 ### Other

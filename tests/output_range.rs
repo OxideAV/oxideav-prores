@@ -97,7 +97,7 @@ fn encode_one(frame: &VideoFrame, params: &CodecParameters) -> Vec<u8> {
 fn sample(data: &[u8], idx: usize, bd: BitDepth) -> u32 {
     match bd {
         BitDepth::Eight => data[idx] as u32,
-        BitDepth::Ten | BitDepth::Twelve => {
+        BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => {
             u16::from_le_bytes([data[idx * 2], data[idx * 2 + 1]]) as u32
         }
     }

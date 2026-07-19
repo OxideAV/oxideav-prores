@@ -78,7 +78,7 @@ fn read_alpha_plane(frame: &VideoFrame, out: BitDepth) -> Vec<u16> {
     let plane = &frame.planes[3];
     match out {
         BitDepth::Eight => plane.data.iter().map(|&b| b as u16).collect(),
-        BitDepth::Ten | BitDepth::Twelve => plane
+        BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => plane
             .data
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
