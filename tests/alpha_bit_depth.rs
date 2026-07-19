@@ -144,12 +144,25 @@ fn alpha8_promotes_to_12bit() {
     roundtrip_at_depth(BitDepth::Twelve);
 }
 
+/// 8-bit alpha decoded at 16-bit output: §7.5.2 promotion by
+/// `round(65535 * alpha / 255)` — the exact integer `257 * alpha`
+/// (65535 = 255 × 257) — end to end.
+#[test]
+fn alpha8_promotes_to_16bit() {
+    roundtrip_at_depth(BitDepth::Sixteen);
+}
+
 /// The §7.5.2 endpoints must land exactly: a fully-transparent (0) and a
 /// fully-opaque (255) source alpha map to sample 0 and `2^b − 1` at
 /// every output depth.
 #[test]
 fn alpha8_endpoints_exact_each_depth() {
-    for out in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+    for out in [
+        BitDepth::Eight,
+        BitDepth::Ten,
+        BitDepth::Twelve,
+        BitDepth::Sixteen,
+    ] {
         assert_eq!(expected_sample(0, out), 0);
         assert_eq!(u32::from(expected_sample(255, out)), out.max_value());
     }

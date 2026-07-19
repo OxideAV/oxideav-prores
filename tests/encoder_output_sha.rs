@@ -1035,3 +1035,152 @@ fn encoder_sha_config_path_interlaced_alpha_matches_free_function() {
         "config-path interlaced+alpha bytes diverge from encode_frame_interlaced"
     );
 }
+
+// ---------------------------------------------------------------------
+// 16-bit colour (§7.5.1 b = 16) and deep alpha-typed wire pins.
+// ---------------------------------------------------------------------
+
+/// Deterministic 16-bit 4:4:4 source: full-scale LE words, every bit
+/// of the word significant.
+fn synthetic_yuv444p_16bit() -> VideoFrame {
+    let w = W as usize;
+    let h = H as usize;
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; w * h * 2];
+    let mut cr = vec![0u8; w * h * 2];
+    for j in 0..h {
+        for i in 0..w {
+            let yv = (16384i32 + ((i * 131 + j * 197) as i32 % 38400)).clamp(4096, 61440) as u16;
+            let cbv = (32768i32 + ((i as i32 - w as i32 / 2).clamp(-72, 72)) * 320) as u16;
+            let crv = (32768i32 + ((j as i32 - h as i32 / 2).clamp(-72, 72)) * 320) as u16;
+            put_le16(&mut y, j * w + i, yv);
+            put_le16(&mut cb, j * w + i, cbv);
+            put_le16(&mut cr, j * w + i, crv);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cr,
+            },
+        ],
+    }
+}
+
+const EXPECTED_AP4H_16BIT_QI2: &str =
+    "0b47f669df529b818a7b31514c6609f072757a24da68420d12c4e1d3a67782ee";
+const EXPECTED_AP4H_12BIT_QI2_TYPED_DEEP_ALPHA: &str =
+    "c86efec709f45fc6ac455050e2e434ba0b8e8cbcd36a4ca4a6cd3b184d12df32";
+
+/// 4444 (`ap4h`), progressive, 16-bit (yuv444p16le), qi = 2. First SHA
+/// coverage of `read_sample`'s `BitDepth::Sixteen` arm (RDD 36 §7.5.1
+/// `v = s / 128 - 256`).
+#[test]
+fn encoder_sha_pin_ap4h_16bit_no_alpha() {
+    let frame = synthetic_yuv444p_16bit();
+    let pkt = encode_frame_with_depth(
+        &frame,
+        W,
+        H,
+        ChromaFormat::Y444,
+        BitDepth::Sixteen,
+        Profile::Prores4444,
+        2,
+    )
+    .unwrap();
+    let sha = hex(&sha256(&pkt));
+    assert_eq!(sha, EXPECTED_AP4H_16BIT_QI2, "ap4h 16-bit qi=2 SHA drift");
+    assert_decodes_cleanly(&pkt, ChromaFormat::Y444, BitDepth::Sixteen, false);
+    // Distinct from the 8-bit pin on the same content family.
+    assert_ne!(
+        EXPECTED_AP4H_16BIT_QI2, EXPECTED_AP4H_8BIT_QI2,
+        "16-bit and 8-bit pins must differ"
+    );
+}
+
+/// 4444 (`ap4h`), progressive, 12-bit colour + **12-bit typed alpha**
+/// through the `Yuva444P12Le` registry surface, qi = 2. Pins the
+/// §7.5.2-mirror 12→16 alpha promotion's wire bytes — and re-derives
+/// them through the free-function path fed the promoted 16-bit plane,
+/// so a matched encoder/decoder drift still trips the SHA.
+#[test]
+fn encoder_sha_pin_ap4h_12bit_yuva_deep_typed() {
+    use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat};
+    use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+
+    let w = W as usize;
+    let h = H as usize;
+    let mut frame = synthetic_yuv444p_12bit();
+    // Deterministic 12-bit alpha: diagonal sweep + low-bit texture.
+    let mut a = vec![0u8; w * h * 2];
+    for j in 0..h {
+        for i in 0..w {
+            let v = ((((i + j) * 4095) / (w + h - 2)) as u16) ^ (((i * 5 + j * 11) & 0x1F) as u16);
+            put_le16(&mut a, j * w + i, v);
+        }
+    }
+    frame.planes.push(VideoPlane {
+        stride: w * 2,
+        data: a,
+    });
+
+    let mut params = CodecParameters::video(CodecId::new("prores"));
+    params.media_type = MediaType::Video;
+    params.width = Some(W);
+    params.height = Some(H);
+    params.pixel_format = Some(PixelFormat::Yuva444P12Le);
+    let cfg = EncoderConfig::default()
+        .with_profile(Profile::Prores4444)
+        .with_quantization_index(2);
+    let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder Yuva444P12Le");
+    enc.send_frame(&Frame::Video(frame.clone()))
+        .expect("send_frame");
+    let pkt = enc.receive_packet().expect("receive_packet");
+
+    let sha = hex(&sha256(&pkt.data));
+    assert_eq!(
+        sha, EXPECTED_AP4H_12BIT_QI2_TYPED_DEEP_ALPHA,
+        "ap4h 12-bit qi=2 deep-typed-alpha SHA drift"
+    );
+    assert_decodes_cleanly(&pkt.data, ChromaFormat::Y444, BitDepth::Twelve, true);
+
+    // Same bytes through the free-function path with the §7.5.2
+    // promotion applied by hand.
+    let mut promoted = frame.clone();
+    let alpha12 = promoted.planes.pop().expect("alpha plane");
+    let mut a16 = vec![0u8; w * h * 2];
+    for i in 0..w * h {
+        let v12 = u16::from_le_bytes([alpha12.data[i * 2], alpha12.data[i * 2 + 1]]) as u64;
+        put_le16(&mut a16, i, ((65535 * v12 + 2047) / 4095) as u16);
+    }
+    promoted.planes.push(VideoPlane {
+        stride: w * 2,
+        data: a16,
+    });
+    let free = encode_frame_with_alpha(
+        &promoted,
+        W,
+        H,
+        ChromaFormat::Y444,
+        BitDepth::Twelve,
+        Profile::Prores4444,
+        2,
+        Some(AlphaChannelType::Sixteen),
+    )
+    .unwrap();
+    assert_eq!(
+        hex(&sha256(&free)),
+        EXPECTED_AP4H_12BIT_QI2_TYPED_DEEP_ALPHA,
+        "typed-deep bytes diverge from the promoted free-function path"
+    );
+}

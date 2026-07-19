@@ -805,3 +805,58 @@ fn deep_typed_surfaces_on_reference_fixture() {
         );
     }
 }
+
+// ─────────── §7.5.1 Video clamp × deep typed surface interplay ───────────
+
+/// `OutputRange::Video` confines Y/Cb/Cr to `1..=2^b−2` at every deep
+/// surface, but §7.5.2 always maps decoded alpha across the full
+/// opacity range — the deep typed surfaces must keep alpha exact
+/// (extreme codes 0 and `2^b−1` included) while the colour planes
+/// clamp.
+#[test]
+fn deep_typed_video_range_clamps_colour_not_alpha() {
+    let (w, h) = (W as usize, H as usize);
+    for pf in [PixelFormat::Yuva444P12Le, PixelFormat::Yuva444P16Le] {
+        let (_chroma, depth, _) = shape_of(pf);
+        let max = depth.max_value();
+        // Luma at both extremes so the Video clamp is observable.
+        let y: Vec<u16> = (0..w * h)
+            .map(|i| if i % 2 == 0 { 0 } else { max as u16 })
+            .collect();
+        let mid = vec![(max / 2) as u16; w * h];
+        let mut alpha = deep_alpha_samples(w, h, depth);
+        alpha[0] = 0;
+        alpha[w * h - 1] = max as u16;
+        let planes = vec![
+            le_plane(&y, w),
+            le_plane(&mid, w),
+            le_plane(&mid, w),
+            le_plane(&alpha, w),
+        ];
+        let mut enc = make_encoder(&params(pf)).expect("make_encoder");
+        enc.send_frame(&frame_with(planes)).expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+
+        let video = decode_packet_with_format(&pkt.data, Some(0), Some(pf), OutputRange::Video)
+            .expect("typed deep decode, Video range");
+        assert_eq!(video.planes.len(), 4);
+        let (nmin, nmax) = (1u16, (max - 1) as u16);
+        for (p, name) in video.planes.iter().take(3).zip(["Y", "Cb", "Cr"]) {
+            assert!(
+                read_u16s(p).iter().all(|s| (nmin..=nmax).contains(s)),
+                "{pf:?} {name} plane must clamp to the permissible video levels \
+                 {nmin}..={nmax}"
+            );
+        }
+        let y_out = read_u16s(&video.planes[0]);
+        assert!(
+            y_out.contains(&nmin) && y_out.contains(&nmax),
+            "{pf:?}: premise — the source extremes actually hit the Video clamp bounds"
+        );
+        assert_eq!(
+            read_u16s(&video.planes[3]),
+            alpha,
+            "{pf:?}: alpha is unaffected by the Video clamp (§7.5.2 full opacity range)"
+        );
+    }
+}
