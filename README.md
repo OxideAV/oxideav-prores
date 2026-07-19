@@ -4,9 +4,10 @@
 
 Pure-Rust **Apple ProRes** codec — decoder + encoder for all six
 ProRes video profiles (422 Proxy / LT / Standard / HQ and 4444 /
-4444 XQ). 8-bit, 10-bit, and 12-bit Y'CbCr; lossless alpha plane on the
-4444 / 4444 XQ profiles, with an alpha-typed `Yuva422P` / `Yuva444P`
-frame surface on both codec directions. Progressive and interlaced
+4444 XQ). 8-, 10-, 12-, and 16-bit Y'CbCr; lossless alpha plane on
+the 4444 / 4444 XQ profiles, with alpha-typed
+`Yuva4(2|4)4P{,10Le,12Le,16Le}` frame surfaces on both codec
+directions — up to exact 16-bit alpha. Progressive and interlaced
 (TFF/BFF) in every profile.
 
 Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace)
@@ -17,14 +18,14 @@ codec libraries linked or wrapped, no `*-sys` crates).
 
 Every profile decodes and encodes.
 
-| Profile        | FourCC | Pixel formats                                        |
-|----------------|--------|------------------------------------------------------|
-| 422 Proxy      | `apco` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  |
-| 422 LT         | `apcs` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  |
-| 422 Standard   | `apcn` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  |
-| 422 HQ         | `apch` | `Yuv422P`, `Yuv422P10Le`, `Yuv422P12Le`, `Yuva422P`  |
-| 4444           | `ap4h` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  |
-| 4444 XQ        | `ap4x` | `Yuv444P`, `Yuv444P10Le`, `Yuv444P12Le`, `Yuva444P`  |
+| Profile        | FourCC | Pixel formats                                       |
+|----------------|--------|-----------------------------------------------------|
+| 422 Proxy      | `apco` | `Yuv422P{,10Le,12Le,16Le}`, `Yuva422P{,10Le,12Le,16Le}` |
+| 422 LT         | `apcs` | `Yuv422P{,10Le,12Le,16Le}`, `Yuva422P{,10Le,12Le,16Le}` |
+| 422 Standard   | `apcn` | `Yuv422P{,10Le,12Le,16Le}`, `Yuva422P{,10Le,12Le,16Le}` |
+| 422 HQ         | `apch` | `Yuv422P{,10Le,12Le,16Le}`, `Yuva422P{,10Le,12Le,16Le}` |
+| 4444           | `ap4h` | `Yuv444P{,10Le,12Le,16Le}`, `Yuva444P{,10Le,12Le,16Le}` |
+| 4444 XQ        | `ap4x` | `Yuv444P{,10Le,12Le,16Le}`, `Yuva444P{,10Le,12Le,16Le}` |
 
 ## Using it through the oxideav framework
 
@@ -88,7 +89,8 @@ RDD 36 carries no per-frame bit-depth syntax; §7.5.1 defines the
 conversion to samples of arbitrary depth `b`. Request the depth via
 `CodecParameters::pixel_format`: `Yuv422P`/`Yuv444P` (or nothing) for
 8-bit, `*P10Le` for 10-bit (`0..=1023`), `*P12Le` for 12-bit
-(`0..=4095`).
+(`0..=4095`), `*P16Le` for 16-bit (`0..=65535`, every word bit
+significant).
 
 The §7.5.1 clamp has two spec-offered choices, exposed as
 `decoder::OutputRange`: **`Full`** (default — samples use all `2^b`
@@ -106,17 +108,24 @@ it.
 
 Two ways to consume/produce it:
 
-* **Typed contract** — request `Yuva422P` / `Yuva444P` (oxideav-core
-  ≥ 0.1.30): decode *always* returns 4 planes (16-bit coded alpha is
-  demoted per §7.5.2, streams without alpha get an opaque plane);
-  encode requires 4-plane 8-bit-alpha input and rejects anything else
-  with a self-explaining error.
-* **Untyped convention** — request `Yuv4(2|4)4P{,10Le,12Le}`: a 4th
-  plane is appended when the stream codes alpha (detect via
-  `planes.len() == 4`), preserving 10/12-bit colour with
-  §7.5.2-converted alpha and 16-bit alpha input on the encoder. Deep
-  *typed* alpha would need `Yuva*P10/12/16Le` core formats (not yet in
-  the enum).
+* **Typed contract** — request `Yuva4(2|4)4P` (8-bit, oxideav-core
+  ≥ 0.1.30) or the deep `Yuva4(2|4)4P{10,12,16}Le` formats
+  (oxideav-core ≥ 0.1.31): decode *always* returns 4 planes with
+  alpha §7.5.2-converted to the surface depth — exact on the `*P16Le`
+  surfaces, where 16-bit coded alpha passes through verbatim — and
+  streams without alpha get an opaque plane. Encode requires 4-plane
+  input at the format's alpha depth and rejects anything else with a
+  self-explaining error; deep input codes 16-bit alpha
+  (`alpha_channel_type = 2`) via the §7.5.2-mirror promotion, so no
+  precision is dropped on the wire (10-/12-bit alpha round-trips
+  sample-exact).
+* **Untyped convention** — request `Yuv4(2|4)4P{,10Le,12Le,16Le}`: a
+  4th plane is appended when the stream codes alpha (detect via
+  `planes.len() == 4`), converted to the same surface depth as the
+  colour planes, with 16-bit alpha input on the encoder. Because the
+  4th plane always matches the surface depth, decoded frames never
+  need oxideav-core's per-plane significant-bits side-channel — the
+  pixel format already says everything.
 
 The encoder auto-detects 4-plane input on the config path (8- vs
 16-bit alpha inferred from the plane), and rate control carries the
@@ -172,7 +181,8 @@ All through `EncoderConfig` + `make_encoder_with_config`:
 * `with_rate_control` — two-pass per-frame binary search to
   `bit_rate / fps` within ±5 %.
 * `with_alpha_channel_type` — explicit 8-/16-bit alpha; default
-  auto-detects 4-plane input.
+  auto-detects 4-plane input. Alpha-typed pixel formats fix the coded
+  width themselves and refuse a contradictory request.
 * `with_quant_matrices` / `perceptual*` / `signature_for_profile` —
   see above.
 * `with_min_frame_size` — §5.1.2 constant-frame-size stuffing (padded
@@ -212,8 +222,11 @@ refused, never truncated).
 
 Every profile self-roundtrips bit-exactly and cross-decodes against an
 external ProRes decoder (black-box only) at 58–68 dB luma PSNR across
-8/10/12-bit, progressive + interlaced, and 4444 ± alpha; the
-alpha-typed surface is black-box validated in both directions. The
+8/10/12/16-bit, progressive + interlaced, and 4444 ± alpha; the
+alpha-typed surfaces (8-bit and deep) are black-box validated in both
+directions — the external decoder recovers 12-bit typed alpha
+sample-exact and 10-/16-bit typed alpha within ±1 code of its own
+rounding chain. The
 full RDD 36 Annex A IDCT accuracy qualification passes with margin,
 and reference fixtures under `docs/video/prores/fixtures/` pin decode
 and encode SHAs. At equal rate with signature matrices, the encoder
