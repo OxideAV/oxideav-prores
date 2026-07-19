@@ -3360,3 +3360,288 @@ fn cross_decode_encoder_alpha_yuva422_typed_progressive() {
         "4:2:2 typed-surface luma PSNR {psnr:.2} dB under 30 dB bar"
     );
 }
+
+// ───────── deep alpha-typed formats (Yuva444P10/12/16Le) through the Encoder trait ─────────
+//
+// The deep typed surfaces code 16-bit alpha (`alpha_channel_type = 2`)
+// from 16-bit-word input planes at the format's depth, via the
+// §7.5.2-mirror promotion. The black-box pin: the reference decoder
+// must accept the emitted stream and recover, at its native 12-bit
+// alpha surface, exactly the §7.5.2 image of our coded values — which
+// for 12-bit typed input is the *source alpha itself* (the 12→16→12
+// chain is lossless).
+
+/// Deep 4:4:4 source at `depth`: field-distinct even/odd luma bias
+/// (scaled into the depth's SMPTE-legal-ish window), full-resolution
+/// chroma modulation, and a diagonal alpha gradient sweeping the
+/// depth's full range as 16-bit LE words (typed alpha layout).
+fn synthetic_444_deep_typed(width: u32, height: u32, depth: BitDepth) -> VideoFrame {
+    let w = width as usize;
+    let h = height as usize;
+    let max = depth.max_value();
+    let scale = |v8: u32| (v8 * max / 255).min(max) as u16;
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; w * h * 2];
+    let mut cr = vec![0u8; w * h * 2];
+    let mut a = vec![0u8; w * h * 2];
+    let put = |buf: &mut [u8], idx: usize, v: u16| {
+        buf[idx * 2..idx * 2 + 2].copy_from_slice(&v.to_le_bytes());
+    };
+    for j in 0..h {
+        for i in 0..w {
+            let base: u32 = if j % 2 == 0 { 160 } else { 96 };
+            let grad = ((i + j) % 48) as u32;
+            let phase = ((i.wrapping_mul(7) ^ j.wrapping_mul(13)) % 24) as u32;
+            put(
+                &mut y,
+                j * w + i,
+                scale((base + grad + phase).clamp(16, 235)),
+            );
+            let cbv = (128 + ((i as i32 - w as i32 / 2) / 2).clamp(-48, 48)) as u32;
+            let crv = (128 + ((j as i32 - h as i32 / 2) / 2).clamp(-48, 48)) as u32;
+            put(&mut cb, j * w + i, scale(cbv));
+            put(&mut cr, j * w + i, scale(crv));
+            let av = ((i + j) as u32 * max) / ((w + h - 2).max(1) as u32);
+            put(&mut a, j * w + i, av as u16);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cr,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: a,
+            },
+        ],
+    }
+}
+
+/// Drive a deep alpha-typed registry encoder (progressive or
+/// interlaced) and validate the emitted stream in the black-box
+/// reference decoder at its native 12-bit YUVA surface.
+fn cross_decode_encoder_deep_typed(
+    width: u32,
+    height: u32,
+    interlace_mode: u8,
+    pixel_format: PixelFormat,
+) {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping deep-typed cross-decode");
+        return;
+    }
+    let depth = match pixel_format {
+        PixelFormat::Yuva444P10Le => BitDepth::Ten,
+        PixelFormat::Yuva444P12Le => BitDepth::Twelve,
+        PixelFormat::Yuva444P16Le => BitDepth::Sixteen,
+        other => panic!("driver expects a deep 4:4:4 typed format, got {other:?}"),
+    };
+    let tmp = tempdir().expect("tempdir");
+    let profile_flag = 4u8; // ap4h
+    let template_path = tmp.join(format!(
+        "tmpl_deep_{width}x{height}_im{interlace_mode}_{}bit.mov",
+        depth.bits()
+    ));
+    let have_template = if interlace_mode == 0 {
+        ffmpeg_make_template_mov_444_alpha_progressive(profile_flag, width, height, &template_path)
+    } else {
+        ffmpeg_make_template_mov_444_alpha(
+            profile_flag,
+            width,
+            height,
+            interlace_mode == 1,
+            &template_path,
+        )
+    };
+    if !have_template {
+        eprintln!("4444+alpha template MOV unavailable — skipping");
+        return;
+    }
+    let template = std::fs::read(&template_path).expect("read template");
+
+    let src = synthetic_444_deep_typed(width, height, depth);
+    let mut params = CodecParameters::video(CodecId::new("prores"));
+    params.media_type = MediaType::Video;
+    params.width = Some(width);
+    params.height = Some(height);
+    params.pixel_format = Some(pixel_format);
+    let mut cfg = EncoderConfig::for_profile(Profile::Prores4444);
+    if interlace_mode != 0 {
+        cfg = cfg.with_interlace_mode(interlace_mode);
+    }
+    let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder_with_config");
+    enc.send_frame(&Frame::Video(src.clone()))
+        .expect("send_frame");
+    let pkt = enc.receive_packet().expect("receive_packet");
+
+    let (fh, _) = oxideav_prores::frame::parse_frame(&pkt.data).expect("parse our packet");
+    assert_eq!(
+        fh.alpha_channel_type, 2,
+        "deep typed frame must carry 16-bit alpha (alpha_channel_type = 2)"
+    );
+    assert_eq!(fh.interlace_mode, interlace_mode);
+
+    let patched = patch_mov_with_packet(&template, &pkt.data);
+    let patched_path = tmp.join(format!(
+        "patched_deep_{width}x{height}_im{interlace_mode}_{}bit.mov",
+        depth.bits()
+    ));
+    std::fs::write(&patched_path, &patched).expect("write patched");
+
+    let decoded_path = tmp.join(format!(
+        "decoded_deep_{width}x{height}_im{interlace_mode}_{}bit.yuv",
+        depth.bits()
+    ));
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            patched_path.to_str().unwrap(),
+            "-pix_fmt",
+            "yuva444p12le",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            decoded_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode");
+    assert!(
+        status.success(),
+        "reference decoder refused our deep-typed packet \
+         ({pixel_format:?}, im={interlace_mode})"
+    );
+    let decoded = std::fs::read(&decoded_path).expect("read decoded");
+    let plane_bytes = (width as usize) * (height as usize) * 2;
+    assert!(
+        decoded.len() >= plane_bytes * 4,
+        "expected 4 12-bit planes, got {} bytes",
+        decoded.len()
+    );
+    let decoded_y = &decoded[..plane_bytes];
+    let decoded_a = &decoded[plane_bytes * 3..plane_bytes * 4];
+
+    // Luma PSNR against the source converted to the reference 12-bit
+    // surface (10-bit << 2, 12-bit as-is, 16-bit >> 4).
+    let src_y_12: Vec<u8> = src.planes[0]
+        .data
+        .chunks_exact(2)
+        .flat_map(|c| {
+            let v = u16::from_le_bytes([c[0], c[1]]);
+            let v12 = match depth {
+                BitDepth::Ten => v << 2,
+                BitDepth::Twelve => v,
+                BitDepth::Sixteen => v >> 4,
+                BitDepth::Eight => unreachable!("8-bit not in this driver"),
+            };
+            v12.to_le_bytes()
+        })
+        .collect();
+    let psnr = psnr_12bit(&src_y_12, decoded_y);
+
+    // Alpha: our wire codes round(65535 * a / (2^d − 1)); the reference
+    // decoder's native 12-bit surface then shows the §7.5.2 demote of
+    // exactly those coded values. Chain both roundings for the closed
+    // form; the reference's own demote rounding may differ by ±1.
+    let in_max = depth.max_value() as u64;
+    let n = plane_bytes / 2;
+    let mut a_abs_err = 0u64;
+    let mut a_max_err = 0u64;
+    let mut a_exact = 0usize;
+    for i in 0..n {
+        let s =
+            u16::from_le_bytes([src.planes[3].data[i * 2], src.planes[3].data[i * 2 + 1]]) as u64;
+        let coded = (65535 * s + in_max / 2) / in_max;
+        let want = ((4095 * coded + 32767) / 65535) as i64;
+        let got = u16::from_le_bytes([decoded_a[i * 2], decoded_a[i * 2 + 1]]) as i64;
+        let d = (got - want).unsigned_abs();
+        a_abs_err += d;
+        a_max_err = a_max_err.max(d);
+        if d == 0 {
+            a_exact += 1;
+        }
+    }
+    let a_mae = a_abs_err as f64 / n as f64;
+    eprintln!(
+        "cross-decode deep typed ({pixel_format:?}, im={interlace_mode}, \
+         {width}x{height}): packet={} bytes, luma PSNR={psnr:.2} dB, \
+         alpha MAE={a_mae:.4} max|err|={a_max_err} ({a_exact}/{n} exact)",
+        pkt.data.len()
+    );
+    assert!(
+        psnr >= 30.0,
+        "deep-typed cross-decode PSNR {psnr:.2} dB under 30 dB bar"
+    );
+    assert!(
+        a_max_err <= 1 && a_mae < 0.5,
+        "deep-typed alpha not recovered by the reference decoder \
+         (MAE={a_mae:.4}, max |err|={a_max_err})"
+    );
+
+    if interlace_mode != 0 {
+        // Even/odd luma bias must survive the field pair.
+        let mut even_sum = 0u64;
+        let mut odd_sum = 0u64;
+        let w = width as usize;
+        for j in 0..(height as usize) {
+            let row_start = j * w * 2;
+            let mut row_sum = 0u64;
+            for i in 0..w {
+                let v = u16::from_le_bytes([
+                    decoded_y[row_start + i * 2],
+                    decoded_y[row_start + i * 2 + 1],
+                ]);
+                row_sum += v as u64;
+            }
+            if j % 2 == 0 {
+                even_sum += row_sum;
+            } else {
+                odd_sum += row_sum;
+            }
+        }
+        assert!(
+            even_sum > odd_sum,
+            "deep-typed interlaced: even-row sum {even_sum} not > odd-row sum {odd_sum}"
+        );
+    }
+}
+
+#[test]
+fn cross_decode_encoder_deep_typed_p12_progressive() {
+    cross_decode_encoder_deep_typed(64, 48, 0, PixelFormat::Yuva444P12Le);
+}
+
+#[test]
+fn cross_decode_encoder_deep_typed_p12_interlaced_tff() {
+    cross_decode_encoder_deep_typed(64, 48, 1, PixelFormat::Yuva444P12Le);
+}
+
+#[test]
+fn cross_decode_encoder_deep_typed_p10_progressive() {
+    cross_decode_encoder_deep_typed(64, 48, 0, PixelFormat::Yuva444P10Le);
+}
+
+#[test]
+fn cross_decode_encoder_deep_typed_p16_progressive() {
+    cross_decode_encoder_deep_typed(64, 48, 0, PixelFormat::Yuva444P16Le);
+}
+
+#[test]
+fn cross_decode_encoder_deep_typed_p12_progressive_larger() {
+    cross_decode_encoder_deep_typed(128, 96, 0, PixelFormat::Yuva444P12Le);
+}
