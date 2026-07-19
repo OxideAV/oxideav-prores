@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-prores/compare/v0.1.0...v0.2.0) - 2026-07-19
+
+### Other
+
+- wire-stability SHA pins + §7.5.1/§7.5.2 deep interplay pins
+- prores README: fold the 16-bit and deep alpha-typed surfaces into the format story
+- prores benches: fix unused-mut clippy in the deep bench helpers
+- prores benches: deep alpha-typed decode/encode scenarios
+- prores fuzz: deep alpha-typed + 16-bit surfaces in the with_depth harness
+- black-box encode validation of the deep typed surfaces
+- black-box decode validation of the deep typed surfaces
+- prores tests: deep typed-surface suite (18 pins, both directions)
+- advertise the 16-bit and deep alpha-typed formats in registry caps
+- prores encoder: deep alpha-typed input (Yuva*P10/12/16Le)
+- 16-bit surfaces + deep alpha-typed decode (Yuva*P10/12/16Le)
+
 ### Added
 
 - 16-bit surfaces: `BitDepth::Sixteen` (§7.5.1 with `b = 16`) and the
