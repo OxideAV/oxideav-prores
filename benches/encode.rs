@@ -154,7 +154,7 @@ fn source_444_12bit(width: u32, height: u32) -> VideoFrame {
     let mut y = vec![0u8; w * h * 2];
     let mut cb = vec![0u8; w * h * 2];
     let mut cr = vec![0u8; w * h * 2];
-    let mut put = |buf: &mut [u8], idx: usize, v: u16| {
+    let put = |buf: &mut [u8], idx: usize, v: u16| {
         buf[idx * 2..idx * 2 + 2].copy_from_slice(&v.to_le_bytes());
     };
     for j in 0..h {
