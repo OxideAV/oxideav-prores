@@ -1,11 +1,13 @@
 //! Criterion benchmark for the ProRes decode hot path.
 //!
-//! Four representative inputs are benched: a 4:2:2 8-bit Standard
+//! Five representative inputs are benched: a 4:2:2 8-bit Standard
 //! (`apcn`) frame, a 4:4:4 8-bit ProRes 4444 (`ap4h`) frame, a
-//! 4:2:2 10-bit frame decoded to packed-LE `Yuv422P10Le`, and a 4:4:4
+//! 4:2:2 10-bit frame decoded to packed-LE `Yuv422P10Le`, a 4:4:4
 //! 8-bit + alpha frame decoded through the alpha-typed `Yuva444P`
 //! surface (adds the §7.1.2 alpha entropy decode + §7.5.2 conversion
-//! to the ap4h baseline). Every input is synthesized in-process via
+//! to the ap4h baseline), and a 4:4:4 12-bit + 12-bit-alpha frame
+//! through the deep `Yuva444P12Le` surface (16-bit-word colour emit +
+//! deep §7.5.2 alpha). Every input is synthesized in-process via
 //! this crate's own encoder, so the bench needs no external fixtures —
 //! the encode cost is paid once during setup and excluded from the
 //! measured region.
@@ -138,6 +140,46 @@ fn source_422_10bit(width: u32, height: u32) -> VideoFrame {
     }
 }
 
+/// 12-bit 4:4:4 gradient: each sample is packed little-endian into two
+/// bytes, valid range `0..=4095`.
+fn source_444_12bit(width: u32, height: u32) -> VideoFrame {
+    let w = width as usize;
+    let h = height as usize;
+    let mut y = vec![0u8; w * h * 2];
+    let mut cb = vec![0u8; w * h * 2];
+    let mut cr = vec![0u8; w * h * 2];
+    let mut put = |buf: &mut [u8], idx: usize, v: u16| {
+        buf[idx * 2..idx * 2 + 2].copy_from_slice(&v.to_le_bytes());
+    };
+    for j in 0..h {
+        for i in 0..w {
+            let v: u16 = ((i * 29 + j * 17) as u16 % 4096).min(4095);
+            put(&mut y, j * w + i, v);
+            let cb_v = (2048 + ((i as i32 - w as i32 / 2) * 16).clamp(-1024, 1024)) as u16;
+            let cr_v = (2048 + ((j as i32 - h as i32 / 2) * 16).clamp(-1024, 1024)) as u16;
+            put(&mut cb, j * w + i, cb_v);
+            put(&mut cr, j * w + i, cr_v);
+        }
+    }
+    VideoFrame {
+        pts: Some(0),
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: y,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cb,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: cr,
+            },
+        ],
+    }
+}
+
 /// Encode one frame through the registry encoder and return the packet
 /// bytes. The encode cost is paid here, during bench setup, and is not
 /// part of the measured decode region.
@@ -181,6 +223,26 @@ fn bench_decode(c: &mut Criterion) {
         encode_packet(&src, PixelFormat::Yuva444P)
     };
 
+    // 4:4:4 12-bit colour + 12-bit alpha through the deep alpha-typed
+    // registry surface — adds the 16-bit-word §7.5.2 alpha conversion
+    // and the 2-byte-per-sample colour emit on top of the alpha decode.
+    let ap4h_alpha_deep = {
+        let (w, h) = (W as usize, H as usize);
+        let mut src = source_444_12bit(W, H);
+        let mut a = vec![0u8; w * h * 2];
+        for j in 0..h {
+            for i in 0..w {
+                let v = (((i + j) * 4095) / (w + h - 2)) as u16;
+                a[(j * w + i) * 2..(j * w + i) * 2 + 2].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        src.planes.push(VideoPlane {
+            stride: w * 2,
+            data: a,
+        });
+        encode_packet(&src, PixelFormat::Yuva444P12Le)
+    };
+
     let mut group = c.benchmark_group("decode_frame");
 
     group.bench_function("apcn_422_8bit_128x96", |b| {
@@ -211,6 +273,18 @@ fn bench_decode(c: &mut Criterion) {
                 OutputRange::Full,
             )
             .expect("decode ap4h + alpha (Yuva444P)")
+        });
+    });
+
+    group.bench_function("ap4h_444a_12bit_yuva_deep_128x96", |b| {
+        b.iter(|| {
+            decode_packet_with_format(
+                black_box(&ap4h_alpha_deep),
+                None,
+                Some(PixelFormat::Yuva444P12Le),
+                OutputRange::Full,
+            )
+            .expect("decode ap4h + deep alpha (Yuva444P12Le)")
         });
     });
 
