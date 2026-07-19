@@ -783,3 +783,186 @@ fn rdd36_decode_ap4h_alpha_gradient_yuva444_typed_surface() {
         "same-stream luma PSNR {psnr:.2} dB vs reference decoder is too low"
     );
 }
+
+// ───── deep alpha-typed decode surfaces (Yuva444P10/12/16Le) vs the reference decoder ─────
+
+/// Decode an externally encoded ap4h + alpha-gradient stream through
+/// the three deep alpha-typed surfaces and cross-check against the
+/// reference decoder's native 12-bit YUVA output of the *same*
+/// container.
+///
+/// The stream's coded alpha is 16-bit (the reference 4444 encoder's
+/// native alpha width, §6.1.1 Table 7 code 2). Alpha coding is
+/// lossless (§7.1.2), so the three typed surfaces are exact §7.5.2
+/// images of the same coded values:
+///
+/// * `Yuva444P16Le` — the identity (b = 16), the coded values verbatim;
+/// * `Yuva444P12Le` — `round(4095 * a / 65535)`, directly comparable
+///   with the reference pipeline's own native 12-bit alpha surface
+///   (max |err| ≤ 1 for its independent rounding);
+/// * `Yuva444P10Le` — `round(1023 * a / 65535)`, compared against the
+///   reference 12-bit surface demoted 12 → 10 (two roundings on that
+///   chain, so ±1 code again).
+///
+/// The internal cross-surface relations (16 → 12 and 16 → 10 demotes
+/// reproducing the 12-/10-bit surfaces exactly) are asserted with no
+/// tolerance — those are single-§7.5.2-rounding identities this crate
+/// controls end to end.
+#[test]
+fn rdd36_decode_ap4h_alpha_gradient_deep_typed_surfaces() {
+    use oxideav_core::PixelFormat;
+    use oxideav_prores::decoder::{decode_packet_with_format, OutputRange};
+
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg missing — skipping deep typed-surface interop test");
+        return;
+    }
+    let (width, height) = (128u32, 128u32);
+    let Some(mov) = ffmpeg_make_prores_ap4h_with_alpha_gradient(width, height) else {
+        eprintln!("ffmpeg ap4h+alphamerge unavailable, skipping");
+        return;
+    };
+    let pkt = extract_prores_packet(&mov).expect("extract icpf");
+    let n = (width * height) as usize;
+
+    let decode_typed = |pf: PixelFormat| {
+        let f = decode_packet_with_format(&pkt, Some(0), Some(pf), OutputRange::Full)
+            .unwrap_or_else(|e| panic!("{pf:?} typed decode failed: {e:?}"));
+        assert_eq!(
+            f.planes.len(),
+            4,
+            "{pf:?}: typed surface must yield 4 planes"
+        );
+        for (i, p) in f.planes.iter().enumerate() {
+            assert_eq!(p.stride, width as usize * 2, "{pf:?} plane {i} stride");
+            assert_eq!(p.data.len(), n * 2, "{pf:?} plane {i} size");
+        }
+        f
+    };
+    let f16 = decode_typed(PixelFormat::Yuva444P16Le);
+    let f12 = decode_typed(PixelFormat::Yuva444P12Le);
+    let f10 = decode_typed(PixelFormat::Yuva444P10Le);
+    let u16s = |plane: &oxideav_core::frame::VideoPlane| -> Vec<u16> {
+        plane
+            .data
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    };
+    let a16 = u16s(&f16.planes[3]);
+    let a12 = u16s(&f12.planes[3]);
+    let a10 = u16s(&f10.planes[3]);
+
+    // Exact internal §7.5.2 relations across the surfaces (all three
+    // derive from the same lossless coded 16-bit values).
+    for i in 0..n {
+        let demote = |out_max: u64| ((out_max * a16[i] as u64 + 32767) / 65535) as u16;
+        assert_eq!(
+            a12[i],
+            demote(4095),
+            "sample {i}: 12-bit surface != §7.5.2(16-bit)"
+        );
+        assert_eq!(
+            a10[i],
+            demote(1023),
+            "sample {i}: 10-bit surface != §7.5.2(16-bit)"
+        );
+    }
+
+    // Reference decode of the same container to its native 12-bit YUVA.
+    let tmp = tempdir().expect("tempdir");
+    let mov_path = tmp.join("ap4h_alpha_deep_typed.mov");
+    std::fs::write(&mov_path, &mov).expect("write mov");
+    let raw_path = tmp.join("ap4h_alpha_deep_typed.raw");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            mov_path.to_str().unwrap(),
+            "-pix_fmt",
+            "yuva444p12le",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            raw_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg decode to yuva444p12le");
+    assert!(status.success(), "reference decode to yuva444p12le failed");
+    let raw = std::fs::read(&raw_path).expect("read reference raw");
+    assert!(
+        raw.len() >= n * 8,
+        "expected 4 12-bit planes ({} bytes), got {}",
+        n * 8,
+        raw.len()
+    );
+    let ref_u16 = |plane_idx: usize| -> Vec<u16> {
+        raw[plane_idx * n * 2..(plane_idx + 1) * n * 2]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    };
+    let ref_y = ref_u16(0);
+    let ref_a = ref_u16(3);
+
+    // 12-bit surface alpha vs the reference's native 12-bit alpha:
+    // same coded values, independent §7.5.2 rounding ⇒ ±1 code.
+    let mut max_err_12 = 0u16;
+    let mut abs_err_12 = 0u64;
+    // 10-bit surface vs reference-demoted-to-10 (two roundings on the
+    // reference chain) ⇒ ±1 code.
+    let mut max_err_10 = 0u16;
+    for i in 0..n {
+        let d12 = a12[i].abs_diff(ref_a[i]);
+        max_err_12 = max_err_12.max(d12);
+        abs_err_12 += d12 as u64;
+        let ref_10 = ((ref_a[i] as u32 * 1023 + 2047) / 4095) as u16;
+        max_err_10 = max_err_10.max(a10[i].abs_diff(ref_10));
+    }
+    let mae_12 = abs_err_12 as f64 / n as f64;
+
+    // The gradient must be non-trivial on every surface.
+    let (lo16, hi16) = (*a16.iter().min().unwrap(), *a16.iter().max().unwrap());
+    assert!(
+        hi16 - lo16 > 32768,
+        "16-bit typed alpha range {lo16}..{hi16} is trivial — alpha lost?"
+    );
+
+    // Luma at the 12-bit surface vs the reference's 12-bit luma: only
+    // §7.4 IDCT precision differs.
+    let y12 = u16s(&f12.planes[0]);
+    let mut se = 0f64;
+    for i in 0..n {
+        let d = y12[i] as f64 - ref_y[i] as f64;
+        se += d * d;
+    }
+    let mse = se / n as f64;
+    let psnr = if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (4095.0f64 * 4095.0 / mse).log10()
+    };
+    eprintln!(
+        "deep typed decode vs reference 12-bit YUVA ({width}x{height}): luma \
+         PSNR={psnr:.2} dB, alpha(12) MAE={mae_12:.4} max|err|={max_err_12}, \
+         alpha(10) max|err|={max_err_10}, alpha(16) range={lo16}..{hi16}"
+    );
+    assert!(
+        max_err_12 <= 1 && mae_12 < 0.5,
+        "12-bit typed alpha diverges from the reference decoder beyond the \
+         independent-rounding tolerance (MAE={mae_12:.4}, max |err|={max_err_12})"
+    );
+    assert!(
+        max_err_10 <= 1,
+        "10-bit typed alpha diverges beyond the two-rounding tolerance \
+         (max |err|={max_err_10})"
+    );
+    assert!(
+        psnr >= 45.0,
+        "same-stream 12-bit luma PSNR {psnr:.2} dB vs reference decoder is too low"
+    );
+}
