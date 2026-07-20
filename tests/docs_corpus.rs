@@ -176,6 +176,7 @@ fn diff_plane(our: &[u8], refp: &[u8], bit_depth: BitDepth) -> (usize, usize, i3
             }
             (n_samples, ex, max, sse)
         }
+        _ => unreachable!("variant not exercised by this test"),
     }
 }
 
@@ -300,6 +301,7 @@ fn decode_fixture(case: &CorpusCase) -> Option<DecodeReport> {
     let bps = match case.bit_depth {
         BitDepth::Eight => 1,
         BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => 2,
+        _ => unreachable!("variant not exercised by this test"),
     };
     let cw = match case.chroma {
         ChromaFormat::Y422 => case.width.div_ceil(2),

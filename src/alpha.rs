@@ -57,6 +57,7 @@ use crate::bitstream::{BitReader, BitWriter};
 /// `Eight` ⇒ Table 13 difference code, mask = 0xFF.
 /// `Sixteen` ⇒ Table 14 difference code, mask = 0xFFFF.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum AlphaChannelType {
     Eight,
     Sixteen,

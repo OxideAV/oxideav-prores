@@ -366,6 +366,7 @@ fn cross_decode_interlaced_depth(
         Profile::Hq => 3,
         Profile::Prores4444 => 4,
         Profile::Prores4444Xq => 5,
+        _ => unreachable!("variant not exercised by this test"),
     };
     let template_path = tmp.join(format!(
         "template_p{profile_flag}_{width}x{height}_im{interlace_mode}.mov"
@@ -387,6 +388,7 @@ fn cross_decode_interlaced_depth(
         BitDepth::Twelve | BitDepth::Sixteen => {
             unreachable!("12-/16-bit not exercised here")
         }
+        _ => unreachable!("variant not exercised by this test"),
     };
     let pkt = encode_frame_interlaced(
         &src,
@@ -464,6 +466,7 @@ fn cross_decode_interlaced_depth(
         BitDepth::Twelve | BitDepth::Sixteen => {
             unreachable!("12-/16-bit not exercised here")
         }
+        _ => unreachable!("variant not exercised by this test"),
     };
     let psnr = psnr_10bit(&src_y_10, decoded_y);
     eprintln!(
@@ -1263,6 +1266,7 @@ fn cross_decode_interlaced_via_encoder(
         Profile::Hq => 3,
         Profile::Prores4444 => 4,
         Profile::Prores4444Xq => 5,
+        _ => unreachable!("variant not exercised by this test"),
     };
     let template_path = tmp.join(format!(
         "tmpl_enc_p{profile_flag}_{width}x{height}_im{interlace_mode}.mov"
@@ -1452,6 +1456,7 @@ fn synthetic_progressive_422(width: u32, height: u32, depth: BitDepth) -> VideoF
         BitDepth::Ten => (64, 940, 64, 960, 512, 876),
         BitDepth::Twelve => (256, 3760, 256, 3840, 2048, 3504),
         BitDepth::Sixteen => (4096, 60160, 4096, 61440, 32768, 56064),
+        _ => unreachable!("variant not exercised by this test"),
     };
     let bytes_per = if matches!(depth, BitDepth::Eight) {
         1
@@ -1690,6 +1695,7 @@ fn cross_decode_progressive_422(profile: Profile, width: u32, height: u32, depth
             }
             out
         }
+        _ => unreachable!("variant not exercised by this test"),
     };
     let psnr = psnr_10bit(&src_y_10, decoded_y);
     eprintln!(
@@ -1832,6 +1838,7 @@ fn synthetic_progressive_444(width: u32, height: u32, depth: BitDepth) -> VideoF
         BitDepth::Ten => (64, 940, 64, 960, 512, 876),
         BitDepth::Twelve => (256, 3760, 256, 3840, 2048, 3504),
         BitDepth::Sixteen => (4096, 60160, 4096, 61440, 32768, 56064),
+        _ => unreachable!("variant not exercised by this test"),
     };
     let bytes_per = if matches!(depth, BitDepth::Eight) {
         1
@@ -2087,6 +2094,7 @@ fn cross_decode_progressive_444(profile: Profile, width: u32, height: u32, depth
             }
             out
         }
+        _ => unreachable!("variant not exercised by this test"),
     };
     let psnr = psnr_12bit_444(&src_y_12, decoded_y);
     eprintln!(
@@ -2346,6 +2354,7 @@ fn cross_decode_progressive_422_perceptual(
             }
             out
         }
+        _ => unreachable!("variant not exercised by this test"),
     };
     let psnr = psnr_10bit(&src_y_10, decoded_y);
     eprintln!(
@@ -2541,6 +2550,7 @@ fn cross_decode_progressive_444_perceptual(
             }
             out
         }
+        _ => unreachable!("variant not exercised by this test"),
     };
     let psnr = psnr_12bit_444(&src_y_12, decoded_y);
     eprintln!(
@@ -3548,6 +3558,7 @@ fn cross_decode_encoder_deep_typed(
                 BitDepth::Twelve => v,
                 BitDepth::Sixteen => v >> 4,
                 BitDepth::Eight => unreachable!("8-bit not in this driver"),
+                _ => unreachable!("variant not exercised by this test"),
             };
             v12.to_le_bytes()
         })

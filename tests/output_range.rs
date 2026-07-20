@@ -100,6 +100,7 @@ fn sample(data: &[u8], idx: usize, bd: BitDepth) -> u32 {
         BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => {
             u16::from_le_bytes([data[idx * 2], data[idx * 2 + 1]]) as u32
         }
+        _ => unreachable!("variant not exercised by this test"),
     }
 }
 
