@@ -104,6 +104,7 @@ impl ChromaFormat {
 /// element — RDD 36 frames carry only `chroma_format`, not a profile
 /// code. We keep it for the encoder API and to set sensible defaults.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Profile {
     Proxy,
     Lt,
@@ -165,6 +166,7 @@ impl Profile {
 /// where `picture_pixel_height` = `frame_height >> 1` for an interlaced
 /// frame and `= frame_height` for a progressive one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum InterlaceMode {
     /// Code 0 — progressive frame; one picture() per frame.
     Progressive = 0,
@@ -1148,6 +1150,7 @@ pub fn aspect_ratio_from_code(code: u8) -> Option<oxideav_core::Rational> {
 /// landing on a variant, so a downstream consumer can distinguish "the
 /// stream said unknown" from "the stream specified BT.709".
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ColorPrimaries {
     /// Code 1 — ITU-R BT.709 primaries (Red 0.640/0.330, Green
     /// 0.300/0.600, Blue 0.150/0.060, white D65 0.3127/0.3290).
@@ -1202,6 +1205,7 @@ pub fn color_primaries_from_code(code: u8) -> Option<ColorPrimaries> {
 /// coefficients via [`MatrixCoefficients::luma_coefficients`] using
 /// the spec's exact decimal values.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum MatrixCoefficients {
     /// Code 1 — ITU-R BT.709 (K_R = 0.2126, K_G = 0.7152, K_B = 0.0722).
     Bt709 = 1,
@@ -1262,6 +1266,7 @@ pub fn matrix_coefficients_from_code(code: u8) -> Option<MatrixCoefficients> {
 /// an OETF can match on the typed enum rather than re-deriving the
 /// code-to-function mapping at every call site.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum TransferCharacteristic {
     /// Code 1 — the OETF specified by ITU-R BT.601 / BT.709 / BT.2020:
     /// `V = α · L^0.45 − (α − 1)` for `β ≤ L ≤ 1` and `V = 4.5 · L`

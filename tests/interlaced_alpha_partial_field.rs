@@ -87,6 +87,7 @@ fn read_alpha(frame: &VideoFrame, out: BitDepth) -> Vec<u16> {
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect(),
+        _ => unreachable!("variant not exercised by this test"),
     }
 }
 

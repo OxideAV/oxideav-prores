@@ -318,6 +318,7 @@ fn profile_flag(profile: Profile) -> u8 {
         Profile::Hq => 3,
         Profile::Prores4444 => 4,
         Profile::Prores4444Xq => 5,
+        _ => unreachable!("variant not exercised by this test"),
     }
 }
 

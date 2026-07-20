@@ -81,6 +81,7 @@ const MAX_DECODED_PIXELS: usize = 32_768 * 32_768;
 
 /// Per-component output bit depth.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BitDepth {
     /// 8-bit planar output (`Yuv422P` / `Yuv444P`). One byte per sample.
     Eight,

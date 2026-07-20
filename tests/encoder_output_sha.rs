@@ -294,6 +294,7 @@ fn assert_decodes_cleanly(
     let bps = match bit_depth {
         BitDepth::Eight => 1,
         BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => 2,
+        _ => unreachable!("variant not exercised by this test"),
     };
     assert_eq!(
         decoded.planes[0].stride,

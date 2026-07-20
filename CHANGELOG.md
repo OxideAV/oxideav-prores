@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `BitDepth`, `Profile`, `InterlaceMode`, `ColorPrimaries`,
+  `MatrixCoefficients`, `TransferCharacteristic`, and
+  `AlphaChannelType` are now `#[non_exhaustive]`: their spec code
+  spaces are open (ITU colour code points grow across editions,
+  `interlace_mode` 3 is reserved, the profile set has grown
+  historically, §7.5.1 admits arbitrary depths), so future variant
+  additions become semver-additive. External matches need a wildcard
+  arm. `OutputRange` and `QuantizationMatrixSource` stay exhaustive —
+  their sets are closed by construction.
+
 ### Added
 
 - 16-bit surfaces: `BitDepth::Sixteen` (§7.5.1 with `b = 16`) and the

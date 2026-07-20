@@ -67,6 +67,7 @@ fn out_max_for(depth: BitDepth) -> u64 {
         BitDepth::Ten => 1023,
         BitDepth::Twelve => 4095,
         BitDepth::Sixteen => 65535,
+        _ => unreachable!("variant not exercised by this test"),
     }
 }
 
@@ -264,6 +265,7 @@ fn check_at_depth(frame: &[u8], pic: &Picture, depth: BitDepth) {
                 BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => {
                     u16::from_le_bytes([row[x * 2], row[x * 2 + 1]])
                 }
+                _ => unreachable!("variant not exercised by this test"),
             };
             let want = reference[y * pic.width + x];
             if got != want {
