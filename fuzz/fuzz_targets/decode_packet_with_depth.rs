@@ -103,15 +103,22 @@ fuzz_target!(|data: &[u8]| {
         );
     } else {
         use oxideav_core::PixelFormat;
-        let pf = match (y444, bit_depth) {
-            (false, decoder::BitDepth::Eight) => PixelFormat::Yuva422P,
-            (false, decoder::BitDepth::Ten) => PixelFormat::Yuva422P10Le,
-            (false, decoder::BitDepth::Twelve) => PixelFormat::Yuva422P12Le,
-            (false, decoder::BitDepth::Sixteen) => PixelFormat::Yuva422P16Le,
-            (true, decoder::BitDepth::Eight) => PixelFormat::Yuva444P,
-            (true, decoder::BitDepth::Ten) => PixelFormat::Yuva444P10Le,
-            (true, decoder::BitDepth::Twelve) => PixelFormat::Yuva444P12Le,
-            (true, decoder::BitDepth::Sixteen) => PixelFormat::Yuva444P16Le,
+        // `decoder::BitDepth` is `#[non_exhaustive]`, so a `(bool, BitDepth)`
+        // tuple can never be matched exhaustively by variant alone. The
+        // harness synthesises `bit_depth` from the same `tag & 0x3` two-bit
+        // request field used above (0/1/2 -> 8/10/12, everything else -> 16),
+        // so route the surface selection off that request field directly:
+        // its `_` arm covers the 16-bit request and any future depth the
+        // request encoding might grow into, with no unreachable phantom arm.
+        let pf = match (y444, tag & 0x3) {
+            (false, 0) => PixelFormat::Yuva422P,
+            (false, 1) => PixelFormat::Yuva422P10Le,
+            (false, 2) => PixelFormat::Yuva422P12Le,
+            (false, _) => PixelFormat::Yuva422P16Le,
+            (true, 0) => PixelFormat::Yuva444P,
+            (true, 1) => PixelFormat::Yuva444P10Le,
+            (true, 2) => PixelFormat::Yuva444P12Le,
+            (true, _) => PixelFormat::Yuva444P16Le,
         };
         let _ = decoder::decode_packet_with_format(data, None, Some(pf), range);
     }
