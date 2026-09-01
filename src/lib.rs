@@ -72,14 +72,26 @@
 //!   optional 4th alpha plane).
 //! * [`encoder`]   — `VideoFrame` -> `Packet`, with optional alpha.
 
+// internal — exposed for tests/benches; not part of the stable API
+#[doc(hidden)]
 pub mod alpha;
+// internal — exposed for tests/benches; not part of the stable API
+#[doc(hidden)]
 pub mod bitstream;
+// internal — exposed for tests/benches; not part of the stable API
+#[doc(hidden)]
 pub mod dct;
 pub mod decoder;
 pub mod encoder;
+// internal — exposed for tests/benches; not part of the stable API
+#[doc(hidden)]
 pub mod entropy;
 pub mod frame;
+// internal — exposed for tests/benches; not part of the stable API
+#[doc(hidden)]
 pub mod quant;
+// internal — exposed for tests/benches; not part of the stable API
+#[doc(hidden)]
 pub mod slice;
 
 use oxideav_core::{CodecCapabilities, CodecId, CodecTag, PixelFormat};
