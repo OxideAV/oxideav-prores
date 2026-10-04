@@ -47,8 +47,10 @@ params.height = Some(1080);
 params.pixel_format = Some(PixelFormat::Yuv422P);
 params.bit_rate = Some(220_000_000); // -> 422 HQ
 
-let mut enc = ctx.codecs.make_encoder(&params)?;
-let mut dec = ctx.codecs.make_decoder(&params)?;
+// Priority / preference-aware selection lives in oxideav-pipeline.
+let mut enc = oxideav_pipeline::make_encoder(&ctx.codecs, &params)?;
+let mut dec = oxideav_pipeline::make_decoder(&ctx.codecs, &params)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 The encoder picks a profile from `pixel_format` + `bit_rate`:
