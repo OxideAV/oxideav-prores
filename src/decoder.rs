@@ -989,12 +989,14 @@ fn paste_block(
     range: OutputRange,
     field: FieldStride,
 ) {
+    let constant_sample = blk[1..].iter().all(|&v| v == blk[0])
+        .then(|| color_to_sample(blk[0], bit_depth, range));
     match bit_depth {
         BitDepth::Eight => {
             for j in 0..8 {
                 let row = field.map(y0 + j);
                 for i in 0..8 {
-                    let px = color_to_sample(blk[j * 8 + i], bit_depth, range) as u8;
+                    let px = constant_sample.unwrap_or_else(|| color_to_sample(blk[j * 8 + i], bit_depth, range)) as u8;
                     plane[row * byte_stride + x0 + i] = px;
                 }
             }
@@ -1003,7 +1005,7 @@ fn paste_block(
             for j in 0..8 {
                 let row = field.map(y0 + j);
                 for i in 0..8 {
-                    let px = color_to_sample(blk[j * 8 + i], bit_depth, range) as u16;
+                    let px = constant_sample.unwrap_or_else(|| color_to_sample(blk[j * 8 + i], bit_depth, range)) as u16;
                     let off = row * byte_stride + (x0 + i) * 2;
                     plane[off] = (px & 0xFF) as u8;
                     plane[off + 1] = (px >> 8) as u8;
