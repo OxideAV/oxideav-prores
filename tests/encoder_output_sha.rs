@@ -523,17 +523,17 @@ const EXPECTED_APCN_8BIT_QI4: &str =
 const EXPECTED_APCH_8BIT_QI2: &str =
     "b1b0bfa416fef818c3b59b0dda6aa879e86ca67654b288f5f56be0ec66a70aa0";
 const EXPECTED_AP4H_8BIT_QI2: &str =
-    "b31728c138392c8cc9349036e3a42a25ed3a296cc6800fc4f8dba5a4a22d2ffc";
+    "6914724908613e885dc45c6ec1bc813c0bc8494ef19705f3646872c5aad981fe";
 const EXPECTED_AP4X_8BIT_QI1: &str =
-    "d9f16ea34257bc534ba8c8cc63a4fef58788be1b7c6dc8e3528bdc53de46659c";
+    "189f53b605749efcd880e55defc626739f996da5b21beabe4a012f83876d98a7";
 const EXPECTED_AP4H_8BIT_QI2_ALPHA8: &str =
-    "527caa00db995b266cf3e1dca3faaf318f60652f63117e50c9974a8b3e1a3054";
+    "ee2587edc01cb7ee1bceaba6513eddacbe2176bbeca4c224a1c3d4e357d394eb";
 const EXPECTED_APCN_8BIT_QI4_INTERLACED_TFF: &str =
     "4ddef64dced233bf809caec388bb30ef76a12b6d02ea2e44c973c87489337105";
 const EXPECTED_APCN_8BIT_QI4_INTERLACED_BFF: &str =
     "4ff781f8c66686e253d123b8f0ef640aecf4d2e9f311afb9d458cd7c6c5f34f3";
 const EXPECTED_AP4H_8BIT_QI2_PERCEPTUAL: &str =
-    "6f782398b5c7f1f5cc8ddf008eb71dd1c98f404b960ca862dca18662ece24637";
+    "4170c30594ff01f57768417800964ca928911344d179a8000098b3fec1a6c44d";
 
 // ---------------------------------------------------------------------
 // 10-bit and 12-bit synthetic inputs.
@@ -858,11 +858,11 @@ fn encoder_sha_pin_ap4h_12bit_no_alpha() {
 const EXPECTED_APCN_10BIT_QI4: &str =
     "ca02b92f39098dba5016b36a6f8b312f06796b4834f6f3ef9db143ad1414a6f0";
 const EXPECTED_AP4H_10BIT_QI2: &str =
-    "3ecc5425a1bdab45a46fd3fe3b891dad05b1894dbee1ae70bc1974efda78993f";
+    "b3e2454e6d1850e4997a98e086b61d70b68380aa2bc7f6e1ffab87b7810b8cb7";
 const EXPECTED_APCN_12BIT_QI4: &str =
     "2a3a595b86266b55af602e990699231c6969ad5ba5fb5125784ae2ad14041bfc";
 const EXPECTED_AP4H_12BIT_QI2: &str =
-    "8e2296ba352a1deeaee9361c43839927f17d9f38508098ee59d2962c39f52f4f";
+    "0710a42ed59fc0de7a80b72e0d533c636847f314affa89d6e1f1826306f850a7";
 
 // ---------------------------------------------------------------------
 // Alpha corpus extension: 16-bit alpha (Table 14) and interlaced+alpha,
@@ -903,9 +903,9 @@ fn synthetic_yuv444p_8bit_with_alpha16() -> VideoFrame {
 }
 
 const EXPECTED_AP4X_8BIT_QI1_ALPHA16: &str =
-    "8ea77c460fe3289c4a9a7612d91df1937e6fa39c2c7311bef884fce02a3641b0";
+    "e68ef0db7b45375e9ee737c2210a8a64d4a296bc5aeb4c2d9e67dc5e2d9848b8";
 const EXPECTED_AP4H_8BIT_QI2_INTERLACED_TFF_ALPHA8: &str =
-    "2131c59f74797ba5df2ef48e7ade90c38f066ba9d366db05a15434a46b5a41e6";
+    "2b6147953ea8678cdac22614fbc9bd93dfded2fe51d4fd07809e2cc066dff780";
 
 /// 4444 XQ (`ap4x`), progressive, 8-bit YUV, **16-bit alpha**
 /// (Table 14), default qi = 1. First SHA coverage of the 16-bit alpha
@@ -1079,9 +1079,9 @@ fn synthetic_yuv444p_16bit() -> VideoFrame {
 }
 
 const EXPECTED_AP4H_16BIT_QI2: &str =
-    "0b47f669df529b818a7b31514c6609f072757a24da68420d12c4e1d3a67782ee";
+    "99079dcadec0b00f63e91c5727e6783a1fbc2fb0c2e51409fb7fc5e761d1a98e";
 const EXPECTED_AP4H_12BIT_QI2_TYPED_DEEP_ALPHA: &str =
-    "c86efec709f45fc6ac455050e2e434ba0b8e8cbcd36a4ca4a6cd3b184d12df32";
+    "6fb4bcb59c0f09bd68473f0f621f98eec4bd3b753534f58481ac10e445e19563";
 
 /// 4444 (`ap4h`), progressive, 16-bit (yuv444p16le), qi = 2. First SHA
 /// coverage of `read_sample`'s `BitDepth::Sixteen` arm (RDD 36 §7.5.1

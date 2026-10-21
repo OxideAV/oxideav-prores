@@ -710,7 +710,7 @@ fn decode_picture_into_planes<'a>(
     const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
     let chroma_offsets: &[(usize, usize)] = match chroma {
         ChromaFormat::Y422 => &[(0, 0), (0, 1)],
-        ChromaFormat::Y444 => &LUMA_OFFSETS,
+        ChromaFormat::Y444 => &[(0, 0), (0, 1), (1, 0), (1, 1)],
     };
     let cb_per_mb = chroma_blocks_per_mb(chroma);
     let per_mb = blocks_per_mb(chroma);

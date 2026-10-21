@@ -1563,7 +1563,7 @@ fn encode_one_picture(
     const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
     let chroma_offsets: &[(usize, usize)] = match chroma {
         ChromaFormat::Y422 => &[(0, 0), (0, 1)],
-        ChromaFormat::Y444 => &LUMA_OFFSETS,
+        ChromaFormat::Y444 => &[(0, 0), (0, 1), (1, 0), (1, 1)],
     };
 
     let mut slice_payloads: Vec<Vec<u8>> = Vec::with_capacity(slice_count);
