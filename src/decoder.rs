@@ -305,6 +305,8 @@ impl Decoder for ProResDecoder {
             self.requested,
             self.range,
             self.alpha_typed,
+            false,
+            false,
         )?;
         Ok(Frame::Video(vf))
     }
@@ -350,7 +352,7 @@ pub fn decode_packet_with_options(
     requested: Option<(BitDepth, ChromaFormat)>,
     range: OutputRange,
 ) -> Result<VideoFrame> {
-    decode_packet_inner(data, pts, requested, range, false)
+    decode_packet_inner(data, pts, requested, range, false, false, false)
 }
 
 /// Decode a packet to the surface a `PixelFormat` describes — the
@@ -385,7 +387,32 @@ pub fn decode_packet_with_format(
         Some((bd, cf, alpha)) => (Some((bd, cf)), alpha),
         None => (None, false),
     };
-    decode_packet_inner(data, pts, requested, range, alpha_typed)
+    decode_packet_inner(data, pts, requested, range, alpha_typed, false, false)
+}
+
+/// Decode while retaining one coded right-edge chroma sample when the
+/// visible 422 width is even and ends inside a macroblock. This sample is
+/// needed by cosited conversion; visible dimensions and luma/alpha stay
+/// unchanged. Plane strides describe the extra sample. No bitstream is edited.
+pub fn decode_packet_with_chroma_border(
+    data: &[u8],
+    pts: Option<i64>,
+    requested: Option<(BitDepth, ChromaFormat)>,
+    range: OutputRange,
+) -> Result<VideoFrame> {
+    decode_packet_inner(data, pts, requested, range, false, true, false)
+}
+
+/// Retain the already reconstructed right macroblock samples. Native session
+/// transitions can expose them inside a larger fixed output allocation. Height
+/// stays visible; ordinary decoder entry points still crop to the picture.
+pub fn decode_packet_with_coded_width(
+    data: &[u8],
+    pts: Option<i64>,
+    requested: Option<(BitDepth, ChromaFormat)>,
+    range: OutputRange,
+) -> Result<VideoFrame> {
+    decode_packet_inner(data, pts, requested, range, false, false, true)
 }
 
 /// Shared decode core. `alpha_typed` requests the 4-plane surface
@@ -398,6 +425,8 @@ fn decode_packet_inner(
     requested: Option<(BitDepth, ChromaFormat)>,
     range: OutputRange,
     alpha_typed: bool,
+    retain_chroma_border: bool,
+    retain_coded_width: bool,
 ) -> Result<VideoFrame> {
     let (fh, after_frame) = parse_frame(data)?;
 
@@ -550,12 +579,15 @@ fn decode_packet_inner(
     }
     let _ = cursor; // remaining bytes are stuffing per §5.1 / §6.1.2
 
-    // Crop padded buffers to declared picture size.
+    // Session callers can retain the reconstructed right macroblock.
+    let width = if retain_coded_width { padded_w } else { width };
     let c_w = match chroma {
         ChromaFormat::Y422 => width.div_ceil(2),
         ChromaFormat::Y444 => width,
     };
     let y_cropped = crop_plane(&y_plane, y_byte_stride, width, height, bps);
+    let c_w = c_w + usize::from(retain_chroma_border &&
+        chroma == ChromaFormat::Y422 && width % 2 == 0 && c_w < padded_c_w);
     let cb_cropped = crop_plane(&cb_plane, c_byte_stride, c_w, height, bps);
     let cr_cropped = crop_plane(&cr_plane, c_byte_stride, c_w, height, bps);
     let mut planes = vec![
