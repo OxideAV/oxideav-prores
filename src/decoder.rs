@@ -885,7 +885,14 @@ fn decode_picture_into_planes<'a>(
                 let slice_vertical_size = MB_SIDE_PX;
                 let cols = MB_SIDE_PX * mbs_this_slice;
                 let num_alpha_values = cols * slice_vertical_size;
-                let alpha_values = decode_scanned_alpha(alpha_data, num_alpha_values, act)?;
+                let visible_rows = picture_height.saturating_sub(my * MB_SIDE_PX).min(MB_SIDE_PX);
+                let mut decoded_alpha = decode_scanned_alpha(alpha_data, num_alpha_values, act);
+                for rows in [visible_rows, visible_rows.next_multiple_of(2)] {
+                    if decoded_alpha.is_ok() { break; }
+                    if rows == MB_SIDE_PX { continue; }
+                    decoded_alpha = decode_scanned_alpha(alpha_data, cols * rows, act);
+                }
+                let alpha_values = decoded_alpha?;
                 // Clamp visible rows to the padded plane bounds —
                 // `paste_alpha` would otherwise overrun for the last
                 // MB row of a picture whose height isn't a multiple of
@@ -895,7 +902,7 @@ fn decode_picture_into_planes<'a>(
                 let usable_rows = plane_rows
                     .saturating_sub(field.map(dst_y))
                     .div_ceil(field.step.max(1))
-                    .min(MB_SIDE_PX);
+                    .min(visible_rows);
                 paste_alpha(
                     a_plane,
                     a_byte_stride,

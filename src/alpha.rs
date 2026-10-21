@@ -132,6 +132,14 @@ pub fn decode_scanned_alpha(
             n += 1;
         }
     }
+    if data.len() * 8 - br.bit_pos() > 7 {
+        return Err(Error::invalid("prores alpha: trailing payload"));
+    }
+    while br.bit_pos() < data.len() * 8 {
+        if br.read_bit()? != 0 {
+            return Err(Error::invalid("prores alpha: nonzero alignment padding"));
+        }
+    }
     Ok(out)
 }
 

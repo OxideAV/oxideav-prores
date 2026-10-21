@@ -144,16 +144,16 @@ fn alpha_round_trip_is_exact_both_depths() {
 }
 
 /// Decoding a valid alpha stream while *under-declaring* `num_values`
-/// (fewer than the encoder wrote) must terminate exactly at the declared
-/// count — the decoder fills `num_values` and stops, never reading past.
+/// (fewer than the encoder wrote) fails: the payload must end with the
+/// declared values (a partial bottom macroblock's compact alpha is told
+/// apart from a full one this way).
 #[test]
-fn alpha_decode_respects_declared_count() {
+fn alpha_decode_rejects_payload_beyond_declared_count() {
     let alpha: Vec<u16> = (0..128u16).map(|i| (i * 2) % 256).collect();
     let enc = encode_scanned_alpha(&alpha, AlphaChannelType::Eight).expect("enc");
-    // Decode the first 64 values only.
-    let dec = decode_scanned_alpha(&enc, 64, AlphaChannelType::Eight).expect("partial dec");
-    assert_eq!(dec.len(), 64);
-    assert_eq!(&dec[..], &alpha[..64], "prefix must match");
+    assert!(decode_scanned_alpha(&enc, 64, AlphaChannelType::Eight).is_err());
+    let dec = decode_scanned_alpha(&enc, 128, AlphaChannelType::Eight).expect("full dec");
+    assert_eq!(dec, alpha);
 }
 
 /// Truncating an alpha stream mid-codeword must surface a clean `Err`,
