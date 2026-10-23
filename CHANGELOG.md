@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Decoder: a block whose inverse transform is constant (DC-only, as in
+  flat areas) converts its sample once and stores it 64 times; the
+  output is unchanged (#14).
 - edition 2024, MSRV 1.95
 
 ## [0.1.1](https://github.com/OxideAV/oxideav-prores/compare/v0.1.0...v0.1.1) - 2026-07-19
