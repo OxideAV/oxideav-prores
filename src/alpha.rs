@@ -96,8 +96,11 @@ const MAX_RUN: u32 = 2048;
 /// values are 16-bit unsigned (8-bit alpha is sign-extended into u16
 /// range — for `AlphaChannelType::Eight` every value is in `0..=255`).
 ///
-/// `data` must be the exact slice payload (no trailing slack); the
-/// terminating `byteAligned()` zero-bit pad is implicit.
+/// `data` must be the exact slice payload: after the `num_values`
+/// declared values only the §5.3.3 `byteAligned()` zero-bit pad (at
+/// most 7 zero bits) may remain, and anything else is an error. This
+/// strictness is what lets the slice decoder tell a full 16-row bottom
+/// macroblock-row array from the §5.3 visible-row one.
 pub fn decode_scanned_alpha(
     data: &[u8],
     num_values: usize,

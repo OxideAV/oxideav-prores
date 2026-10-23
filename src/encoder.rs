@@ -1629,19 +1629,16 @@ fn encode_one_picture(
 
             let alpha_blob: Vec<u8> = if let Some(ac) = alpha {
                 // Emit alpha for the FULL macroblock-row height (16
-                // sample rows) regardless of visible picture clipping —
-                // matching what real reference ProRes 4444 streams carry
-                // (see the bottom-MB-row analysis of the `4444-with-alpha`
-                // fixture in the decoder's alpha branch). A literal reading
-                // of RDD 36 §7.5.3 ("does not include alpha values for the
-                // excess rows") suggests sizing the bottom-row array to the
-                // visible row count, but reference bitstreams encode the
-                // full 16 rows; the §7.5.3 exclusion governs which rows a
-                // decoder WRITES, not the coded array length. Decoders
-                // allocate the padded MB-aligned plane and crop after decode
-                // (§7.5.2). Edge pixels for the partially-visible last MB
-                // row clamp to the last visible row so the stream stays
-                // self-roundtrippable and bit-compatible with the reference.
+                // sample rows) even when the picture's last MB row is only
+                // partially visible. RDD 36 §5.3 sizes that row's array to
+                // the visible rows (`sliceVerticalSize`), which is what
+                // Apple's encoder writes; ffmpeg's prores_ks writes 16
+                // rows, and both Apple's and ffmpeg's decoders accept
+                // either form (black-box, r480), as does ours (the
+                // decoder's alpha branch). The 16-row form is kept so the
+                // encoder output pins stay stable. Edge pixels for the
+                // partially-visible last MB row clamp to the last visible
+                // row so the stream stays self-roundtrippable.
                 let slice_vertical_size = MB_SIDE_PX;
                 let cols = MB_SIDE_PX * mbs_this_slice;
                 let mut samples: Vec<u16> = Vec::with_capacity(cols * slice_vertical_size);

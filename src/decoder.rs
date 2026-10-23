@@ -854,42 +854,40 @@ fn decode_picture_into_planes<'a>(
                 }
             }
             if let Some(act) = alpha_kind {
-                // The per-slice scanned-alpha array carries the FULL
-                // macroblock-row height (16 sample rows) even when the
-                // picture's last MB row is only partially visible; the
-                // padded plane allocates the extra rows and the final crop
-                // trims them.
-                //
-                // NOTE ON RDD 36 §7.5.3: the published wording states the
-                // alpha array "does not include alpha values for the excess
-                // row(s) of pixels at the bottom of slices with i =
-                // height_in_mb − 1 when 16 * height_in_mb >
-                // picture_vertical_size", which reads as "size the bottom
-                // MB row's array to the visible row count". Empirically
-                // that is NOT what real ProRes 4444 streams carry: the
-                // in-tree reference fixture `4444-with-alpha` (1920×1080,
-                // height_in_mb = 68, picture_vertical_size = 1080 → bottom
-                // MB row visible height = 8) encodes a bottom-row alpha
-                // array of the full 16 rows; decoding with the visible-row
-                // count (8) raises "run overruns alphaValues array" because
-                // the run/level stream keeps producing values past the
-                // truncated `numValues`. So the empirically-correct
-                // `numValues` is `16 * slice_size_in_mb` columns × 16 rows
-                // for every slice, and the *excess rows* are discarded on
-                // paste (clamped via `usable_rows` below), exactly like the
-                // excess *columns* the spec already says are present. The
-                // §7.5.3 distinction therefore applies to what a decoder
-                // WRITES to the frame buffer, not to the array's coded
-                // length. (DOCS-GAP candidate: §7.5.3 wording vs. reference
-                // bitstream.)
+                // How many rows the bottom MB row's alpha array holds
+                // depends on the encoder. RDD 36 §5.3 (slice syntax)
+                // sizes it to the visible rows — `sliceVerticalSize =
+                // picture_vertical_size − 16·(height_in_mb − 1)` for
+                // `i = height_in_mb − 1` — and §7.5.2 restates it ("does
+                // not include alpha values for the excess row(s)").
+                // Apple's encoder writes exactly that (the 32x20 fixture
+                // in tests/alpha_partial_macroblock.rs). ffmpeg's
+                // prores_ks writes the full 16 rows (the in-tree
+                // `4444-with-alpha` fixture: 1080 = 67·16 + 8, bottom
+                // arrays of 16 rows), and so does this crate's encoder.
+                // Both Apple's and ffmpeg's decoders accept either form
+                // (black-box, r480), so the 16-row read is tried first
+                // and the visible-row count (rounded up to even for a
+                // field as a further tolerance) is the fallback.
+                // `decode_scanned_alpha`'s end-of-payload check tells the
+                // two apart: a 16-row read of a compact payload runs out
+                // of bits, and a compact read of a full payload leaves
+                // more than the byte-alignment pad behind (or stops a run
+                // short). Only the visible rows are pasted either way.
                 let slice_vertical_size = MB_SIDE_PX;
                 let cols = MB_SIDE_PX * mbs_this_slice;
                 let num_alpha_values = cols * slice_vertical_size;
-                let visible_rows = picture_height.saturating_sub(my * MB_SIDE_PX).min(MB_SIDE_PX);
+                let visible_rows = picture_height
+                    .saturating_sub(my * MB_SIDE_PX)
+                    .min(MB_SIDE_PX);
                 let mut decoded_alpha = decode_scanned_alpha(alpha_data, num_alpha_values, act);
                 for rows in [visible_rows, visible_rows.next_multiple_of(2)] {
-                    if decoded_alpha.is_ok() { break; }
-                    if rows == MB_SIDE_PX { continue; }
+                    if decoded_alpha.is_ok() {
+                        break;
+                    }
+                    if rows == MB_SIDE_PX {
+                        continue;
+                    }
                     decoded_alpha = decode_scanned_alpha(alpha_data, cols * rows, act);
                 }
                 let alpha_values = decoded_alpha?;

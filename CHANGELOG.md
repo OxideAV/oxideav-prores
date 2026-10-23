@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Alpha on a partial bottom macroblock row: a slice whose alpha array
+  holds only the visible rows (the RDD 36 §5.3 `sliceVerticalSize` form,
+  written by Apple's encoder) now decodes; the 16-row form written by
+  ffmpeg's prores_ks and by this crate is still read first. To tell the
+  two apart `decode_scanned_alpha` now requires the payload to end with
+  the declared values (at most 7 zero alignment bits may follow) (#13).
 - 4:4:4 chroma blocks within a macroblock are coded in the RDD 36 §7.5
   Figure 8 column order (top-left, bottom-left, top-right, bottom-right)
   in both the decoder and the encoder; streams from other encoders no

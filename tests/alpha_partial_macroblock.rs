@@ -5,7 +5,7 @@
 //! lines, and that encoder codes alpha for the visible lines only, so
 //! that row's alpha payload holds 4 lines of values instead of 16.
 
-use oxideav_prores::decoder::{decode_packet_with_options, OutputRange};
+use oxideav_prores::decoder::{OutputRange, decode_packet_with_options};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/alpha_partial_mb_32x20.prores");
 
@@ -20,9 +20,18 @@ fn partial_bottom_macroblock_alpha_decodes() {
     let bytes = a.stride / 32;
     let at = |x: usize, y: usize| -> u32 {
         let o = y * a.stride + bytes * x;
-        if bytes == 1 { u32::from(a.data[o]) } else { u32::from(u16::from_le_bytes([a.data[o], a.data[o + 1]])) }
+        if bytes == 1 {
+            u32::from(a.data[o])
+        } else {
+            u32::from(u16::from_le_bytes([a.data[o], a.data[o + 1]]))
+        }
     };
     for y in 16..20 {
-        assert!(at(20, y) > at(2, y), "row {y}: alpha {} then {}", at(2, y), at(20, y));
+        assert!(
+            at(20, y) > at(2, y),
+            "row {y}: alpha {} then {}",
+            at(2, y),
+            at(20, y)
+        );
     }
 }
