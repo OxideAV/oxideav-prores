@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-prores/compare/v0.1.1...v0.2.0) - 2026-10-23
+
+### Fixed
+
+- fixup for #15: document the opt-in against §7.5, README + CHANGELOG, consistency test, rustfmt
+- fixup for #14: rustfmt + CHANGELOG
+- fixup for #13: ground the two alpha-array forms in RDD 36 §5.3, CHANGELOG, rustfmt
+- fixup for #12: chroma-plane cross-checks with ffmpeg, 1080p 4444 decode pins, CHANGELOG
+
+### Other
+
+- opt-in entry points keeping samples beyond the visible width
+- convert a constant 8x8 block's sample once
+- compact alpha on a partial bottom macroblock row
+- 4:4 chroma blocks in column order (decoder and encoder)
+- edition 2024, MSRV 1.95
+- README examples use the current registry API
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
 ### Added
 
 - Opt-in decoder entry points that keep reconstructed samples beyond
