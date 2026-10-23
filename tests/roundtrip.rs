@@ -5,8 +5,8 @@
 //! profile must decode to the same dimensions as the source and reach
 //! a reasonable luma PSNR on a smooth synthetic image.
 
-use oxideav_core::frame::VideoPlane;
 use oxideav_core::CodecRegistry;
+use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, Rational, VideoFrame};
 
 /// Source frame bundled with the stream-level metadata that used to
@@ -397,7 +397,7 @@ fn roundtrip_422_10bit_dynamic_range() {
     // path actually carries the high bits.
     let lum = &decoded.planes[0].data;
     let mut over_255 = false;
-    for chunk in lum.chunks_exact(2) {
+    for chunk in lum.as_chunks::<2>().0 {
         let v = u16::from_le_bytes([chunk[0], chunk[1]]);
         if v > 255 {
             over_255 = true;
@@ -512,7 +512,7 @@ fn roundtrip_4444_12bit() {
     // 10-bit ceiling (1023). A broken path that collapsed to 10-bit
     // would never produce a sample > 1023.
     let mut max_v: u16 = 0;
-    for chunk in decoded.planes[0].data.chunks_exact(2) {
+    for chunk in decoded.planes[0].data.as_chunks::<2>().0 {
         let v = u16::from_le_bytes([chunk[0], chunk[1]]);
         if v > max_v {
             max_v = v;
@@ -861,9 +861,9 @@ fn roundtrip_4444_with_alpha16_non_mb_aligned_both_axes() {
     use oxideav_core::frame::VideoPlane;
     let w = 50usize; // 50 = 3*16 + 2 → 2 visible columns in the last MB col
     let h = 26usize; // 26 = 16 + 10 → 10 visible rows in the last MB row
-                     // 12-bit YUV planes (2 bytes/sample, packed LE) so the encoder's
-                     // 12-bit sample read matches the requested output depth, plus a
-                     // 16-bit alpha plane (also 2 bytes/sample).
+    // 12-bit YUV planes (2 bytes/sample, packed LE) so the encoder's
+    // 12-bit sample read matches the requested output depth, plus a
+    // 16-bit alpha plane (also 2 bytes/sample).
     let mut y = vec![0u8; w * h * 2];
     let mut cb = vec![0u8; w * h * 2];
     let mut cr = vec![0u8; w * h * 2];
@@ -1005,7 +1005,7 @@ fn synthetic_422_field_distinct(width: u32, height: u32) -> Source {
 }
 
 fn roundtrip_interlaced_422(width: u32, height: u32, interlace_mode: u8, min_psnr: f64) {
-    use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+    use oxideav_prores::decoder::{BitDepth, decode_packet_with_depth};
     use oxideav_prores::encoder::encode_frame_interlaced;
     use oxideav_prores::frame::{ChromaFormat, Profile};
 
@@ -1088,7 +1088,7 @@ fn roundtrip_interlaced_422_odd_height() {
 
 #[test]
 fn interlaced_frame_header_roundtrips() {
-    use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+    use oxideav_prores::decoder::{BitDepth, decode_packet_with_depth};
     use oxideav_prores::encoder::encode_frame_interlaced;
     use oxideav_prores::frame::{ChromaFormat, Profile};
 

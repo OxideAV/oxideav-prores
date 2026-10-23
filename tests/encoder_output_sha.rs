@@ -55,10 +55,10 @@
 //! SHA-256 self-check (§B.1 / §B.2) guards against typos in the hash
 //! routine that would mask a real encoder regression.
 
-use oxideav_core::frame::VideoPlane;
 use oxideav_core::VideoFrame;
+use oxideav_core::frame::VideoPlane;
 use oxideav_prores::alpha::AlphaChannelType;
-use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+use oxideav_prores::decoder::{BitDepth, decode_packet_with_depth};
 use oxideav_prores::encoder::{
     encode_frame, encode_frame_interlaced, encode_frame_with_alpha, encode_frame_with_depth,
     encode_frame_with_qmats,
@@ -183,10 +183,10 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         msg.push(0);
     }
     msg.extend_from_slice(&bitlen.to_be_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate().take(16) {
-            w[i] = u32::from_be_bytes(word.try_into().unwrap());
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate().take(16) {
+            w[i] = u32::from_be_bytes(*word);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -1117,7 +1117,7 @@ fn encoder_sha_pin_ap4h_16bit_no_alpha() {
 #[test]
 fn encoder_sha_pin_ap4h_12bit_yuva_deep_typed() {
     use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat};
-    use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+    use oxideav_prores::encoder::{EncoderConfig, make_encoder_with_config};
 
     let w = W as usize;
     let h = H as usize;

@@ -16,11 +16,11 @@
 
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, VideoFrame};
+use oxideav_prores::CODEC_ID_STR;
 use oxideav_prores::encoder::{
-    encode_frame_422, make_encoder, make_encoder_with_config, EncoderConfig,
+    EncoderConfig, encode_frame_422, make_encoder, make_encoder_with_config,
 };
 use oxideav_prores::frame::Profile;
-use oxideav_prores::CODEC_ID_STR;
 
 /// A real, correctly-sized 4:2:2 8-bit frame.
 fn synth_422(width: usize, height: usize) -> VideoFrame {

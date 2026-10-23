@@ -28,11 +28,11 @@
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, Rational, VideoFrame};
 use oxideav_prores::alpha::AlphaChannelType;
-use oxideav_prores::decoder::{decode_packet_with_format, make_decoder, BitDepth, OutputRange};
+use oxideav_prores::decoder::{BitDepth, OutputRange, decode_packet_with_format, make_decoder};
 use oxideav_prores::encoder::{
-    encode_frame_with_alpha, make_encoder, make_encoder_with_config, EncoderConfig,
+    EncoderConfig, encode_frame_with_alpha, make_encoder, make_encoder_with_config,
 };
-use oxideav_prores::frame::{parse_frame, ChromaFormat, Profile};
+use oxideav_prores::frame::{ChromaFormat, Profile, parse_frame};
 
 const W: u32 = 64;
 const H: u32 = 48;
@@ -116,7 +116,9 @@ fn convert_752(alpha: u32, in_max: u32, out_max: u32) -> u16 {
 fn read_u16s(plane: &VideoPlane) -> Vec<u16> {
     plane
         .data
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

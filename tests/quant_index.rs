@@ -25,8 +25,8 @@ use oxideav_core::frame::VideoPlane;
 use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, Frame, MediaType, PixelFormat, VideoFrame,
 };
-use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
 use oxideav_prores::CODEC_ID_STR;
+use oxideav_prores::encoder::{EncoderConfig, make_encoder_with_config};
 
 fn synth_textured(width: u32, height: u32) -> VideoFrame {
     let w = width as usize;

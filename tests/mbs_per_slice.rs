@@ -17,12 +17,12 @@
 
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, VideoFrame};
+use oxideav_prores::CODEC_ID_STR;
 use oxideav_prores::decoder::decode_packet;
 use oxideav_prores::encoder::{
-    make_encoder_with_config, mbs_per_slice_to_log2, EncoderConfig, DEFAULT_MBS_PER_SLICE,
+    DEFAULT_MBS_PER_SLICE, EncoderConfig, make_encoder_with_config, mbs_per_slice_to_log2,
 };
 use oxideav_prores::frame::{parse_frame, parse_picture_header};
-use oxideav_prores::CODEC_ID_STR;
 
 /// Synthetic 4:2:2 frame with a gradient that exercises every block
 /// (so per-slice byte counts respond to the slice width).

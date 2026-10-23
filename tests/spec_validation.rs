@@ -17,7 +17,7 @@
 //! are synthesised in-test.
 
 use oxideav_prores::frame::{
-    parse_frame_header, write_frame, write_frame_with_alpha, ChromaFormat,
+    ChromaFormat, parse_frame_header, write_frame, write_frame_with_alpha,
 };
 
 /// Build a minimal 20-byte frame header (no qmats) with caller-overridable
@@ -37,7 +37,7 @@ fn build_frame_header(
     h.extend_from_slice(b"Lavc"); // encoder_id
     h.extend_from_slice(&64u16.to_be_bytes()); // width
     h.extend_from_slice(&48u16.to_be_bytes()); // height
-                                               // byte 12: chroma_format(2) + reserved(2) + interlace_mode(2) + reserved(2)
+    // byte 12: chroma_format(2) + reserved(2) + interlace_mode(2) + reserved(2)
     h.push(((chroma_code & 0x3) << 6) | ((interlace_mode & 0x3) << 2));
     h.push(0); // aspect/frame_rate
     h.push(0); // color_primaries

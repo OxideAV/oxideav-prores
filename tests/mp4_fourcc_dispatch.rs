@@ -16,10 +16,10 @@
 
 use std::process::Command;
 
-use oxideav_core::stream::{CodecResolver, ProbeContext};
 use oxideav_core::CodecRegistry;
+use oxideav_core::stream::{CodecResolver, ProbeContext};
 use oxideav_core::{CodecId, CodecTag};
-use oxideav_prores::{codec_id_for_fourcc, profile_for_fourcc, PRORES_FOURCCS};
+use oxideav_prores::{PRORES_FOURCCS, codec_id_for_fourcc, profile_for_fourcc};
 
 fn have_ffmpeg() -> bool {
     Command::new("ffmpeg")

@@ -426,11 +426,7 @@ const fn invert_scan(scan: &[u8; 64]) -> [u8; 64] {
 /// indices are 1..=224.
 pub fn qscale(quantization_index: u8) -> i32 {
     let i = quantization_index as i32;
-    if i <= 128 {
-        i
-    } else {
-        128 + 4 * (i - 128)
-    }
+    if i <= 128 { i } else { 128 + 4 * (i - 128) }
 }
 
 #[cfg(test)]
@@ -792,7 +788,7 @@ mod tests {
 
     #[test]
     fn from_header_recovers_matrix_pair() {
-        use crate::frame::{parse_frame_header, write_frame_with_meta, ChromaFormat, FrameMeta};
+        use crate::frame::{ChromaFormat, FrameMeta, parse_frame_header, write_frame_with_meta};
         // Encode a frame header carrying the proxy signature (both
         // tables), parse it back, and confirm from_header round-trips the
         // pair including the distinct chroma matrix.

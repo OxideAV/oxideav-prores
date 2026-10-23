@@ -20,8 +20,8 @@ use oxideav_core::frame::VideoPlane;
 use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, Frame, MediaType, PixelFormat, VideoFrame,
 };
-use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
-use oxideav_prores::frame::{parse_frame, ChromaFormat, Profile};
+use oxideav_prores::encoder::{EncoderConfig, make_encoder_with_config};
+use oxideav_prores::frame::{ChromaFormat, Profile, parse_frame};
 use oxideav_prores::quant::QuantMatrices;
 
 const CODEC_ID_STR: &str = "prores";

@@ -35,8 +35,8 @@ use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, Vide
 use oxideav_prores::alpha::AlphaChannelType;
 use oxideav_prores::decoder::BitDepth;
 use oxideav_prores::encoder::{
-    encode_frame_interlaced, encode_frame_with_alpha, encode_frame_with_qmats,
-    make_encoder_with_config, EncoderConfig,
+    EncoderConfig, encode_frame_interlaced, encode_frame_with_alpha, encode_frame_with_qmats,
+    make_encoder_with_config,
 };
 use oxideav_prores::frame::{ChromaFormat, Profile};
 use oxideav_prores::quant::QuantMatrices;
@@ -1689,7 +1689,7 @@ fn cross_decode_progressive_422(profile: Profile, width: u32, height: u32, depth
         BitDepth::Twelve | BitDepth::Sixteen => {
             let shift = if depth == BitDepth::Twelve { 2 } else { 6 };
             let mut out = Vec::with_capacity(src.planes[0].data.len());
-            for chunk in src.planes[0].data.chunks_exact(2) {
+            for chunk in src.planes[0].data.as_chunks::<2>().0 {
                 let v = u16::from_le_bytes([chunk[0], chunk[1]]);
                 out.extend_from_slice(&(v >> shift).to_le_bytes());
             }
@@ -2079,7 +2079,7 @@ fn cross_decode_progressive_444(profile: Profile, width: u32, height: u32, depth
         }
         BitDepth::Ten => {
             let mut out = Vec::with_capacity(src.planes[0].data.len());
-            for chunk in src.planes[0].data.chunks_exact(2) {
+            for chunk in src.planes[0].data.as_chunks::<2>().0 {
                 let v10 = u16::from_le_bytes([chunk[0], chunk[1]]);
                 out.extend_from_slice(&(v10 << 2).to_le_bytes());
             }
@@ -2088,7 +2088,7 @@ fn cross_decode_progressive_444(profile: Profile, width: u32, height: u32, depth
         BitDepth::Twelve => src.planes[0].data.clone(),
         BitDepth::Sixteen => {
             let mut out = Vec::with_capacity(src.planes[0].data.len());
-            for chunk in src.planes[0].data.chunks_exact(2) {
+            for chunk in src.planes[0].data.as_chunks::<2>().0 {
                 let v16 = u16::from_le_bytes([chunk[0], chunk[1]]);
                 out.extend_from_slice(&(v16 >> 4).to_le_bytes());
             }
@@ -2348,7 +2348,7 @@ fn cross_decode_progressive_422_perceptual(
         BitDepth::Twelve | BitDepth::Sixteen => {
             let shift = if depth == BitDepth::Twelve { 2 } else { 6 };
             let mut out = Vec::with_capacity(src.planes[0].data.len());
-            for chunk in src.planes[0].data.chunks_exact(2) {
+            for chunk in src.planes[0].data.as_chunks::<2>().0 {
                 let v = u16::from_le_bytes([chunk[0], chunk[1]]);
                 out.extend_from_slice(&(v >> shift).to_le_bytes());
             }
@@ -2535,7 +2535,7 @@ fn cross_decode_progressive_444_perceptual(
         }
         BitDepth::Ten => {
             let mut out = Vec::with_capacity(src.planes[0].data.len());
-            for chunk in src.planes[0].data.chunks_exact(2) {
+            for chunk in src.planes[0].data.as_chunks::<2>().0 {
                 let v10 = u16::from_le_bytes([chunk[0], chunk[1]]);
                 out.extend_from_slice(&(v10 << 2).to_le_bytes());
             }
@@ -2544,7 +2544,7 @@ fn cross_decode_progressive_444_perceptual(
         BitDepth::Twelve => src.planes[0].data.clone(),
         BitDepth::Sixteen => {
             let mut out = Vec::with_capacity(src.planes[0].data.len());
-            for chunk in src.planes[0].data.chunks_exact(2) {
+            for chunk in src.planes[0].data.as_chunks::<2>().0 {
                 let v16 = u16::from_le_bytes([chunk[0], chunk[1]]);
                 out.extend_from_slice(&(v16 >> 4).to_le_bytes());
             }
@@ -3550,7 +3550,9 @@ fn cross_decode_encoder_deep_typed(
     // surface (10-bit << 2, 12-bit as-is, 16-bit >> 4).
     let src_y_12: Vec<u8> = src.planes[0]
         .data
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .flat_map(|c| {
             let v = u16::from_le_bytes([c[0], c[1]]);
             let v12 = match depth {

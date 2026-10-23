@@ -37,18 +37,18 @@
 use std::fs;
 use std::path::PathBuf;
 
-use oxideav_core::frame::VideoPlane;
 use oxideav_core::VideoFrame;
+use oxideav_core::frame::VideoPlane;
 use oxideav_prores::dct::{idct8x8, idct8x8_dc_only, is_dc_only};
-use oxideav_prores::decoder::{decode_packet, BitDepth};
+use oxideav_prores::decoder::{BitDepth, decode_packet};
 use oxideav_prores::encoder::encode_frame_with_qmats;
 use oxideav_prores::frame::{
-    compute_slice_sizes, parse_frame, parse_picture_header, parse_slice_header, ChromaFormat,
-    Profile,
+    ChromaFormat, Profile, compute_slice_sizes, parse_frame, parse_picture_header,
+    parse_slice_header,
 };
 use oxideav_prores::quant::{
-    qscale, QuantMatrices, BLOCK_SCAN_INTERLACED, BLOCK_SCAN_PROGRESSIVE, SIGNATURE_LT_QMAT,
-    SIGNATURE_PROXY_CHROMA_QMAT, SIGNATURE_PROXY_LUMA_QMAT, SIGNATURE_STANDARD_QMAT,
+    BLOCK_SCAN_INTERLACED, BLOCK_SCAN_PROGRESSIVE, QuantMatrices, SIGNATURE_LT_QMAT,
+    SIGNATURE_PROXY_CHROMA_QMAT, SIGNATURE_PROXY_LUMA_QMAT, SIGNATURE_STANDARD_QMAT, qscale,
 };
 use oxideav_prores::slice::decode_slice_components;
 
@@ -257,7 +257,7 @@ fn interlaced_encode_places_matrix_bytes_on_wire_verbatim() {
     // the identical natural-order bytes at the identical offsets, even
     // though its slices are coded with the Figure 5 interlaced scan.
     use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat};
-    use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+    use oxideav_prores::encoder::{EncoderConfig, make_encoder_with_config};
 
     let mut params = CodecParameters::video(CodecId::new(oxideav_prores::CODEC_ID_STR));
     params.media_type = MediaType::Video;

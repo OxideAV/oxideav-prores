@@ -15,7 +15,7 @@
 
 use std::process::Command;
 
-use oxideav_prores::decoder::{decode_packet, decode_packet_with_depth, BitDepth};
+use oxideav_prores::decoder::{BitDepth, decode_packet, decode_packet_with_depth};
 use oxideav_prores::frame::ChromaFormat;
 
 fn have_ffmpeg() -> bool {
@@ -235,7 +235,7 @@ fn try_decode_10bit(profile_flag: u8, width: u32, height: u32) {
     // 10-bit, not just 8-bit values written as u16.
     let mut min_v: u16 = u16::MAX;
     let mut max_v: u16 = 0;
-    for chunk in frame.planes[0].data.chunks_exact(2) {
+    for chunk in frame.planes[0].data.as_chunks::<2>().0 {
         let v = u16::from_le_bytes([chunk[0], chunk[1]]);
         if v < min_v {
             min_v = v;
@@ -288,7 +288,7 @@ fn rdd36_decode_apch_12bit_from_ffmpeg() {
     assert_eq!(frame.planes[0].data.len(), expected_y);
     let mut max_v: u16 = 0;
     let mut min_v: u16 = u16::MAX;
-    for chunk in frame.planes[0].data.chunks_exact(2) {
+    for chunk in frame.planes[0].data.as_chunks::<2>().0 {
         let v = u16::from_le_bytes([chunk[0], chunk[1]]);
         if v < min_v {
             min_v = v;
@@ -388,7 +388,7 @@ fn rdd36_decode_ap4h_with_alpha_from_ffmpeg() {
 
     let mut min_a: u16 = u16::MAX;
     let mut max_a: u16 = 0;
-    for chunk in frame.planes[3].data.chunks_exact(2) {
+    for chunk in frame.planes[3].data.as_chunks::<2>().0 {
         let v = u16::from_le_bytes([chunk[0], chunk[1]]);
         if v < min_a {
             min_a = v;
@@ -430,7 +430,7 @@ fn rdd36_decode_ap4h_with_alpha_gradient_from_ffmpeg() {
     let alpha = &frame.planes[3].data;
     let mut min_a: u16 = u16::MAX;
     let mut max_a: u16 = 0;
-    for chunk in alpha.chunks_exact(2) {
+    for chunk in alpha.as_chunks::<2>().0 {
         let v = u16::from_le_bytes([chunk[0], chunk[1]]);
         if v < min_a {
             min_a = v;
@@ -449,7 +449,7 @@ fn rdd36_decode_ap4h_with_alpha_gradient_from_ffmpeg() {
         "ap4h alpha gradient has trivial range ({min_a}..{max_a}) — entropy decode wrong"
     );
     let mut seen = std::collections::HashSet::new();
-    for chunk in alpha.chunks_exact(2) {
+    for chunk in alpha.as_chunks::<2>().0 {
         seen.insert(u16::from_le_bytes([chunk[0], chunk[1]]));
     }
     eprintln!("ap4h gradient alpha distinct values: {}", seen.len());
@@ -478,7 +478,7 @@ fn rdd36_apcn_8bit_and_10bit_outputs_are_consistent() {
         .expect("decode 10-bit");
     assert_eq!(f8.planes[0].data.len() * 2, f10.planes[0].data.len());
     let mut max_diff = 0i32;
-    for (i, chunk) in f10.planes[0].data.chunks_exact(2).enumerate() {
+    for (i, chunk) in f10.planes[0].data.as_chunks::<2>().0.iter().enumerate() {
         let v10 = u16::from_le_bytes([chunk[0], chunk[1]]);
         // Drop two LSBs to simulate 8-bit truncation.
         let v8_from_10 = (v10 >> 2) as i32;
@@ -674,7 +674,7 @@ fn rdd36_decode_apcn_interlaced_from_ffmpeg() {
 #[test]
 fn rdd36_decode_ap4h_alpha_gradient_yuva444_typed_surface() {
     use oxideav_core::PixelFormat;
-    use oxideav_prores::decoder::{decode_packet_with_format, OutputRange};
+    use oxideav_prores::decoder::{OutputRange, decode_packet_with_format};
 
     if !have_ffmpeg() {
         eprintln!("ffmpeg missing — skipping Yuva444P typed-surface interop test");
@@ -811,7 +811,7 @@ fn rdd36_decode_ap4h_alpha_gradient_yuva444_typed_surface() {
 #[test]
 fn rdd36_decode_ap4h_alpha_gradient_deep_typed_surfaces() {
     use oxideav_core::PixelFormat;
-    use oxideav_prores::decoder::{decode_packet_with_format, OutputRange};
+    use oxideav_prores::decoder::{OutputRange, decode_packet_with_format};
 
     if !have_ffmpeg() {
         eprintln!("ffmpeg missing — skipping deep typed-surface interop test");
@@ -845,7 +845,9 @@ fn rdd36_decode_ap4h_alpha_gradient_deep_typed_surfaces() {
     let u16s = |plane: &oxideav_core::frame::VideoPlane| -> Vec<u16> {
         plane
             .data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect()
     };
@@ -902,7 +904,9 @@ fn rdd36_decode_ap4h_alpha_gradient_deep_typed_surfaces() {
     );
     let ref_u16 = |plane_idx: usize| -> Vec<u16> {
         raw[plane_idx * n * 2..(plane_idx + 1) * n * 2]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect()
     };

@@ -12,10 +12,10 @@
 //! function of the encoder's input alpha and the requested output depth —
 //! lockable without PSNR slack.
 
-use oxideav_core::frame::VideoPlane;
 use oxideav_core::VideoFrame;
+use oxideav_core::frame::VideoPlane;
 use oxideav_prores::alpha::AlphaChannelType;
-use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+use oxideav_prores::decoder::{BitDepth, decode_packet_with_depth};
 use oxideav_prores::encoder::encode_frame_with_alpha;
 use oxideav_prores::frame::{ChromaFormat, Profile};
 
@@ -80,7 +80,9 @@ fn read_alpha_plane(frame: &VideoFrame, out: BitDepth) -> Vec<u16> {
         BitDepth::Eight => plane.data.iter().map(|&b| b as u16).collect(),
         BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => plane
             .data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect(),
         _ => unreachable!("variant not exercised by this test"),

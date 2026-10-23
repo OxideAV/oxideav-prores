@@ -15,13 +15,13 @@
 
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, Rational, VideoFrame};
-use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
-use oxideav_prores::frame::{
-    alpha_channel_type_from_code, aspect_ratio_from_code, color_primaries_from_code,
-    matrix_coefficients_from_code, parse_frame, rational_from_frame_rate_code, AlphaChannelType,
-    ColorPrimaries, FrameMeta, MatrixCoefficients,
-};
 use oxideav_prores::CODEC_ID_STR;
+use oxideav_prores::encoder::{EncoderConfig, make_encoder_with_config};
+use oxideav_prores::frame::{
+    AlphaChannelType, ColorPrimaries, FrameMeta, MatrixCoefficients, alpha_channel_type_from_code,
+    aspect_ratio_from_code, color_primaries_from_code, matrix_coefficients_from_code, parse_frame,
+    rational_from_frame_rate_code,
+};
 
 fn synth_422(width: u32, height: u32) -> VideoFrame {
     let w = width as usize;

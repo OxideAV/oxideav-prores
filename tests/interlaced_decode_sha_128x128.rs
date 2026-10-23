@@ -44,7 +44,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+use oxideav_prores::decoder::{BitDepth, decode_packet_with_depth};
 use oxideav_prores::frame::ChromaFormat;
 
 const W: usize = 128;
@@ -142,10 +142,10 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         msg.push(0);
     }
     msg.extend_from_slice(&bitlen.to_be_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate().take(16) {
-            w[i] = u32::from_be_bytes(word.try_into().unwrap());
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate().take(16) {
+            w[i] = u32::from_be_bytes(*word);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);

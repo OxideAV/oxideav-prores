@@ -20,9 +20,9 @@
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, VideoFrame};
 use oxideav_prores::decoder::{
-    decode_packet_with_depth, decode_packet_with_options, BitDepth, OutputRange,
+    BitDepth, OutputRange, decode_packet_with_depth, decode_packet_with_options,
 };
-use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+use oxideav_prores::encoder::{EncoderConfig, make_encoder_with_config};
 use oxideav_prores::frame::ChromaFormat;
 
 /// High-contrast 4:2:2 source for bit depth `bd`: left half luma at the

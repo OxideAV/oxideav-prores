@@ -14,7 +14,7 @@
 //! Everything here is built from RDD 36 syntax + the crate's own public
 //! encoders; no external codec bytes are consulted.
 
-use oxideav_prores::alpha::{decode_scanned_alpha, encode_scanned_alpha, AlphaChannelType};
+use oxideav_prores::alpha::{AlphaChannelType, decode_scanned_alpha, encode_scanned_alpha};
 use oxideav_prores::entropy::{decode_scanned_coefficients, encode_scanned_coefficients};
 
 // ---------------------------------------------------------------------------

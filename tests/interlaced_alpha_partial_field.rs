@@ -18,12 +18,12 @@
 //! exact function of the source alpha and the §7.5.2 conversion — lockable
 //! without PSNR slack even though the colour path is lossy.
 
-use oxideav_core::frame::VideoPlane;
 use oxideav_core::VideoFrame;
+use oxideav_core::frame::VideoPlane;
 use oxideav_prores::alpha::AlphaChannelType;
-use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+use oxideav_prores::decoder::{BitDepth, decode_packet_with_depth};
 use oxideav_prores::encoder::encode_frame_interlaced;
-use oxideav_prores::frame::{parse_frame, ChromaFormat, Profile};
+use oxideav_prores::frame::{ChromaFormat, Profile, parse_frame};
 
 // 32 wide (MB-aligned), 36 tall (NOT a multiple of 16, and each field is
 // 18 rows tall → 2 MB rows with a 2-row partial bottom MB row).
@@ -35,7 +35,7 @@ const H: usize = 36;
 /// so a TFF/BFF swap inverts the recovered pattern.
 fn alpha_at(x: usize, y: usize) -> u8 {
     let base = ((x * 7 + y * 13) % 200) as u8;
-    if y % 2 == 0 {
+    if y.is_multiple_of(2) {
         base.saturating_add(40)
     } else {
         base / 2
@@ -84,7 +84,9 @@ fn read_alpha(frame: &VideoFrame, out: BitDepth) -> Vec<u16> {
         BitDepth::Eight => plane.data.iter().map(|&b| b as u16).collect(),
         BitDepth::Ten | BitDepth::Twelve | BitDepth::Sixteen => plane
             .data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect(),
         _ => unreachable!("variant not exercised by this test"),
@@ -171,7 +173,7 @@ fn interlaced_bff_alpha_partial_field_promotes_10bit() {
 /// a TFF/BFF swap inverts the recovered pattern across the field split.
 fn alpha16_at(x: usize, y: usize) -> u16 {
     let base = ((x * 277 + y * 521) % 50_000) as u16;
-    if y % 2 == 0 {
+    if y.is_multiple_of(2) {
         base.saturating_add(15_000)
     } else {
         base / 2
@@ -285,7 +287,7 @@ const HP: usize = 36; // each field 18 rows → 2-row partial bottom MB row
 
 fn alpha_at_wp(x: usize, y: usize) -> u8 {
     let base = ((x * 11 + y * 17) % 200) as u8;
-    if y % 2 == 0 {
+    if y.is_multiple_of(2) {
         base.saturating_add(40)
     } else {
         base / 2

@@ -58,7 +58,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use oxideav_prores::alpha::{decode_scanned_alpha, AlphaChannelType};
+use oxideav_prores::alpha::{AlphaChannelType, decode_scanned_alpha};
 
 /// Macroblock side in luma samples (RDD 36 §6.2).
 const MB_SIDE_PX: usize = 16;

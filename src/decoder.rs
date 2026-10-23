@@ -54,21 +54,21 @@
 //!   per-plane significant-bits side-channel is attached to decoded
 //!   frames — it would restate the pixel format).
 
-use oxideav_core::frame::VideoPlane;
 use oxideav_core::Decoder;
+use oxideav_core::frame::VideoPlane;
 use oxideav_core::{
     CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, VideoFrame,
 };
 
-use crate::alpha::{decode_scanned_alpha, AlphaChannelType};
+use crate::alpha::{AlphaChannelType, decode_scanned_alpha};
 use crate::dct::{idct8x8, idct8x8_dc_only, is_dc_only};
 use crate::frame::{
-    compute_slice_sizes, parse_frame, parse_picture_header, parse_slice_header, ChromaFormat,
-    FrameHeader,
+    ChromaFormat, FrameHeader, compute_slice_sizes, parse_frame, parse_picture_header,
+    parse_slice_header,
 };
 use crate::quant::qscale;
 use crate::slice::{
-    blocks_per_mb, chroma_blocks_per_mb, decode_slice_components, LUMA_BLOCKS_PER_MB,
+    LUMA_BLOCKS_PER_MB, blocks_per_mb, chroma_blocks_per_mb, decode_slice_components,
 };
 
 const MB_SIDE_PX: usize = 16;
@@ -600,7 +600,7 @@ fn opaque_alpha_plane(width: usize, height: usize, bit_depth: BitDepth) -> Video
         data.fill(max as u8);
     } else {
         let le = (max as u16).to_le_bytes();
-        for s in data.chunks_exact_mut(2) {
+        for s in data.as_chunks_mut::<2>().0 {
             s.copy_from_slice(&le);
         }
     }
@@ -1090,7 +1090,7 @@ mod alpha_sample_tests {
     //! absent (the usual CI case). These tests lock the §7.5.2 formula
     //! `alphaSample = round((2^b − 1) * alpha ÷ mask)` directly, with no
     //! external dependency.
-    use super::{alpha_to_sample, AlphaChannelType, BitDepth};
+    use super::{AlphaChannelType, BitDepth, alpha_to_sample};
 
     /// §7.5.2: "If the pixel component sample bit depth matches that of
     /// the decoded alpha values, the pixel alpha component samples shall
@@ -1266,7 +1266,7 @@ mod color_sample_tests {
     //! arithmetic (per-depth scale, round-to-nearest, and both clamp
     //! arms) directly with no codec round-trip, mirroring
     //! `alpha_sample_tests` for §7.5.2.
-    use super::{color_to_sample, BitDepth, OutputRange};
+    use super::{BitDepth, OutputRange, color_to_sample};
 
     /// The §7.5.1 mid-range value `v = 0` maps to the centre of the
     /// output range: `2^b * 256 / 512 = 2^(b-1)`. For 8/10/12-bit that

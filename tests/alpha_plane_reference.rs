@@ -41,8 +41,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use oxideav_prores::alpha::{decode_scanned_alpha, AlphaChannelType};
-use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+use oxideav_prores::alpha::{AlphaChannelType, decode_scanned_alpha};
+use oxideav_prores::decoder::{BitDepth, decode_packet_with_depth};
 use oxideav_prores::frame::ChromaFormat;
 
 /// Macroblock side in luma samples (RDD 36 §6.2).

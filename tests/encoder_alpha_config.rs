@@ -30,9 +30,9 @@
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, VideoFrame};
 use oxideav_prores::alpha::AlphaChannelType;
-use oxideav_prores::decoder::{decode_packet, decode_packet_with_depth, BitDepth};
-use oxideav_prores::encoder::{make_encoder, make_encoder_with_config, EncoderConfig};
-use oxideav_prores::frame::{parse_frame, ChromaFormat, Profile};
+use oxideav_prores::decoder::{BitDepth, decode_packet, decode_packet_with_depth};
+use oxideav_prores::encoder::{EncoderConfig, make_encoder, make_encoder_with_config};
+use oxideav_prores::frame::{ChromaFormat, Profile, parse_frame};
 
 const W: u32 = 64;
 const H: u32 = 48;
@@ -199,7 +199,7 @@ fn config_alpha16_4444xq_via_send_frame() {
     )
     .expect("decode 12-bit");
     assert_eq!(out.planes.len(), 4);
-    for (i, chunk) in out.planes[3].data.chunks_exact(2).enumerate() {
+    for (i, chunk) in out.planes[3].data.as_chunks::<2>().0.iter().enumerate() {
         let got = u16::from_le_bytes([chunk[0], chunk[1]]);
         let src = u16::from_le_bytes([expected_alpha[i * 2], expected_alpha[i * 2 + 1]]);
         let want = ((src as u64 * 4095 + 32767) / 65535) as u16;

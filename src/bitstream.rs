@@ -181,7 +181,7 @@ mod tests {
         let buf = [0b1000_0001u8];
         let mut r = BitReader::new(&buf);
         let _ = r.read_bit().unwrap(); // consume the leading 1
-                                       // Trailing bit is non-zero → not yet at EOD.
+        // Trailing bit is non-zero → not yet at EOD.
         assert!(!r.end_of_data());
     }
 }

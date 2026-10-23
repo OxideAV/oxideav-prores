@@ -33,12 +33,12 @@ use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, Rati
 use oxideav_prores::alpha::AlphaChannelType;
 use oxideav_prores::decoder::BitDepth;
 use oxideav_prores::decoder::{
-    decode_packet, decode_packet_with_format, make_decoder, OutputRange,
+    OutputRange, decode_packet, decode_packet_with_format, make_decoder,
 };
 use oxideav_prores::encoder::{
-    encode_frame_with_alpha, make_encoder, make_encoder_with_config, EncoderConfig,
+    EncoderConfig, encode_frame_with_alpha, make_encoder, make_encoder_with_config,
 };
-use oxideav_prores::frame::{parse_frame, ChromaFormat, Profile};
+use oxideav_prores::frame::{ChromaFormat, Profile, parse_frame};
 
 const W: u32 = 64;
 const H: u32 = 48;

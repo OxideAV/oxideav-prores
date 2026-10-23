@@ -39,13 +39,13 @@ use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, Frame, MediaType, PixelFormat, VideoFrame,
 };
 use oxideav_prores::encoder::{
-    encode_frame_with_depth, encode_frame_with_qmats, make_encoder_with_config, EncoderConfig,
+    EncoderConfig, encode_frame_with_depth, encode_frame_with_qmats, make_encoder_with_config,
 };
-use oxideav_prores::frame::{parse_frame, ChromaFormat, Profile};
+use oxideav_prores::frame::{ChromaFormat, Profile, parse_frame};
 use oxideav_prores::quant::{
-    QuantMatrices, DEFAULT_QMAT, PERCEPTUAL_CHROMA_QMAT, PERCEPTUAL_LUMA_QMAT,
+    DEFAULT_QMAT, PERCEPTUAL_CHROMA_QMAT, PERCEPTUAL_LUMA_QMAT, QuantMatrices,
 };
-use oxideav_prores::{decoder, CODEC_ID_STR};
+use oxideav_prores::{CODEC_ID_STR, decoder};
 
 /// Build a 4:2:2 image with realistic broadband texture: a low-frequency
 /// gradient + medium-frequency sinusoids + a small amount of
@@ -340,7 +340,7 @@ fn mov_for_prores_packet(packet: &[u8], width: u16, height: u16, fourcc: &[u8; 4
     let mut vse = Vec::new();
     vse.extend_from_slice(&[0u8; 6]); // reserved
     vse.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
-                                                // VisualSampleEntry body
+    // VisualSampleEntry body
     vse.extend_from_slice(&[0u8; 16]); // pre_defined + reserved + pre_defined[3]
     vse.extend_from_slice(&width.to_be_bytes());
     vse.extend_from_slice(&height.to_be_bytes());
@@ -543,7 +543,7 @@ fn ffmpeg_cross_decodes_perceptual_matrices() {
     // source (≈ shift by 2 bits).
     let y10 = &y4m[frame_payload_start..frame_payload_start + y_bytes];
     let mut y_decoded = Vec::with_capacity((width * height) as usize);
-    for chunk in y10.chunks_exact(2) {
+    for chunk in y10.as_chunks::<2>().0 {
         let v = u16::from_le_bytes([chunk[0], chunk[1]]);
         y_decoded.push(((v + 2) >> 2).min(255) as u8);
     }

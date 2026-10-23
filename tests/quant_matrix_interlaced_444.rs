@@ -13,12 +13,12 @@ use oxideav_core::frame::VideoPlane;
 use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, Frame, MediaType, PixelFormat, VideoFrame,
 };
-use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
-use oxideav_prores::frame::{parse_frame, Profile};
-use oxideav_prores::quant::{
-    QuantMatrices, DEFAULT_QMAT, PERCEPTUAL_CHROMA_QMAT, PERCEPTUAL_LUMA_QMAT,
-};
 use oxideav_prores::CODEC_ID_STR;
+use oxideav_prores::encoder::{EncoderConfig, make_encoder_with_config};
+use oxideav_prores::frame::{Profile, parse_frame};
+use oxideav_prores::quant::{
+    DEFAULT_QMAT, PERCEPTUAL_CHROMA_QMAT, PERCEPTUAL_LUMA_QMAT, QuantMatrices,
+};
 
 const W: u32 = 64;
 const H: u32 = 48;

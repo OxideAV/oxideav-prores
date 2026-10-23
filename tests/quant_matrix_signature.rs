@@ -25,7 +25,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use oxideav_prores::frame::{parse_frame, Profile};
+use oxideav_prores::frame::{Profile, parse_frame};
 use oxideav_prores::quant::{self, QuantMatrices};
 
 /// Read a fixture frame, or `None` when the `docs/` corpus submodule is

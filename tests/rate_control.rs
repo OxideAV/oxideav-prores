@@ -11,11 +11,11 @@
 
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, Rational, VideoFrame};
+use oxideav_prores::CODEC_ID_STR;
 use oxideav_prores::encoder::{
-    encode_frame_with_depth, make_encoder_with_config, EncoderConfig, RATE_CTRL_TOLERANCE,
+    EncoderConfig, RATE_CTRL_TOLERANCE, encode_frame_with_depth, make_encoder_with_config,
 };
 use oxideav_prores::frame::{ChromaFormat, Profile};
-use oxideav_prores::CODEC_ID_STR;
 
 fn synth_422(width: u32, height: u32) -> VideoFrame {
     let w = width as usize;

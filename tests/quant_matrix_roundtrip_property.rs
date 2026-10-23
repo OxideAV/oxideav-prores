@@ -12,12 +12,12 @@
 //! generalising the hand-picked cases in `quant_matrix_carriage.rs` /
 //! `quant_matrix_fallback.rs`. Validator-independent.
 
-use oxideav_core::frame::VideoPlane;
 use oxideav_core::VideoFrame;
+use oxideav_core::frame::VideoPlane;
 use oxideav_prores::decoder::BitDepth;
 use oxideav_prores::encoder::encode_frame_with_qmats;
-use oxideav_prores::frame::{parse_frame, ChromaFormat, Profile};
-use oxideav_prores::quant::{QuantMatrices, DEFAULT_QMAT};
+use oxideav_prores::frame::{ChromaFormat, Profile, parse_frame};
+use oxideav_prores::quant::{DEFAULT_QMAT, QuantMatrices};
 
 const W: u32 = 32;
 const H: u32 = 16;

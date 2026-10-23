@@ -49,7 +49,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use oxideav_prores::decoder::{decode_packet_with_depth, BitDepth};
+use oxideav_prores::decoder::{BitDepth, decode_packet_with_depth};
 use oxideav_prores::frame::ChromaFormat;
 
 /// Locate `docs/video/prores/fixtures/<name>/`. Tests run with CWD set
@@ -823,7 +823,7 @@ fn corpus_pal_1080i50() {
 #[test]
 fn corpus_proresraw_not_supported() {
     use oxideav_prores::{
-        codec_id_for_fourcc, is_prores_raw_fourcc, profile_for_fourcc, PRORES_RAW_FOURCCS,
+        PRORES_RAW_FOURCCS, codec_id_for_fourcc, is_prores_raw_fourcc, profile_for_fourcc,
     };
 
     // The notes.md rationale ships in the fixture dir; confirm it is

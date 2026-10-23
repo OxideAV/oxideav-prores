@@ -18,14 +18,14 @@ use oxideav_core::{
     VideoFrame,
 };
 
-use crate::alpha::{encode_scanned_alpha, AlphaChannelType};
+use crate::alpha::{AlphaChannelType, encode_scanned_alpha};
 use crate::dct::{fdct8x8, fdct8x8_constant, is_constant_block};
 use crate::decoder::BitDepth;
 use crate::frame::{
-    compute_slice_sizes, frame_rate_code_from_rational, write_frame_with_meta,
-    write_picture_header, write_slice_header, ChromaFormat, FrameMeta, Profile,
+    ChromaFormat, FrameMeta, Profile, compute_slice_sizes, frame_rate_code_from_rational,
+    write_frame_with_meta, write_picture_header, write_slice_header,
 };
-use crate::quant::{qscale, QuantMatrices};
+use crate::quant::{QuantMatrices, qscale};
 use crate::slice::{blocks_per_mb, chroma_blocks_per_mb, encode_slice_components};
 
 /// Encoder-side configuration. Defaults match the legacy behaviour
@@ -577,20 +577,20 @@ pub fn make_encoder_with_config(
     params: &CodecParameters,
     config: EncoderConfig,
 ) -> Result<Box<dyn Encoder>> {
-    if let Some(qm) = &config.quant_matrices {
-        if !qm.weights_valid() {
-            return Err(Error::invalid(
-                "prores encoder: quant matrix weight outside RDD 36 range 2..=63",
-            ));
-        }
+    if let Some(qm) = &config.quant_matrices
+        && !qm.weights_valid()
+    {
+        return Err(Error::invalid(
+            "prores encoder: quant matrix weight outside RDD 36 range 2..=63",
+        ));
     }
-    if let Some(qi) = config.quantization_index {
-        if !(1..=224).contains(&qi) {
-            return Err(Error::invalid(
-                "prores encoder: EncoderConfig::quantization_index out of range \
+    if let Some(qi) = config.quantization_index
+        && !(1..=224).contains(&qi)
+    {
+        return Err(Error::invalid(
+            "prores encoder: EncoderConfig::quantization_index out of range \
                  (must be 1..=224 per RDD 36 §7.3 / Table 15)",
-            ));
-        }
+        ));
     }
     // RDD 36 §6.1.1 Table 2: interlace_mode is a 2-bit field; 0 =
     // progressive, 1 = TFF, 2 = BFF, 3 = reserved. Refuse 3 (and any
@@ -1371,12 +1371,12 @@ fn encode_frame_full(
             "prores encoder: profile chroma_format does not match requested chroma",
         ));
     }
-    if let Some(qm) = &qmats {
-        if !qm.weights_valid() {
-            return Err(Error::invalid(
-                "prores encoder: quant matrix weight outside RDD 36 range 2..=63",
-            ));
-        }
+    if let Some(qm) = &qmats
+        && !qm.weights_valid()
+    {
+        return Err(Error::invalid(
+            "prores encoder: quant matrix weight outside RDD 36 range 2..=63",
+        ));
     }
     // RDD 36 §6.1.1: `horizontal_size` / `vertical_size` are u16 fields, so
     // a coded ProRes frame is at most 65535 × 65535 luma samples and at
@@ -2081,7 +2081,7 @@ mod alpha_input_tests {
     //! input→coded conversion (`alpha_input_to_coded`). The end-to-end
     //! typed-surface behaviour is pinned by the integration suites;
     //! these cases lock the pure arithmetic directly.
-    use super::{alpha_input_to_coded, read_alpha_input, AlphaChannelType, BitDepth};
+    use super::{AlphaChannelType, BitDepth, alpha_input_to_coded, read_alpha_input};
 
     /// Matched widths are the exact identity — the historical untyped
     /// paths (8-bit plane → 8-bit wire, 16-bit plane → 16-bit wire)

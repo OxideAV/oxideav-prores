@@ -41,7 +41,7 @@ use std::process::Command;
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{CodecId, CodecParameters, Frame, MediaType, PixelFormat, VideoFrame};
 use oxideav_prores::decoder::BitDepth;
-use oxideav_prores::encoder::{make_encoder_with_config, EncoderConfig};
+use oxideav_prores::encoder::{EncoderConfig, make_encoder_with_config};
 use oxideav_prores::frame::{ChromaFormat, Profile};
 
 const W: u32 = 256;
@@ -102,11 +102,7 @@ fn source_10bit(chroma: ChromaFormat) -> VideoFrame {
             let g2 = (j * 900 / h) as i32;
             let tri = {
                 let t = (2 * i + 3 * j) % 256;
-                if t < 128 {
-                    t as i32
-                } else {
-                    255 - t as i32
-                }
+                if t < 128 { t as i32 } else { 255 - t as i32 }
             };
             let v = (256 + g1 + g2 + tri * 3 + hash(i, j)).clamp(64, 940) as u16;
             put(&mut y, j * w + i, v);

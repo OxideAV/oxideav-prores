@@ -13,9 +13,9 @@
 //!   * (interlaced) finds the second field at the correct offset even
 //!     when the first field carries trailing variant bytes.
 
-use oxideav_core::frame::VideoPlane;
 use oxideav_core::VideoFrame;
-use oxideav_prores::decoder::{decode_packet, BitDepth};
+use oxideav_core::frame::VideoPlane;
+use oxideav_prores::decoder::{BitDepth, decode_packet};
 use oxideav_prores::encoder::{encode_frame_422, encode_frame_interlaced};
 use oxideav_prores::frame::{ChromaFormat, Profile};
 
@@ -85,7 +85,7 @@ fn inject_variant_bytes(stream: &[u8], pic_off: usize, extra: usize) -> Vec<u8> 
     out.extend_from_slice(&stream[..insert_at]);
     // A non-zero, recognisable filler that the decoder must skip without
     // interpreting.
-    out.extend(std::iter::repeat(0xA5u8).take(extra));
+    out.extend(std::iter::repeat_n(0xA5u8, extra));
     out.extend_from_slice(&stream[insert_at..]);
 
     // Bump the picture's declared size and the frame's declared size.
@@ -187,7 +187,7 @@ fn inject_frame_header_variant_bytes(stream: &[u8], extra: usize) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(stream.len() + extra);
     out.extend_from_slice(&stream[..insert_at]);
-    out.extend(std::iter::repeat(0x5Au8).take(extra));
+    out.extend(std::iter::repeat_n(0x5Au8, extra));
     out.extend_from_slice(&stream[insert_at..]);
 
     put_be16(&mut out, fh_off, (old_fh_size + extra) as u16);
@@ -293,7 +293,7 @@ fn inject_slice_header_variant_bytes(stream: &[u8], extra: usize) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(stream.len() + extra);
     out.extend_from_slice(&stream[..insert_at]);
-    out.extend(std::iter::repeat(0x3Cu8).take(extra));
+    out.extend(std::iter::repeat_n(0x3Cu8, extra));
     out.extend_from_slice(&stream[insert_at..]);
 
     // Bump slice_header_size (high 5 bits of the slice's first byte).

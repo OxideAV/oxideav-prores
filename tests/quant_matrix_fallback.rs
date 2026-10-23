@@ -24,11 +24,11 @@ use oxideav_core::frame::VideoPlane;
 use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, Frame, MediaType, PixelFormat, VideoFrame,
 };
+use oxideav_prores::CODEC_ID_STR;
 use oxideav_prores::decoder::BitDepth;
 use oxideav_prores::encoder::encode_frame_with_qmats;
 use oxideav_prores::frame::{ChromaFormat, Profile};
-use oxideav_prores::quant::{QuantMatrices, DEFAULT_QMAT, PERCEPTUAL_LUMA_QMAT};
-use oxideav_prores::CODEC_ID_STR;
+use oxideav_prores::quant::{DEFAULT_QMAT, PERCEPTUAL_LUMA_QMAT, QuantMatrices};
 
 const W: u32 = 80;
 const H: u32 = 48;

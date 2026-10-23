@@ -569,8 +569,8 @@ mod tests {
 
     #[test]
     fn registry_recognizes_prores_fourcc_tags() {
-        use oxideav_core::stream::{CodecResolver, ProbeContext};
         use oxideav_core::CodecTag;
+        use oxideav_core::stream::{CodecResolver, ProbeContext};
         let mut reg = oxideav_core::CodecRegistry::new();
         register_codecs(&mut reg);
         for fc in PRORES_FOURCCS {

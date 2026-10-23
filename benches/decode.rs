@@ -17,7 +17,7 @@
 
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 use oxideav_core::frame::VideoPlane;
 use oxideav_core::{
@@ -25,7 +25,7 @@ use oxideav_core::{
 };
 
 use oxideav_prores::decoder::{
-    decode_packet, decode_packet_with_depth, decode_packet_with_format, BitDepth, OutputRange,
+    BitDepth, OutputRange, decode_packet, decode_packet_with_depth, decode_packet_with_format,
 };
 use oxideav_prores::frame::ChromaFormat;
 

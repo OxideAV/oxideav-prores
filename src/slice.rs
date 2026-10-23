@@ -232,7 +232,7 @@ mod tests {
             for b in 0..per_mb {
                 let mut blk = [0i32; 64];
                 blk[0] = ((m * 13 + b * 7) as i32 % 41) - 20; // DC
-                                                              // Sparse AC coefficients
+                // Sparse AC coefficients
                 for k in 1..8 {
                     blk[k] = (((m + b + k) as i32) % 5) - 2;
                 }

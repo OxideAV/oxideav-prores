@@ -50,10 +50,10 @@ use std::env;
 use std::io::Write;
 use std::time::Instant;
 
-use oxideav_core::frame::VideoPlane;
 use oxideav_core::VideoFrame;
+use oxideav_core::frame::VideoPlane;
 
-use oxideav_prores::decoder::{decode_packet, decode_packet_with_depth, BitDepth};
+use oxideav_prores::decoder::{BitDepth, decode_packet, decode_packet_with_depth};
 use oxideav_prores::encoder::{encode_frame_interlaced, encode_frame_with_depth};
 use oxideav_prores::frame::{ChromaFormat, Profile};
 

@@ -275,11 +275,7 @@ pub enum QuantizationMatrixSource {
 
 impl FrameHeader {
     pub fn picture_count(&self) -> u32 {
-        if self.interlace_mode == 0 {
-            1
-        } else {
-            2
-        }
+        if self.interlace_mode == 0 { 1 } else { 2 }
     }
 
     /// Typed accessor for the RDD 36 §6.1.1 / Table 2
@@ -1494,11 +1490,11 @@ pub fn write_frame_with_meta(
     let fh_size: u16 = 20 + if load_luma { 64 } else { 0 } + if load_chroma { 64 } else { 0 };
     out.extend_from_slice(&fh_size.to_be_bytes());
     out.push(0); // reserved
-                 // RDD 36 §6.4: bitstream_version 0 requires chroma_format == 4:2:2
-                 // AND alpha_channel_type == 0. Pick the lowest legal version so
-                 // downstream legacy decoders accept the maximum number of streams
-                 // (the spec also recommends this: "encoders should use the lowest
-                 // bitstream version appropriate for the frame being encoded").
+    // RDD 36 §6.4: bitstream_version 0 requires chroma_format == 4:2:2
+    // AND alpha_channel_type == 0. Pick the lowest legal version so
+    // downstream legacy decoders accept the maximum number of streams
+    // (the spec also recommends this: "encoders should use the lowest
+    // bitstream version appropriate for the frame being encoded").
     let bitstream_version: u8 = if alpha_channel_type != 0 {
         1
     } else {
@@ -1520,7 +1516,7 @@ pub fn write_frame_with_meta(
     out.push(meta.matrix_coefficients);
     out.push(alpha_channel_type & 0x0F); // reserved(4) + alpha_channel_type(4)
     out.push(0); // reserved (high 8 of the 14)
-                 // last byte: 6 reserved bits + load_luma(1) + load_chroma(1)
+    // last byte: 6 reserved bits + load_luma(1) + load_chroma(1)
     let lb = ((load_luma as u8) << 1) | (load_chroma as u8);
     out.push(lb);
     if load_luma {

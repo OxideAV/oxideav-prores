@@ -365,9 +365,9 @@ pub fn decode_scanned_coefficients(data: &[u8], num_blocks: usize) -> Result<Vec
     // ---- AC coefficients (run + level + sign over remaining positions) ----
     let mut n = num_blocks; // first AC index in the scanned array
     let mut previous_run: u32 = 4; // initial codebook = EXP_GOLOMB_CODE(0)
-                                   // Per §7.1.1.4, initial "previous level" magnitude is 2, so
-                                   // `previousLevelSymbol = |2| - 1 = 1`, which selects
-                                   // `RICE_EXP_COMBO_CODE(1, 0, 1)` for the first abs_level_minus_1.
+    // Per §7.1.1.4, initial "previous level" magnitude is 2, so
+    // `previousLevelSymbol = |2| - 1 = 1`, which selects
+    // `RICE_EXP_COMBO_CODE(1, 0, 1)` for the first abs_level_minus_1.
     let mut previous_level_symbol: u32 = 1;
 
     while n < total && !br.end_of_data() {
