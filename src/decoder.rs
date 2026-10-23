@@ -391,9 +391,16 @@ pub fn decode_packet_with_format(
 }
 
 /// Decode while retaining one coded right-edge chroma sample when the
-/// visible 422 width is even and ends inside a macroblock. This sample is
-/// needed by cosited conversion; visible dimensions and luma/alpha stay
-/// unchanged. Plane strides describe the extra sample. No bitstream is edited.
+/// visible 4:2:2 width is even and ends inside a macroblock. A co-sited
+/// chroma upsampler needs the sample to the right of the last visible
+/// one, which the ordinary crop drops. Luma, alpha and the visible
+/// dimensions are unchanged; the Cb / Cr planes are one sample wider
+/// than `ceil(width / 2)` and their `stride` describes it, so a consumer
+/// that reads `width / 2` samples per row sees the extra one as padding.
+///
+/// Opt-in: RDD 36 §7.5 has the decoder discard every sample beyond
+/// `horizontal_size`, which [`decode_packet_with_options`] and the
+/// registry path still do. No bitstream is edited.
 pub fn decode_packet_with_chroma_border(
     data: &[u8],
     pts: Option<i64>,
@@ -403,9 +410,14 @@ pub fn decode_packet_with_chroma_border(
     decode_packet_inner(data, pts, requested, range, false, true, false)
 }
 
-/// Retain the already reconstructed right macroblock samples. Native session
-/// transitions can expose them inside a larger fixed output allocation. Height
-/// stays visible; ordinary decoder entry points still crop to the picture.
+/// Decode to the coded width: every plane keeps the whole right
+/// macroblock (`16 * width_in_mb` luma samples), as a session API that
+/// exposes the coded width inside a fixed allocation would. The height
+/// stays the visible height.
+///
+/// Opt-in: RDD 36 §7.5 has the decoder discard every sample beyond
+/// `horizontal_size`, which [`decode_packet_with_options`] and the
+/// registry path still do.
 pub fn decode_packet_with_coded_width(
     data: &[u8],
     pts: Option<i64>,
@@ -586,8 +598,13 @@ fn decode_packet_inner(
         ChromaFormat::Y444 => width,
     };
     let y_cropped = crop_plane(&y_plane, y_byte_stride, width, height, bps);
-    let c_w = c_w + usize::from(retain_chroma_border &&
-        chroma == ChromaFormat::Y422 && width % 2 == 0 && c_w < padded_c_w);
+    let c_w = c_w
+        + usize::from(
+            retain_chroma_border
+                && chroma == ChromaFormat::Y422
+                && width % 2 == 0
+                && c_w < padded_c_w,
+        );
     let cb_cropped = crop_plane(&cb_plane, c_byte_stride, c_w, height, bps);
     let cr_cropped = crop_plane(&cr_plane, c_byte_stride, c_w, height, bps);
     let mut planes = vec![

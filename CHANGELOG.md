@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in decoder entry points that keep reconstructed samples beyond
+  the visible width: `decoder::decode_packet_with_chroma_border` (one
+  more 4:2:2 chroma column when an even visible width ends inside a
+  macroblock, for co-sited chroma upsampling) and
+  `decoder::decode_packet_with_coded_width` (the whole right
+  macroblock). The existing entry points and the registry path still
+  crop to the picture per RDD 36 §7.5 (#15).
+
 ### Fixed
 
 - Alpha on a partial bottom macroblock row: a slice whose alpha array

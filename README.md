@@ -82,7 +82,10 @@ above; `encoder::make_encoder_with_config(&params, cfg)` adds the
 (`decoder::decode_packet_with_depth` / `decode_packet_with_format` /
 `decode_packet_with_options`, `encoder::encode_frame_with_alpha` /
 `encode_frame_interlaced`) work packet-by-packet with no state beyond
-the call. See [docs.rs](https://docs.rs/oxideav-prores) for the full
+the call. `decode_packet_with_chroma_border` / `decode_packet_with_coded_width`
+are opt-in variants for conversion pipelines that keep the reconstructed
+samples to the right of the visible width (one 4:2:2 chroma column, or
+the whole right macroblock) instead of cropping them per §7.5. See [docs.rs](https://docs.rs/oxideav-prores) for the full
 surface.
 
 ## Bit depth and output range
