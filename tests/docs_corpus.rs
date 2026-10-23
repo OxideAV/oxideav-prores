@@ -1019,3 +1019,131 @@ fn corpus_interlaced_tff_128x128_apcn_per_field_psnr() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 4:4:4 chroma block order against an independent decode of the 1080p
+// 4444 fixtures (RDD 36 §7.5 Figure 8: Cb / Cr blocks within a
+// macroblock are indexed top-left, bottom-left, top-right, bottom-right,
+// unlike the luma order of Figure 6). The 1080p fixtures ship SHA-only
+// references, so the reference planes are regenerated with `ffmpeg`
+// (black box) at run time; the test skips when ffmpeg or the fixture is
+// missing. A swapped block pair collapses chroma PSNR to ~18 dB on this
+// material; the float-vs-fixed-point IDCT divergence alone leaves it
+// above 60 dB.
+// ---------------------------------------------------------------------------
+
+/// PSNR between two LE-packed 12-bit planes.
+fn plane_psnr_12bit(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len(), "plane length");
+    let mut sse = 0.0f64;
+    let n = a.len() / 2;
+    for i in 0..n {
+        let av = u16::from_le_bytes([a[i * 2], a[i * 2 + 1]]) as f64;
+        let bv = u16::from_le_bytes([b[i * 2], b[i * 2 + 1]]) as f64;
+        sse += (av - bv) * (av - bv);
+    }
+    psnr(sse, n, BitDepth::Twelve)
+}
+
+fn corpus_4444_planes_vs_ffmpeg(name: &str, with_alpha: bool) {
+    let dir = fixture_dir(name);
+    let mov_path = dir.join("input.mov");
+    let container = match fs::read(&mov_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "skip {name} chroma-order check: missing {} ({e}). docs/ corpus is in \
+                 the workspace umbrella repo; the standalone crate checkout has no fixtures.",
+                mov_path.display()
+            );
+            return;
+        }
+    };
+    let have_ffmpeg = std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !have_ffmpeg {
+        eprintln!("skip {name} chroma-order check: ffmpeg missing");
+        return;
+    }
+    let pix_fmt = if with_alpha {
+        "yuva444p12le"
+    } else {
+        "yuv444p12le"
+    };
+    let out_path = std::env::temp_dir().join(format!(
+        "oxideav-prores-{name}-{}-{}.yuv",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            mov_path.to_str().expect("fixture path"),
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            pix_fmt,
+            "-f",
+            "rawvideo",
+            out_path.to_str().expect("temp path"),
+        ])
+        .status()
+        .expect("spawn ffmpeg");
+    assert!(status.success(), "ffmpeg failed to decode {name}");
+    let reference = fs::read(&out_path).expect("read ffmpeg decode");
+    let _ = fs::remove_file(&out_path);
+
+    let frames = extract_prores_frames(&container);
+    assert!(!frames.is_empty(), "{name}: no `icpf` frames");
+    let decoded = decode_packet_with_depth(
+        &frames[0],
+        Some(0),
+        Some((BitDepth::Twelve, ChromaFormat::Y444)),
+    )
+    .unwrap_or_else(|e| panic!("{name}: frame 0 decode failed: {e:?}"));
+    let plane_bytes = 1920 * 1080 * 2;
+    let planes = if with_alpha { 4 } else { 3 };
+    assert_eq!(decoded.planes.len(), planes, "{name}: plane count");
+    assert!(
+        reference.len() >= plane_bytes * planes,
+        "{name}: ffmpeg wrote {} bytes, expected {}",
+        reference.len(),
+        plane_bytes * planes
+    );
+    for (p, label) in ["Y", "Cb", "Cr", "A"].iter().enumerate().take(planes) {
+        let ours = &decoded.planes[p].data;
+        assert_eq!(ours.len(), plane_bytes, "{name}: {label} plane byte length");
+        let db = plane_psnr_12bit(ours, &reference[p * plane_bytes..(p + 1) * plane_bytes]);
+        eprintln!("{name} frame 0: {label} PSNR vs ffmpeg decode = {db:.2} dB");
+        assert!(
+            db >= 50.0,
+            "{name}: {label} plane {db:.2} dB from the independent decode \
+             (4:4:4 chroma block order within the macroblock?)"
+        );
+    }
+}
+
+#[test]
+fn corpus_4444_1920x1080_planes_vs_ffmpeg() {
+    corpus_4444_planes_vs_ffmpeg("4444-1920x1080", false);
+}
+
+#[test]
+fn corpus_4444xq_1920x1080_planes_vs_ffmpeg() {
+    corpus_4444_planes_vs_ffmpeg("4444xq-1920x1080", false);
+}
+
+#[test]
+fn corpus_4444_with_alpha_planes_vs_ffmpeg() {
+    corpus_4444_planes_vs_ffmpeg("4444-with-alpha", true);
+}

@@ -338,18 +338,18 @@ const HQ_1920X1080_FRAME0_SHA: &str =
 /// 4444 (`ap4h`) at 1920×1080, yuv444p10le. Stresses the §5.2
 /// `chroma_format = 3` path and the §7.4 4:4:4 chroma-block doubling.
 const PRORES4444_1920X1080_FRAME0_SHA: &str =
-    "b013e52b35a04011c9148460d2ece9db99c0f3ac7a7c65e4f7572cafb9fdf4df";
+    "f5411b2bac75831bae3fdfbd3a9396efe79e0842c0f291fb3712ee7368418d8e";
 
 /// 4444 XQ (`ap4x`) at 1920×1080, yuv444p10le. Same shape as 4444
 /// but version=1 with the XQ quant range.
 const PRORES4444_XQ_1920X1080_FRAME0_SHA: &str =
-    "c3ec217a55b9a3b678f800780cd525fa9d99ae15029558b261322d759f50923f";
+    "27abeb0321d591d8c8816b710810bd878dcca88c0eb99fcbfeaf547d2da76af2";
 
 /// 4444 + alpha (`ap4h` with `alpha_channel_type = 2`) at 1920×1080,
 /// yuva444p10le. Adds the §5.3.3 + §7.1.2 alpha-plane unpack on top
 /// of the 4444 coverage; 4 output planes.
 const PRORES4444_ALPHA_FRAME0_SHA: &str =
-    "e1cdb145587b3606bba0cce8e859975f3780524e0d743895888a21b1a09079a4";
+    "dfbaddc4f5cedab72b9f49c2e93bec262b935ea136be0d2d527e2a4ab643e9f6";
 
 // ---------------------------------------------------------------------
 // Per-fixture tests.

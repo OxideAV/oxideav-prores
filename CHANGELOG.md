@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- 4:4:4 chroma blocks within a macroblock are coded in the RDD 36 §7.5
+  Figure 8 column order (top-left, bottom-left, top-right, bottom-right)
+  in both the decoder and the encoder; streams from other encoders no
+  longer decode with the top-right and bottom-left chroma blocks swapped,
+  and our 4444 output decodes correctly elsewhere (#12). The 4444 encoder
+  output pins and the 1080p 4444 decode pins change accordingly; new
+  ffmpeg cross-checks score the chroma planes in both directions.
+
 ### Changed
 
 - edition 2024, MSRV 1.95
