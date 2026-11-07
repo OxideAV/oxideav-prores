@@ -18,15 +18,15 @@ use oxideav_core::{
     VideoFrame,
 };
 
-use crate::alpha::{AlphaChannelType, encode_scanned_alpha};
-use crate::dct::{fdct8x8, fdct8x8_constant, is_constant_block};
+use crate::alpha::{AlphaChannelType, encode_scanned_alpha_into};
+use crate::dct::{fdct8x8_aan, fdct8x8_aan_scale, is_constant_block};
 use crate::decoder::BitDepth;
 use crate::frame::{
     ChromaFormat, FrameMeta, Profile, compute_slice_sizes, frame_rate_code_from_rational,
     write_frame_with_meta, write_picture_header, write_slice_header,
 };
 use crate::quant::{QuantMatrices, qscale};
-use crate::slice::{blocks_per_mb, chroma_blocks_per_mb, encode_slice_components};
+use crate::slice::encode_slice_components_into;
 
 /// Encoder-side configuration. Defaults match the legacy behaviour
 /// (flat all-4s quantisation matrices, `load_luma_qmat = 0`,
@@ -219,6 +219,17 @@ pub struct EncoderConfig {
     /// §7.5.2-mirror promotion — and an explicit request that
     /// contradicts the format is refused at construction.
     pub alpha_channel_type: Option<AlphaChannelType>,
+    /// Worker threads that code the slices of each picture. Slices are
+    /// independent (RDD 36 §5.3), so a picture splits into runs of
+    /// slices coded in parallel and joined in order; the output is
+    /// byte-identical for every thread count.
+    ///
+    /// `0` (the default) and `1` code on the calling thread, as before.
+    /// `n > 1` uses up to `n` scoped threads per picture. Use
+    /// [`Self::with_threads`] to set it, or [`Self::with_all_threads`]
+    /// for one per available CPU. A caller that already encodes several
+    /// frames in parallel should leave this at the default.
+    pub threads: usize,
 }
 
 /// Maximum number of trial encodes per frame when rate control is active.
@@ -404,6 +415,19 @@ impl EncoderConfig {
         self.alpha_channel_type = Some(act);
         self
     }
+
+    /// Code each picture's slices on up to `threads` threads; see
+    /// [`Self::threads`].
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// Code each picture's slices on one thread per available CPU
+    /// (`std::thread::available_parallelism`); see [`Self::threads`].
+    pub fn with_all_threads(self) -> Self {
+        self.with_threads(std::thread::available_parallelism().map_or(1, |n| n.get()))
+    }
 }
 
 /// Alpha coding request threaded through the internal encode paths:
@@ -449,7 +473,7 @@ impl AlphaCoding {
 /// Read one alpha sample from the 4th input plane at its declared
 /// input depth. 8-bit planes hold 1 byte per sample; deep planes hold
 /// little-endian 16-bit words with the low `b` bits significant,
-/// masked to the depth exactly like [`read_sample`] masks the colour
+/// masked to the depth exactly like [`read_block`] masks the colour
 /// planes. `stride` is in **bytes**.
 fn read_alpha_input(plane: &[u8], stride: usize, x: usize, y: usize, depth: BitDepth) -> u16 {
     match depth {
@@ -889,6 +913,7 @@ impl Encoder for ProResEncoder {
                         None => None,
                     }
                 };
+                let threads = self.config.threads.max(1);
                 let data = if self.target_bytes > 0 {
                     encode_frame_with_rate_control(
                         v,
@@ -905,6 +930,7 @@ impl Encoder for ProResEncoder {
                         self.interlace_mode,
                         self.log2_slice_mb_width,
                         alpha,
+                        threads,
                     )?
                 } else {
                     encode_frame_full(
@@ -921,6 +947,7 @@ impl Encoder for ProResEncoder {
                         self.config.explicit_qmat_carriage,
                         self.meta,
                         self.log2_slice_mb_width,
+                        threads,
                     )?
                 };
                 // RDD 36 §5.1.2 / §6.1.2: pad up to the configured
@@ -1056,6 +1083,7 @@ pub fn encode_frame_with_qmats(
         false,
         FrameMeta::default(),
         3, // log2(8) — default slice width matches every reference encoder
+        1,
     )
 }
 
@@ -1100,6 +1128,7 @@ pub fn encode_frame_with_alpha(
         false,
         FrameMeta::default(),
         3, // log2(8) — default slice width matches every reference encoder
+        1,
     )
 }
 
@@ -1140,6 +1169,7 @@ pub fn encode_frame_interlaced(
         false,
         FrameMeta::default(),
         3, // log2(8) — default slice width matches every reference encoder
+        1,
     )
 }
 
@@ -1218,6 +1248,7 @@ fn encode_frame_with_rate_control(
     interlace_mode: u8,
     log2_slice_mb_width: u8,
     alpha: Option<AlphaCoding>,
+    threads: usize,
 ) -> Result<Vec<u8>> {
     let tol_lo = (target_bytes as f64 * (1.0 - RATE_CTRL_TOLERANCE)) as usize;
     let tol_hi = (target_bytes as f64 * (1.0 + RATE_CTRL_TOLERANCE)) as usize;
@@ -1240,6 +1271,7 @@ fn encode_frame_with_rate_control(
         explicit_qmat_carriage,
         meta,
         log2_slice_mb_width,
+        threads,
     )?;
     if seed.len() >= tol_lo && seed.len() <= tol_hi {
         return Ok(seed);
@@ -1288,6 +1320,7 @@ fn encode_frame_with_rate_control(
             explicit_qmat_carriage,
             meta,
             log2_slice_mb_width,
+            threads,
         )?;
         let sz = candidate.len();
         if sz >= tol_lo && sz <= tol_hi {
@@ -1343,6 +1376,7 @@ fn encode_frame_full(
     explicit_qmat_carriage: bool,
     meta: FrameMeta,
     log2_slice_mb_width: u8,
+    threads: usize,
 ) -> Result<Vec<u8>> {
     // Defence-in-depth: the spec stores log2_desired_slice_size_in_mb
     // in two bits so only 0..=3 is representable. Callers go through
@@ -1452,9 +1486,9 @@ fn encode_frame_full(
     };
 
     let interlaced = interlace_mode != 0;
-    let mut picture_blobs: Vec<Vec<u8>> = Vec::with_capacity(pictures.len());
+    let mut coded_pictures: Vec<CodedPicture> = Vec::with_capacity(pictures.len());
     for (picture_height, field) in &pictures {
-        let blob = encode_one_picture(
+        let picture = encode_one_picture(
             frame,
             width,
             height,
@@ -1468,14 +1502,15 @@ fn encode_frame_full(
             log2_slice_mb_width,
             interlaced,
             *field,
+            threads,
         )?;
-        picture_blobs.push(blob);
+        coded_pictures.push(picture);
     }
 
     // Per §5.1.1 frame_header_size: 20 + 64 (load_luma) + 64 (load_chroma).
     let frame_header_size =
         20usize + if load_luma { 64 } else { 0 } + if load_chroma { 64 } else { 0 };
-    let pictures_total: usize = picture_blobs.iter().map(|p| p.len()).sum();
+    let pictures_total: usize = coded_pictures.iter().map(CodedPicture::len).sum();
     let total_frame_size_no_padding = 4 + 4 + frame_header_size + pictures_total;
     if total_frame_size_no_padding > cap {
         return Err(Error::invalid(
@@ -1498,8 +1533,8 @@ fn encode_frame_full(
         alpha.map_or(0, |a| a.act.code()),
         meta,
     );
-    for blob in &picture_blobs {
-        out.extend_from_slice(blob);
+    for picture in &coded_pictures {
+        picture.write(&mut out);
     }
     debug_assert_eq!(out.len(), total_frame_size_no_padding);
     Ok(out)
@@ -1525,6 +1560,242 @@ impl FieldStride {
     }
 }
 
+/// Reusable per-slice working buffers. One set serves every slice a
+/// picture encoder visits, so slices allocate nothing once the buffers
+/// have grown to the largest slice.
+#[derive(Default)]
+struct SliceScratch {
+    blocks: Vec<[i32; 64]>,
+    scan: Vec<i32>,
+    alpha: Vec<u16>,
+    header: Vec<u8>,
+}
+
+/// Coded slices: their concatenated bytes and each slice's size.
+type CodedRun = (Vec<u8>, Vec<u16>);
+
+/// The per-picture state shared by every slice of one `picture()`.
+struct PictureCoder<'a> {
+    frame: &'a VideoFrame,
+    frame_w: usize,
+    frame_h: usize,
+    /// Chroma plane width in samples.
+    c_w: usize,
+    chroma: ChromaFormat,
+    bit_depth: BitDepth,
+    quantization_index: u8,
+    /// [`quant_multipliers`] for the luma and chroma matrices.
+    luma_mul: [f32; 64],
+    chroma_mul: [f32; 64],
+    alpha: Option<AlphaCoding>,
+    interlaced: bool,
+    field: FieldStride,
+}
+
+impl PictureCoder<'_> {
+    /// Append one complete `slice()` (header, Y, Cb, Cr and optional
+    /// alpha data) for the `mbs` macroblocks starting at macroblock
+    /// `(mx, my)` to `out`.
+    fn encode_slice(
+        &self,
+        mx: usize,
+        my: usize,
+        mbs: usize,
+        scratch: &mut SliceScratch,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+        let chroma_offsets: &[(usize, usize)] = match self.chroma {
+            ChromaFormat::Y422 => &[(0, 0), (0, 1)],
+            ChromaFormat::Y444 => &[(0, 0), (0, 1), (1, 0), (1, 1)],
+        };
+        let planes = &self.frame.planes;
+        let blocks = &mut scratch.blocks;
+        blocks.clear();
+        for mb_x in mx..mx + mbs {
+            for (bx, by) in LUMA_OFFSETS {
+                blocks.push(encode_block(
+                    &planes[0].data,
+                    planes[0].stride,
+                    self.frame_w,
+                    self.frame_h,
+                    mb_x * MB_SIDE_PX + bx * 8,
+                    my * MB_SIDE_PX + by * 8,
+                    &self.luma_mul,
+                    self.bit_depth,
+                    self.field,
+                ));
+            }
+            for plane in &planes[1..3] {
+                for &(bx, by) in chroma_offsets {
+                    let x0 = match self.chroma {
+                        ChromaFormat::Y422 => mb_x * 8,
+                        ChromaFormat::Y444 => mb_x * MB_SIDE_PX + bx * 8,
+                    };
+                    blocks.push(encode_block(
+                        &plane.data,
+                        plane.stride,
+                        self.c_w,
+                        self.frame_h,
+                        x0,
+                        my * MB_SIDE_PX + by * 8,
+                        &self.chroma_mul,
+                        self.bit_depth,
+                        self.field,
+                    ));
+                }
+            }
+        }
+
+        // The header carries the payload sizes, so reserve its bytes and
+        // fill them in once the payloads are written.
+        let start = out.len();
+        let header_size = if self.alpha.is_some() { 8 } else { 6 };
+        out.resize(start + header_size, 0);
+        let [y_len, cb_len, cr_len] = encode_slice_components_into(
+            mbs,
+            self.chroma,
+            self.interlaced,
+            blocks,
+            &mut scratch.scan,
+            out,
+        )?;
+        if y_len > u16::MAX as usize || cb_len > u16::MAX as usize || cr_len > u16::MAX as usize {
+            return Err(Error::invalid(
+                "prores encoder: slice component exceeded u16 size limit",
+            ));
+        }
+
+        if let Some(ac) = self.alpha {
+            // Emit alpha for the FULL macroblock-row height (16
+            // sample rows) even when the picture's last MB row is only
+            // partially visible. RDD 36 §5.3 sizes that row's array to
+            // the visible rows (`sliceVerticalSize`), which is what
+            // Apple's encoder writes; ffmpeg's prores_ks writes 16
+            // rows, and both Apple's and ffmpeg's decoders accept
+            // either form (black-box, r480), as does ours (the
+            // decoder's alpha branch). The 16-row form is kept so the
+            // encoder output pins stay stable. Edge pixels for the
+            // partially-visible last MB row clamp to the last visible
+            // row so the stream stays self-roundtrippable.
+            let slice_vertical_size = MB_SIDE_PX;
+            let cols = MB_SIDE_PX * mbs;
+            let samples = &mut scratch.alpha;
+            samples.clear();
+            let a_plane = &planes[3];
+            for r in 0..slice_vertical_size {
+                let frame_row = self
+                    .field
+                    .map(my * MB_SIDE_PX + r)
+                    .min(self.frame_h.saturating_sub(1));
+                for c in 0..cols {
+                    let x = (mx * MB_SIDE_PX + c).min(self.frame_w.saturating_sub(1));
+                    // Read at the input plane's declared depth, then
+                    // map into the coded alpha domain (the
+                    // §7.5.2-mirror conversion; identity when the
+                    // input depth equals the coded width).
+                    let raw = read_alpha_input(
+                        &a_plane.data,
+                        a_plane.stride,
+                        x,
+                        frame_row,
+                        ac.input_depth,
+                    );
+                    samples.push(alpha_input_to_coded(raw, ac.input_depth, ac.act));
+                }
+            }
+            encode_scanned_alpha_into(samples, ac.act, out)?;
+        }
+
+        scratch.header.clear();
+        write_slice_header(
+            &mut scratch.header,
+            self.quantization_index,
+            y_len as u16,
+            cb_len as u16,
+            self.alpha.map(|_| cr_len as u16),
+        );
+        debug_assert_eq!(scratch.header.len(), header_size);
+        out[start..start + header_size].copy_from_slice(&scratch.header);
+        Ok(())
+    }
+
+    /// Code `slices` in order, returning the coded runs of consecutive
+    /// slices in slice order; their bytes concatenated are the picture's
+    /// slice data. With `threads > 1` the list is cut into runs that
+    /// worker threads claim one at a time, each coding into its own
+    /// buffer with its own scratch, so the result does not depend on
+    /// the thread count or on scheduling. The runs are left separate
+    /// for the caller to copy once into the frame.
+    fn encode_slices(
+        &self,
+        slices: &[(usize, usize, usize)],
+        threads: usize,
+    ) -> Result<Vec<CodedRun>> {
+        let run = |slices: &[(usize, usize, usize)], scratch: &mut SliceScratch| {
+            let mut payload = Vec::new();
+            let mut sizes = Vec::with_capacity(slices.len());
+            for &(mx, my, mbs) in slices {
+                let start = payload.len();
+                self.encode_slice(mx, my, mbs, scratch, &mut payload)?;
+                let size = u16::try_from(payload.len() - start).map_err(|_| {
+                    Error::invalid("prores encoder: slice exceeded u16 size table limit")
+                })?;
+                sizes.push(size);
+            }
+            Ok::<_, Error>((payload, sizes))
+        };
+        // Several runs per thread even out slices of uneven cost, and a
+        // run of at least a few slices keeps the per-run overhead small.
+        const RUNS_PER_THREAD: usize = 4;
+        const MIN_RUN: usize = 8;
+        let run_len = slices
+            .len()
+            .div_ceil(threads.saturating_mul(RUNS_PER_THREAD))
+            .max(MIN_RUN);
+        let runs: Vec<_> = slices.chunks(run_len).collect();
+        let threads = threads.min(runs.len());
+        if threads <= 1 {
+            return Ok(vec![run(slices, &mut SliceScratch::default())?]);
+        }
+
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut coded: Vec<Option<Result<CodedRun>>> = Vec::new();
+        coded.resize_with(runs.len(), || None);
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut scratch = SliceScratch::default();
+                        let mut done = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(slices) = runs.get(i) else {
+                                break;
+                            };
+                            done.push((i, run(slices, &mut scratch)));
+                        }
+                        done
+                    })
+                })
+                .collect();
+            for worker in workers {
+                let done = worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                for (i, result) in done {
+                    coded[i] = Some(result);
+                }
+            }
+        });
+
+        coded
+            .into_iter()
+            .map(|result| result.expect("every run is claimed by a worker"))
+            .collect()
+    }
+}
+
 /// Build one `picture()` blob (picture_header + slice_table +
 /// concatenated slice payloads). For interlaced encodes the caller
 /// invokes this twice (once per field).
@@ -1533,6 +1804,10 @@ impl FieldStride {
 /// `chroma_qmat` is applied to both Cb and Cr blocks. Both matrices
 /// must be the same matrices written into the frame header so the
 /// decoder dequantises with the matching W[][].
+///
+/// Slices are coded with one set of [`SliceScratch`] buffers per
+/// thread (see [`PictureCoder::encode_slices`]); the caller writes the
+/// result into the frame with [`CodedPicture::write`].
 #[allow(clippy::too_many_arguments)]
 fn encode_one_picture(
     frame: &VideoFrame,
@@ -1548,26 +1823,32 @@ fn encode_one_picture(
     log2_slice_mb_width: u8,
     interlaced: bool,
     field: FieldStride,
-) -> Result<Vec<u8>> {
-    let c_w = match chroma {
-        ChromaFormat::Y422 => frame_w.div_ceil(2),
-        ChromaFormat::Y444 => frame_w,
+    threads: usize,
+) -> Result<CodedPicture> {
+    let coder = PictureCoder {
+        frame,
+        frame_w,
+        frame_h,
+        c_w: match chroma {
+            ChromaFormat::Y422 => frame_w.div_ceil(2),
+            ChromaFormat::Y444 => frame_w,
+        },
+        chroma,
+        bit_depth,
+        quantization_index,
+        luma_mul: quant_multipliers(luma_qmat, quantization_index),
+        chroma_mul: quant_multipliers(chroma_qmat, quantization_index),
+        alpha,
+        interlaced,
+        field,
     };
     let mbs_x = frame_w.div_ceil(MB_SIDE_PX);
     let mbs_y = picture_height.div_ceil(MB_SIDE_PX);
     let slice_sizes_template = compute_slice_sizes(mbs_x, log2_slice_mb_width);
-    let slices_per_row = slice_sizes_template.len();
-    let slice_count = slices_per_row * mbs_y;
-    let _cb_per_mb = chroma_blocks_per_mb(chroma);
-    let per_mb = blocks_per_mb(chroma);
+    let slice_count = slice_sizes_template.len() * mbs_y;
 
-    const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
-    let chroma_offsets: &[(usize, usize)] = match chroma {
-        ChromaFormat::Y422 => &[(0, 0), (0, 1)],
-        ChromaFormat::Y444 => &[(0, 0), (0, 1), (1, 0), (1, 1)],
-    };
-
-    let mut slice_payloads: Vec<Vec<u8>> = Vec::with_capacity(slice_count);
+    // (mx, my, mbs) of every slice, in coding order.
+    let mut slices: Vec<(usize, usize, usize)> = Vec::with_capacity(slice_count);
     for my in 0..mbs_y {
         let mut mx = 0usize;
         for &mbs_this_slice in &slice_sizes_template {
@@ -1575,181 +1856,126 @@ fn encode_one_picture(
             if mbs_this_slice == 0 {
                 break;
             }
-            let mut blocks: Vec<[i32; 64]> = Vec::with_capacity(mbs_this_slice * per_mb);
-            for mb_within in 0..mbs_this_slice {
-                let mb_x = mx + mb_within;
-                for (bx, by) in LUMA_OFFSETS {
-                    let x0 = mb_x * MB_SIDE_PX + bx * 8;
-                    let y0 = my * MB_SIDE_PX + by * 8;
-                    blocks.push(encode_block(
-                        &frame.planes[0].data,
-                        frame.planes[0].stride,
-                        frame_w,
-                        frame_h,
-                        x0,
-                        y0,
-                        luma_qmat,
-                        quantization_index,
-                        bit_depth,
-                        field,
-                    ));
-                }
-                for plane_idx in [1usize, 2] {
-                    for (bx, by) in chroma_offsets.iter().copied() {
-                        let (x0, y0) = match chroma {
-                            ChromaFormat::Y422 => (mb_x * 8, my * MB_SIDE_PX + by * 8),
-                            ChromaFormat::Y444 => {
-                                (mb_x * MB_SIDE_PX + bx * 8, my * MB_SIDE_PX + by * 8)
-                            }
-                        };
-                        blocks.push(encode_block(
-                            &frame.planes[plane_idx].data,
-                            frame.planes[plane_idx].stride,
-                            c_w,
-                            frame_h,
-                            x0,
-                            y0,
-                            chroma_qmat,
-                            quantization_index,
-                            bit_depth,
-                            field,
-                        ));
-                    }
-                }
-            }
-            let (y_data, cb_data, cr_data) =
-                encode_slice_components(mbs_this_slice, chroma, interlaced, &blocks)?;
-            if y_data.len() > u16::MAX as usize
-                || cb_data.len() > u16::MAX as usize
-                || cr_data.len() > u16::MAX as usize
-            {
-                return Err(Error::invalid(
-                    "prores encoder: slice component exceeded u16 size limit",
-                ));
-            }
-
-            let alpha_blob: Vec<u8> = if let Some(ac) = alpha {
-                // Emit alpha for the FULL macroblock-row height (16
-                // sample rows) even when the picture's last MB row is only
-                // partially visible. RDD 36 §5.3 sizes that row's array to
-                // the visible rows (`sliceVerticalSize`), which is what
-                // Apple's encoder writes; ffmpeg's prores_ks writes 16
-                // rows, and both Apple's and ffmpeg's decoders accept
-                // either form (black-box, r480), as does ours (the
-                // decoder's alpha branch). The 16-row form is kept so the
-                // encoder output pins stay stable. Edge pixels for the
-                // partially-visible last MB row clamp to the last visible
-                // row so the stream stays self-roundtrippable.
-                let slice_vertical_size = MB_SIDE_PX;
-                let cols = MB_SIDE_PX * mbs_this_slice;
-                let mut samples: Vec<u16> = Vec::with_capacity(cols * slice_vertical_size);
-                let a_plane = &frame.planes[3];
-                let a_stride = a_plane.stride;
-                for r in 0..slice_vertical_size {
-                    let frame_row = field
-                        .map(my * MB_SIDE_PX + r)
-                        .min(frame_h.saturating_sub(1));
-                    for c in 0..cols {
-                        let x = (mx * MB_SIDE_PX + c).min(frame_w.saturating_sub(1));
-                        // Read at the input plane's declared depth, then
-                        // map into the coded alpha domain (the
-                        // §7.5.2-mirror conversion; identity when the
-                        // input depth equals the coded width).
-                        let raw =
-                            read_alpha_input(&a_plane.data, a_stride, x, frame_row, ac.input_depth);
-                        samples.push(alpha_input_to_coded(raw, ac.input_depth, ac.act));
-                    }
-                }
-                encode_scanned_alpha(&samples, ac.act)?
-            } else {
-                Vec::new()
-            };
-
-            let cr_field = if alpha.is_some() {
-                Some(cr_data.len() as u16)
-            } else {
-                None
-            };
-            let mut slice_buf = Vec::with_capacity(
-                8 + y_data.len() + cb_data.len() + cr_data.len() + alpha_blob.len(),
-            );
-            write_slice_header(
-                &mut slice_buf,
-                quantization_index,
-                y_data.len() as u16,
-                cb_data.len() as u16,
-                cr_field,
-            );
-            slice_buf.extend_from_slice(&y_data);
-            slice_buf.extend_from_slice(&cb_data);
-            slice_buf.extend_from_slice(&cr_data);
-            slice_buf.extend_from_slice(&alpha_blob);
-            slice_payloads.push(slice_buf);
+            slices.push((mx, my, mbs_this_slice));
             mx += mbs_this_slice;
         }
     }
-    debug_assert_eq!(slice_payloads.len(), slice_count);
-    if slice_payloads.iter().any(|p| p.len() > u16::MAX as usize) {
-        return Err(Error::invalid(
-            "prores encoder: slice exceeded u16 size table limit",
-        ));
-    }
-
-    let slice_table_size = slice_count * 2;
-    let slice_bytes: usize = slice_payloads.iter().map(|p| p.len()).sum();
-    let picture_header_size = 8usize;
-    let picture_size = (picture_header_size + slice_table_size + slice_bytes) as u32;
-    let mut blob = Vec::with_capacity(picture_size as usize);
-    write_picture_header(
-        &mut blob,
-        picture_size,
-        if slice_count <= u16::MAX as usize {
-            slice_count as u16
-        } else {
-            0
-        },
+    debug_assert_eq!(slices.len(), slice_count);
+    Ok(CodedPicture {
+        runs: coder.encode_slices(&slices, threads)?,
+        slice_count,
         log2_slice_mb_width,
-    );
-    for p in &slice_payloads {
-        blob.extend_from_slice(&(p.len() as u16).to_be_bytes());
-    }
-    for p in &slice_payloads {
-        blob.extend_from_slice(p);
-    }
-    debug_assert_eq!(blob.len(), picture_size as usize);
-    Ok(blob)
+    })
 }
 
-/// Sample one IDCT input value from the source plane at sample
-/// coordinate `(x, y)`, applying the spec's level-shift to a centred
-/// `v` in the range `[-256, 256)` per RDD 36 §7.5.1. The inverse of
-/// the decoder formula `s = 2^b * (v + 256) / 512` is
-/// `v = s * 512 / 2^b - 256 = s / 2^(b-9) - 256`. `stride` is in
-/// **bytes**; for 10/12-bit planes that's `2 * samples_per_row`.
-fn read_sample(plane: &[u8], stride: usize, x: usize, y: usize, bit_depth: BitDepth) -> f32 {
-    match bit_depth {
-        BitDepth::Eight => (plane[y * stride + x] as f32) * 2.0 - 256.0,
-        BitDepth::Ten => {
-            let off = y * stride + x * 2;
-            let lo = plane[off] as u16;
-            let hi = plane[off + 1] as u16;
-            let s = (lo | (hi << 8)) & 0x03FF;
-            (s as f32) / 2.0 - 256.0
+/// One coded `picture()`, kept as the runs of coded slices so that it
+/// is copied only once, into the frame.
+struct CodedPicture {
+    runs: Vec<CodedRun>,
+    slice_count: usize,
+    log2_slice_mb_width: u8,
+}
+
+impl CodedPicture {
+    /// Size of the `picture()` syntax: picture_header, slice table and
+    /// slice data.
+    fn len(&self) -> usize {
+        let picture_header_size = 8;
+        let data: usize = self.runs.iter().map(|(bytes, _)| bytes.len()).sum();
+        picture_header_size + self.slice_count * 2 + data
+    }
+
+    /// Append the `picture()` syntax to `out`.
+    fn write(&self, out: &mut Vec<u8>) {
+        let start = out.len();
+        write_picture_header(
+            out,
+            self.len() as u32,
+            if self.slice_count <= u16::MAX as usize {
+                self.slice_count as u16
+            } else {
+                0
+            },
+            self.log2_slice_mb_width,
+        );
+        for (_, sizes) in &self.runs {
+            for size in sizes {
+                out.extend_from_slice(&size.to_be_bytes());
+            }
         }
-        BitDepth::Twelve => {
-            let off = y * stride + x * 2;
-            let lo = plane[off] as u16;
-            let hi = plane[off + 1] as u16;
-            let s = (lo | (hi << 8)) & 0x0FFF;
-            (s as f32) / 8.0 - 256.0
+        for (bytes, _) in &self.runs {
+            out.extend_from_slice(bytes);
         }
+        debug_assert_eq!(out.len() - start, self.len());
+    }
+}
+
+/// Read one 8x8 block of IDCT input values from a source plane,
+/// applying the spec's level-shift to a centred `v` in the range
+/// `[-256, 256)` per RDD 36 §7.5.1. The inverse of the decoder formula
+/// `s = 2^b * (v + 256) / 512` is `v = s * 512 / 2^b - 256 =
+/// s * 2^(9-b) - 256`. `stride` is in **bytes**; for 10/12/16-bit
+/// planes that's `2 * samples_per_row`, each sample a little-endian
+/// word with the low `b` bits significant.
+///
+/// Samples past the right or bottom edge replicate the last column or
+/// row (the boundary-clamp padding of §7.5.1). The bit depth is
+/// resolved once per block rather than once per sample, each source
+/// row is sliced once, and a block that lies wholly inside the plane
+/// (every block but the right-edge ones) reads its eight samples per
+/// row without any per-sample clamp. `2^(9-b)` is a power of two, so
+/// the multiply is exact and matches the former per-sample division.
+#[allow(clippy::too_many_arguments)]
+fn read_block(
+    plane: &[u8],
+    stride: usize,
+    plane_w: usize,
+    plane_h: usize,
+    x0: usize,
+    y0: usize,
+    bit_depth: BitDepth,
+    field: FieldStride,
+    blk: &mut [f32; 64],
+) {
+    let (mask, scale): (u16, f32) = match bit_depth {
+        BitDepth::Eight => (0x00FF, 2.0),
+        BitDepth::Ten => (0x03FF, 0.5),
+        BitDepth::Twelve => (0x0FFF, 0.125),
         // b = 16: every bit of the LE word is significant, no mask.
-        BitDepth::Sixteen => {
-            let off = y * stride + x * 2;
-            let lo = plane[off] as u16;
-            let hi = plane[off + 1] as u16;
-            let s = lo | (hi << 8);
-            (s as f32) / 128.0 - 256.0
+        BitDepth::Sixteen => (0xFFFF, 1.0 / 128.0),
+    };
+    let wide = bit_depth != BitDepth::Eight;
+    let last_x = plane_w.saturating_sub(1);
+    let last_y = plane_h.saturating_sub(1);
+    let interior = x0 + 8 <= plane_w;
+    for (j, out) in blk.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+        // Map per-picture row to per-frame row; this is the identity for
+        // progressive (`step=1, offset=0`) and 2*r+offset for interlaced.
+        let row = &plane[field.map(y0 + j).min(last_y) * stride..];
+        match (wide, interior) {
+            (false, true) => {
+                for (o, &b) in out.iter_mut().zip(&row[x0..x0 + 8]) {
+                    *o = b as f32 * scale - 256.0;
+                }
+            }
+            (true, true) => {
+                let words = row[x0 * 2..x0 * 2 + 16].as_chunks::<2>().0;
+                for (o, w) in out.iter_mut().zip(words) {
+                    *o = (u16::from_le_bytes(*w) & mask) as f32 * scale - 256.0;
+                }
+            }
+            (false, false) => {
+                for (i, o) in out.iter_mut().enumerate() {
+                    *o = row[(x0 + i).min(last_x)] as f32 * scale - 256.0;
+                }
+            }
+            (true, false) => {
+                for (i, o) in out.iter_mut().enumerate() {
+                    let x = (x0 + i).min(last_x) * 2;
+                    let s = u16::from_le_bytes([row[x], row[x + 1]]) & mask;
+                    *o = s as f32 * scale - 256.0;
+                }
+            }
         }
     }
 }
@@ -1762,45 +1988,49 @@ fn encode_block(
     plane_h: usize,
     x0: usize,
     y0: usize,
-    qmat: &[u8; 64],
-    quantization_index: u8,
+    quant_mul: &[f32; 64],
     bit_depth: BitDepth,
     field: FieldStride,
 ) -> [i32; 64] {
     let mut blk = [0.0f32; 64];
-    for j in 0..8 {
-        // Map per-picture row to per-frame row; this is the identity for
-        // progressive (`step=1, offset=0`) and 2*r+offset for interlaced.
-        let frame_row = field.map(y0 + j).min(plane_h.saturating_sub(1));
-        for i in 0..8 {
-            let x = (x0 + i).min(plane_w.saturating_sub(1));
-            blk[j * 8 + i] = read_sample(plane, stride, x, frame_row, bit_depth);
-        }
-    }
+    read_block(
+        plane, stride, plane_w, plane_h, x0, y0, bit_depth, field, &mut blk,
+    );
     // Constant-block fast path: any 8x8 input whose 64 samples are all
     // bit-identical (boundary-clamp pad blocks per RDD 36 §7.5.1, flat
     // regions of natural content at high qi, smooth synthetic gradients)
-    // produces a single DC coefficient of `8 * v` with all 63 AC = 0.
-    // Skip the textbook 64x16 row+column passes of [`fdct8x8`] entirely.
+    // produces a single DC coefficient with all 63 AC = 0. In the
+    // scaled domain of [`fdct8x8_aan`] that DC is the plain sum `64 * v`
+    // (the orthonormal `8 * v` times `fdct8x8_aan_scale(0) = 8`).
     if is_constant_block(&blk) {
-        fdct8x8_constant(&mut blk);
+        let dc = blk[0] * 64.0;
+        blk = [0.0; 64];
+        blk[0] = dc;
     } else {
-        fdct8x8(&mut blk);
+        fdct8x8_aan(&mut blk);
     }
-    // Quantisation: F[v][u] = (QF[v][u] * W[v][u] * qScale) / 8
-    // Inverse: QF = round(F * 8 / (W * qScale)).
-    let qs = qscale(quantization_index) as f32;
-    let mut out = [0i32; 64];
-    for k in 0..64 {
-        let denom = qmat[k] as f32 * qs;
-        let v = blk[k] * 8.0 / denom;
-        out[k] = if v >= 0.0 {
-            (v + 0.5) as i32
-        } else {
-            -((-v + 0.5) as i32)
-        };
-    }
-    out
+    // Round half away from zero, written without a branch on the sign
+    // so the loop vectorises; identical results to rounding `|v|` and
+    // restoring the sign.
+    std::array::from_fn(|k| {
+        let v = blk[k] * quant_mul[k];
+        let a = (v.abs() + 0.5) as i32;
+        if v < 0.0 { -a } else { a }
+    })
+}
+
+/// Per-coefficient multipliers that quantise the output of
+/// [`fdct8x8_aan`] (natural order) for weight matrix `qmat` at
+/// `quantization_index`.
+///
+/// Quantisation per RDD 36 §7.3 is `QF = round(F * 8 / (W * qScale))`
+/// on the orthonormal DCT output `F`. The AAN transform leaves `F`
+/// multiplied by [`fdct8x8_aan_scale`], so dividing that back out is
+/// folded in here, and the per-coefficient division becomes a multiply
+/// by a reciprocal computed once per picture in f64.
+fn quant_multipliers(qmat: &[u8; 64], quantization_index: u8) -> [f32; 64] {
+    let qs = qscale(quantization_index) as f64;
+    std::array::from_fn(|k| (8.0 / (fdct8x8_aan_scale(k) * qmat[k] as f64 * qs)) as f32)
 }
 
 #[cfg(test)]
@@ -1978,11 +2208,10 @@ mod tests {
 
     /// Regression for the constant-block fast path in `encode_block`:
     /// a uniform 8x8 input must produce exactly the same quantised
-    /// coefficient vector through the fast path as through the textbook
-    /// `fdct8x8` -> quantise loop. Both paths share the post-DCT
-    /// quantiser, so the test pins the f32 DC produced by
-    /// `fdct8x8_constant` (which is `8 * v`) against the f32 DC the
-    /// general fdct produces on the same input.
+    /// coefficient vector through the fast path as through the general
+    /// `fdct8x8_aan` -> quantise loop. Both paths share the post-DCT
+    /// quantiser, so the test pins the scaled-domain DC of the fast path
+    /// (`64 * v`) against the closed-form quantised DC.
     #[test]
     fn encode_block_constant_input_matches_general_path() {
         // Build a flat 8x8 plane of value 200 (level-shifted v = 144),
@@ -1997,8 +2226,7 @@ mod tests {
             8,
             0,
             0,
-            &qmat,
-            qi,
+            &super::quant_multipliers(&qmat, qi),
             super::BitDepth::Eight,
             super::FieldStride::progressive(),
         );
@@ -2013,6 +2241,94 @@ mod tests {
                 "AC[{k}] must be exactly 0 after the constant-block fast path"
             );
         }
+    }
+
+    /// The AAN forward DCT with its scale folded into reciprocal
+    /// quantiser multipliers may only move a coefficient across a .5
+    /// rounding tie: against the textbook path it replaced (`fdct8x8`,
+    /// or `fdct8x8_constant` on a constant block, then the RDD 36 §7.3
+    /// division `round(F * 8 / (W * qScale))`), every quantised value
+    /// must agree to within one step. Random 8- and 10-bit blocks
+    /// (some constant), the full legal weight range and fine-to-coarse
+    /// quantisation indices.
+    #[test]
+    fn aan_quantiser_within_one_step_of_textbook_path() {
+        use crate::dct::{fdct8x8, fdct8x8_constant};
+        let mut seed = 0x2545_f491u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let mut compared = 0usize;
+        for iter in 0..400 {
+            let depth = if iter % 2 == 0 {
+                BitDepth::Eight
+            } else {
+                BitDepth::Ten
+            };
+            let max: u32 = if depth == BitDepth::Eight { 255 } else { 1023 };
+            let constant = iter % 10 == 0;
+            let first = next() % (max + 1);
+            let samples: Vec<u32> = (0..64)
+                .map(|_| if constant { first } else { next() % (max + 1) })
+                .collect();
+            let (plane, stride) = match depth {
+                BitDepth::Eight => (samples.iter().map(|&v| v as u8).collect::<Vec<u8>>(), 8),
+                _ => (
+                    samples
+                        .iter()
+                        .flat_map(|&v| (v as u16).to_le_bytes())
+                        .collect::<Vec<u8>>(),
+                    16,
+                ),
+            };
+            let mut qmat = [0u8; 64];
+            for w in qmat.iter_mut() {
+                *w = 2 + (next() % 62) as u8;
+            }
+            for qi in [1u8, 2, 4, 8, 64, 224] {
+                let new = encode_block(
+                    &plane,
+                    stride,
+                    8,
+                    8,
+                    0,
+                    0,
+                    &quant_multipliers(&qmat, qi),
+                    depth,
+                    FieldStride::progressive(),
+                );
+
+                let mut blk = [0.0f32; 64];
+                for (o, &s) in blk.iter_mut().zip(&samples) {
+                    *o = match depth {
+                        BitDepth::Eight => (s as f32) * 2.0 - 256.0,
+                        _ => (s as f32) / 2.0 - 256.0,
+                    };
+                }
+                if is_constant_block(&blk) {
+                    fdct8x8_constant(&mut blk);
+                } else {
+                    fdct8x8(&mut blk);
+                }
+                let qs = qscale(qi) as f32;
+                for k in 0..64 {
+                    let v = blk[k] * 8.0 / (qmat[k] as f32 * qs);
+                    let old = if v >= 0.0 {
+                        (v + 0.5) as i32
+                    } else {
+                        -((-v + 0.5) as i32)
+                    };
+                    assert!(
+                        (new[k] - old).abs() <= 1,
+                        "iter={iter} qi={qi} k={k}: AAN path {} vs textbook {old}",
+                        new[k]
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 400 * 6 * 64);
     }
 
     /// Wider correctness check: across every plausible level-shifted
@@ -2135,7 +2451,7 @@ mod alpha_input_tests {
 
     /// `read_alpha_input` reads 1 byte/sample at `Eight` and masked LE
     /// words at the deep depths, honouring the byte stride — exactly
-    /// like `read_sample` does for the colour planes.
+    /// like `read_block` does for the colour planes.
     #[test]
     fn plane_reads_honour_depth_and_stride() {
         // 3 samples/row × 2 rows, 8-bit.

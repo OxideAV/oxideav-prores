@@ -154,8 +154,20 @@ pub fn decode_scanned_alpha(
 /// codeword range and falls back to the escape FLC otherwise. This is one
 /// of the alternatives the spec explicitly permits (§7.1.2).
 pub fn encode_scanned_alpha(values: &[u16], act: AlphaChannelType) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_scanned_alpha_into(values, act, &mut out)?;
+    Ok(out)
+}
+
+/// [`encode_scanned_alpha`], appending the coded bytes to `out` so a
+/// caller can reuse one buffer across slices.
+pub fn encode_scanned_alpha_into(
+    values: &[u16],
+    act: AlphaChannelType,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     let mask = act.mask();
-    let mut bw = BitWriter::new();
+    let mut bw = BitWriter::from_vec(std::mem::take(out));
     let mut n: usize = 0;
     let mut previous_alpha: i32 = -1;
     while n < values.len() {
@@ -174,7 +186,8 @@ pub fn encode_scanned_alpha(values: &[u16], act: AlphaChannelType) -> Result<Vec
         n += run as usize;
     }
     bw.align_byte();
-    Ok(bw.finish())
+    *out = bw.finish();
+    Ok(())
 }
 
 /// Read one alpha_difference syntax element. Returns `(diff, is_modulo)`.

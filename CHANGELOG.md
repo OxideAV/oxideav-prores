@@ -9,11 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `EncoderConfig::threads` (`with_threads`, `with_all_threads`): code
+  the slices of each picture on several scoped threads. The output is
+  byte-identical for every thread count (`tests/encoder_threads.rs`);
+  the default codes on the calling thread as before.
 - Full-field `FrameHeader::new`; `Default` on `PictureGeometry`, `FrameMeta`, `PictureHeader` and `SliceHeader`; `with_<field>` setters on the newly `#[non_exhaustive]` records (existing `EncoderConfig` builders kept as they are).
 
 ### Changed
 
 - API hygiene: `frame::AlphaChannelType` and `OutputRange` enums and the `EncoderConfig`, `FrameHeader`, `PictureGeometry`, `FrameMeta`, `PictureHeader` and `SliceHeader` records are now `#[non_exhaustive]`. `ChromaFormat` and `QuantizationMatrixSource` stay exhaustive (fully determined by the RDD 36 fields). Internal modules were already `#[doc(hidden)]`.
+- Encoder frames are assembled with a single copy of the coded slice
+  data: pictures are sized from their coded slice runs and written once
+  into an exactly sized frame buffer. The output is unchanged.
+- Encoder slices are coded straight into one per-picture payload buffer
+  using one reusable set of scratch buffers, instead of allocating block,
+  scan, component and slice vectors for every slice. New appending
+  variants `entropy::encode_scanned_coefficients_into`,
+  `alpha::encode_scanned_alpha_into`,
+  `slice::encode_slice_components_into` and `BitWriter::from_vec`; the
+  existing functions are now thin wrappers over them. The output is
+  unchanged.
+- Encoder quantiser rounding (half away from zero) is computed without
+  a branch on the sign, so the per-block loop vectorises; the output is
+  unchanged.
+- Encoder forward DCT: the separable Arai-Agui-Nakajima factorisation
+  (`dct::fdct8x8_aan`, 29 adds + 5 multiplies per 8 points) replaces the
+  64-multiply-add matrix form, with its per-frequency output scale
+  (`dct::fdct8x8_aan_scale`) folded into per-picture reciprocal
+  quantiser multipliers. f32 rounding differs at .5 quantisation ties,
+  so three 10/12-bit encoder output pins change; quality is unchanged.
+- Coefficient encoder: the Table 9/10/11 codebooks are precomputed into
+  const lookup tables (built from `dc_diff_codebook`, `run_codebook` and
+  `level_codebook`, which are now `const fn`), and each run/level/sign
+  triple is written as one codeword where it fits 32 bits. The output is
+  unchanged.
+- `BitWriter` collects bits in a 64-bit accumulator and flushes four
+  bytes at a time; Rice and exp-Golomb codewords are written with one
+  `write_bits` call instead of one call per prefix bit. New
+  `BitWriter::with_capacity` and `BitWriter::write_zeros`. The output is
+  unchanged.
+- Encoder: source samples are read a block row at a time, with the bit
+  depth resolved once per block and edge clamping only on right-edge
+  blocks; the output is unchanged.
 
 ## [0.1.2](https://github.com/OxideAV/oxideav-prores/compare/v0.1.1...v0.1.2) - 2026-10-23
 

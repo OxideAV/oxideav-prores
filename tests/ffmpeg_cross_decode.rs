@@ -116,7 +116,7 @@ fn synthetic_field_distinct(width: u32, height: u32) -> VideoFrame {
 /// Build a synthetic field-distinct 4:2:2 **10-bit** frame. Same
 /// field-distinct structure as [`synthetic_field_distinct`] but the
 /// samples are genuine 10-bit values (`0..=1023`) packed little-endian,
-/// so the cross-decode exercises the HBD `read_sample` path
+/// so the cross-decode exercises the HBD `read_block` path
 /// (RDD 36 §7.5.1: `v = s / 2^(b-9) - 256` for `b = 10`) combined with
 /// the interlaced field-pair split (§7.5.3) — not an 8-bit value merely
 /// shifted into 10-bit storage. `stride` is in **bytes** (2 per sample).
@@ -379,7 +379,7 @@ fn cross_decode_interlaced_depth(
 
     // Encode the same dimensions via our interlaced encoder. The 10-bit
     // path builds a genuine 10-bit source (LE u16 samples) so the HBD
-    // field-pair packing — `read_sample`'s `BitDepth::Ten` branch
+    // field-pair packing — `read_block`'s `BitDepth::Ten` branch
     // combined with the §7.5.3 field deinterleave — is what gets
     // validated, not an 8-bit value zero-padded into 10-bit storage.
     let src = match bit_depth {
@@ -541,7 +541,7 @@ fn cross_decode_apch_interlaced_larger() {
 // ───────────── 10-bit interlaced (HBD field-pair packing) ─────────────
 //
 // These exercise `encode_frame_interlaced` with `BitDepth::Ten`: the
-// genuine-10-bit `read_sample` path (RDD 36 §7.5.1 level shift for
+// genuine-10-bit `read_block` path (RDD 36 §7.5.1 level shift for
 // b = 10) feeding the two-field §7.5.3 deinterleave. ffmpeg's
 // `prores_ks` decoder must reconstruct the field-pair to ≥ 30 dB luma
 // PSNR against the 10-bit source, and the bright-even / dim-odd field
@@ -575,7 +575,7 @@ fn cross_decode_apch_interlaced_10bit_larger() {
 // These exercise the hardest path the encoder owns simultaneously:
 //   * 4:4:4 chroma (ChromaFormat::Y444 — full-resolution Cb/Cr blocks),
 //   * genuine 12-bit Y'CbCr samples (RDD 36 §7.5.1 level shift for b = 12,
-//     `read_sample`'s `BitDepth::Twelve` branch) — ffmpeg's ap4h/ap4x is
+//     `read_block`'s `BitDepth::Twelve` branch) — ffmpeg's ap4h/ap4x is
 //     internally 12-bit, so this matches the decoder's native depth,
 //   * a per-pixel **16-bit alpha** plane coded losslessly per RDD 36
 //     §5.3.3 + §7.1.2 (raster-scan run/diff VLC, Table 14) at the tail of
@@ -753,7 +753,7 @@ fn cross_decode_interlaced_4444_alpha(
 
     // Encode the same dimensions via our interlaced encoder at genuine
     // 12-bit 4:4:4 with a 16-bit alpha plane. This drives:
-    //   * `read_sample`'s `BitDepth::Twelve` branch (§7.5.1 level shift),
+    //   * `read_block`'s `BitDepth::Twelve` branch (§7.5.1 level shift),
     //   * the §7.1.2 / Table 14 16-bit-alpha entropy coder (per-slice
     //     scanned-alpha blob at the padded MB-row height, §7.5.2),
     //   * the §7.5.3 two-field deinterleave (rows {0,2,…} top / {1,3,…}
@@ -934,7 +934,7 @@ fn cross_decode_ap4x_interlaced_alpha_tff() {
 // crate's flagship progressive path, exercising at once:
 //   * 4:4:4 chroma (ChromaFormat::Y444 — full-resolution Cb/Cr blocks),
 //   * genuine 12-bit Y'CbCr samples (RDD 36 §7.5.1 level shift for
-//     b = 12, `read_sample`'s `BitDepth::Twelve` branch) — ffmpeg's
+//     b = 12, `read_block`'s `BitDepth::Twelve` branch) — ffmpeg's
 //     ap4h/ap4x is internally 12-bit, so this matches its native depth,
 //   * a per-pixel **16-bit alpha** plane coded losslessly per RDD 36
 //     §5.3.3 + §7.1.2 (raster-scan run/diff VLC, Table 14) at the tail
@@ -1079,7 +1079,7 @@ fn cross_decode_progressive_4444_alpha(profile: Profile, width: u32, height: u32
 
     // Encode the same dimensions via our PROGRESSIVE 4444+alpha encoder at
     // genuine 12-bit 4:4:4 with a 16-bit alpha plane. This drives:
-    //   * `read_sample`'s `BitDepth::Twelve` branch (§7.5.1 level shift),
+    //   * `read_block`'s `BitDepth::Twelve` branch (§7.5.1 level shift),
     //   * the §7.1.2 / Table 14 16-bit-alpha entropy coder (per-slice
     //     scanned-alpha blob at the padded MB-row height, §7.5.2),
     //   * the §7.2 Figure 4 *progressive* block scan (single picture).
@@ -1429,7 +1429,7 @@ fn cross_decode_encoder_apch_interlaced_larger() {
 // ≥ 40 dB PSNR.
 //
 // The 10-bit and 12-bit cases feed a GENUINE high-bit-depth source (LE
-// u16 samples bounded by the depth), so `read_sample`'s `BitDepth::Ten`
+// u16 samples bounded by the depth), so `read_block`'s `BitDepth::Ten`
 // / `BitDepth::Twelve` branches (RDD 36 §7.5.1 level shift
 // `v = s / 2^(b-9) - 256` for b = 10 / 12) are validated against the
 // reference decoder — not an 8-bit value zero-padded into 16-bit
@@ -1582,7 +1582,7 @@ fn cross_decode_progressive_422(profile: Profile, width: u32, height: u32, depth
     // reference: the 8-bit source is upshifted `<< 2`, the 12-bit source
     // is downshifted `>> 2` (ffmpeg's 4:2:2 path is 10-bit internally, so
     // 10-bit is the genuine validation depth for both 8- and 12-bit
-    // inputs). The 10/12-bit ENCODE paths — `read_sample`'s
+    // inputs). The 10/12-bit ENCODE paths — `read_block`'s
     // `BitDepth::Ten` / `BitDepth::Twelve` branches (§7.5.1 level shift)
     // — are exercised regardless of the compare depth.
     let pix_fmt = "yuv422p10le";
@@ -1817,7 +1817,7 @@ fn cross_decode_apch_progressive_12bit_larger() {
 // reconstruct it to raw `yuv444p12le` (ffmpeg's ap4h/ap4x native depth
 // for non-alpha 4:4:4 decode is 12-bit). The 8-bit source is upshifted
 // `<< 4`, the 10-bit source is upshifted `<< 2`, the 12-bit source is
-// compared as-is; the genuine high-bit-depth `read_sample` branches
+// compared as-is; the genuine high-bit-depth `read_block` branches
 // (RDD 36 §7.5.1 level shift `v = s / 2^(b-9) − 256` for `b = 10`
 // / `b = 12`) are exercised regardless of compare depth. A
 // left-dark → right-bright luma ramp + left/right-sum assertion guards
@@ -1982,7 +1982,7 @@ fn cross_decode_progressive_444(profile: Profile, width: u32, height: u32, depth
 
     // Encode the same dimensions via our PROGRESSIVE 4:4:4 encoder at
     // the requested bit depth, NO alpha. This drives:
-    //   * `read_sample`'s `BitDepth::Eight` / `Ten` / `Twelve` branch
+    //   * `read_block`'s `BitDepth::Eight` / `Ten` / `Twelve` branch
     //     (§7.5.1 level shift `v = s / 2^(b-9) − 256`),
     //   * the §7.2 Figure 4 *progressive* block scan (single picture),
     //   * `ChromaFormat::Y444` (full-resolution chroma — twice the chroma

@@ -123,13 +123,7 @@ pub fn write_combo(bw: &mut BitWriter, n: u32, last_rice_q: u32, k_rice: u32, k_
         // Rice branch: q = n / 2^kRice, r = n mod 2^kRice.
         let q = n >> k_rice;
         let r = n & ((1u32 << k_rice) - 1);
-        for _ in 0..q {
-            bw.write_bit(0);
-        }
-        bw.write_bit(1);
-        if k_rice > 0 {
-            bw.write_bits(r, k_rice);
-        }
+        write_prefixed(bw, q, r, k_rice);
     } else {
         // Exp-Golomb branch: emit (last_rice_q + 1) zeros prefix, then
         // an order-k_exp exp-Golomb codeword for `n - switch_value`.
@@ -138,16 +132,10 @@ pub fn write_combo(bw: &mut BitWriter, n: u32, last_rice_q: u32, k_rice: u32, k_
         let x = (n2 as u64) + (1u64 << k_exp);
         let q_exp = (63 - x.leading_zeros()) - k_exp;
         // Total leading zeros = (last_rice_q + 1) + q_exp; then a 1 bit; then suffix.
-        for _ in 0..(last_rice_q + 1 + q_exp) {
-            bw.write_bit(0);
-        }
-        bw.write_bit(1);
         let suffix_bits = q_exp + k_exp;
-        if suffix_bits > 0 {
-            // suffix = n2 + 2^k_exp - 2^(q_exp + k_exp) (last suffix_bits bits)
-            let suffix_val = (x - (1u64 << (q_exp + k_exp))) as u32;
-            bw.write_bits(suffix_val, suffix_bits);
-        }
+        // suffix = n2 + 2^k_exp - 2^(q_exp + k_exp) (last suffix_bits bits)
+        let suffix_val = (x - (1u64 << suffix_bits)) as u32;
+        write_prefixed(bw, last_rice_q + 1 + q_exp, suffix_val, suffix_bits);
     }
 }
 
@@ -186,14 +174,29 @@ pub fn read_exp_golomb(br: &mut BitReader<'_>, k: u32) -> Result<u32> {
 pub fn write_exp_golomb(bw: &mut BitWriter, n: u32, k: u32) {
     let x = (n as u64) + (1u64 << k);
     let q = (63 - x.leading_zeros()) - k;
-    for _ in 0..q {
-        bw.write_bit(0);
-    }
-    bw.write_bit(1);
     let bits = q + k;
-    if bits > 0 {
-        let suffix = (x - (1u64 << (q + k))) as u32;
-        bw.write_bits(suffix, bits);
+    let suffix = (x - (1u64 << bits)) as u32;
+    write_prefixed(bw, q, suffix, bits);
+}
+
+/// Write `zeros` zero bits, a one bit, then the low `suffix_bits` bits
+/// of `suffix`: the shape shared by every Rice and exp-Golomb codeword.
+/// A codeword of up to 32 bits (all but pathological symbols) goes out
+/// in a single `write_bits`, since the zero prefix is just the leading
+/// zeros of `1 << suffix_bits | suffix` in a `zeros + 1 + suffix_bits`
+/// bit field.
+#[inline]
+fn write_prefixed(bw: &mut BitWriter, zeros: u32, suffix: u32, suffix_bits: u32) {
+    let len = zeros + 1 + suffix_bits;
+    if len <= 32 {
+        let mask = ((1u64 << suffix_bits) - 1) as u32;
+        bw.write_bits(((1u64 << suffix_bits) as u32) | (suffix & mask), len);
+    } else {
+        bw.write_zeros(zeros);
+        bw.write_bit(1);
+        if suffix_bits > 0 {
+            bw.write_bits(suffix, suffix_bits);
+        }
     }
 }
 
@@ -243,9 +246,91 @@ impl Codebook {
     }
 }
 
+/// Encoder-side form of a [`Codebook`], flattened so that Rice,
+/// exp-Golomb and combination codes share one branch-light path
+/// ([`Vlc::codeword`]). `EXP_GOLOMB_CODE(k)` is the combination code
+/// with an empty Rice range and no extra prefix zeros.
+#[derive(Copy, Clone, Debug)]
+struct Vlc {
+    /// Symbols below this use the Rice branch: `(last_rice_q + 1) << k_rice`.
+    rice_limit: u32,
+    k_rice: u32,
+    /// Prefix zeros added to the exp-Golomb branch: `last_rice_q + 1`.
+    exp_zeros: u32,
+    k_exp: u32,
+}
+
+impl Vlc {
+    const fn of(cb: Codebook) -> Self {
+        match cb {
+            Codebook::ExpGolomb(k) => Self {
+                rice_limit: 0,
+                k_rice: 0,
+                exp_zeros: 0,
+                k_exp: k,
+            },
+            Codebook::RiceExp {
+                last_rice_q,
+                k_rice,
+                k_exp,
+            } => Self {
+                rice_limit: (last_rice_q + 1) << k_rice,
+                k_rice,
+                exp_zeros: last_rice_q + 1,
+                k_exp,
+            },
+        }
+    }
+
+    /// The codeword for symbol `n` as `(value, length)`: the codeword is
+    /// the low `length` bits of `value`, MSB first. Same bits as
+    /// [`write_combo`] / [`write_exp_golomb`].
+    ///
+    /// A Rice codeword is `q` zeros, a one and the `k_rice`-bit
+    /// remainder, i.e. `(1 << k_rice) | r` in `q + 1 + k_rice` bits. An
+    /// order-`k` exp-Golomb codeword for `m` is, with `x = m + 2^k` and
+    /// `h = floor(log2 x)`, `h - k` zeros followed by `x` itself in
+    /// `h + 1` bits; the combination code puts `exp_zeros` more zeros in
+    /// front.
+    #[inline]
+    fn codeword(self, n: u32) -> (u64, u32) {
+        if n < self.rice_limit {
+            let q = n >> self.k_rice;
+            let r = n & ((1 << self.k_rice) - 1);
+            (((1u64 << self.k_rice) | r as u64), q + 1 + self.k_rice)
+        } else {
+            let x = (n - self.rice_limit) as u64 + (1u64 << self.k_exp);
+            let h = 63 - x.leading_zeros();
+            (x, self.exp_zeros + 2 * h - self.k_exp + 1)
+        }
+    }
+}
+
+/// Codebook table for adaptation inputs `0..N`, built from the
+/// spec-table function `$cb`. Callers clamp the input to `N - 1`; the
+/// tables end where every larger input selects the same codebook.
+macro_rules! vlc_table {
+    ($cb:ident, $n:expr) => {{
+        let mut t = [Vlc::of(Codebook::ExpGolomb(0)); $n];
+        let mut i = 0;
+        while i < $n {
+            t[i] = Vlc::of($cb(i as u32));
+            i += 1;
+        }
+        t
+    }};
+}
+
+/// Table 9, `|previousDCDiff|` 0, 1, 2, and 3 or more.
+const DC_DIFF_VLC: [Vlc; 4] = vlc_table!(dc_diff_codebook, 4);
+/// Table 10, `previousRun` 0..=14, and 15 or more.
+const RUN_VLC: [Vlc; 16] = vlc_table!(run_codebook, 16);
+/// Table 11, `previousLevelSymbol` 0..=7, and 8 or more.
+const LEVEL_VLC: [Vlc; 9] = vlc_table!(level_codebook, 9);
+
 /// Codebook for a `dc_coeff_difference` element given the absolute value
 /// of the previous diff (Table 9).
-pub fn dc_diff_codebook(prev_abs: u32) -> Codebook {
+pub const fn dc_diff_codebook(prev_abs: u32) -> Codebook {
     match prev_abs {
         0 => Codebook::ExpGolomb(0),
         1 => Codebook::ExpGolomb(1),
@@ -259,7 +344,7 @@ pub fn dc_diff_codebook(prev_abs: u32) -> Codebook {
 }
 
 /// Codebook for a `run` element given the previous run (Table 10).
-pub fn run_codebook(prev_run: u32) -> Codebook {
+pub const fn run_codebook(prev_run: u32) -> Codebook {
     match prev_run {
         0 | 1 => Codebook::RiceExp {
             last_rice_q: 2,
@@ -285,7 +370,7 @@ pub fn run_codebook(prev_run: u32) -> Codebook {
 /// Codebook for an `abs_level_minus_1` element given the previous level
 /// symbol (Table 11). `prev_level_symbol == 0` corresponds to a previous
 /// level magnitude of 1, since `abs_level = abs_level_minus_1 + 1`.
-pub fn level_codebook(prev_level_symbol: u32) -> Codebook {
+pub const fn level_codebook(prev_level_symbol: u32) -> Codebook {
     match prev_level_symbol {
         0 => Codebook::RiceExp {
             last_rice_q: 2,
@@ -411,19 +496,32 @@ pub fn decode_scanned_coefficients(data: &[u8], num_blocks: usize) -> Result<Vec
 /// `coeffs` must be laid out in slice-scan order (DC block 0, DC block 1,
 /// ..., DC block N-1, AC freq 1 block 0, AC freq 1 block 1, ...).
 pub fn encode_scanned_coefficients(coeffs: &[i32], num_blocks: usize) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_scanned_coefficients_into(coeffs, num_blocks, &mut out)?;
+    Ok(out)
+}
+
+/// [`encode_scanned_coefficients`], appending the coded bytes to `out`
+/// so a caller can reuse one buffer across slices.
+pub fn encode_scanned_coefficients_into(
+    coeffs: &[i32],
+    num_blocks: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     let total = num_blocks * 64;
     if coeffs.len() != total {
         return Err(Error::invalid(
             "prores entropy: coefficient buffer size mismatch",
         ));
     }
-    let mut bw = BitWriter::new();
+    let mut bw = BitWriter::from_vec(std::mem::take(out));
 
     // Symmetric with `decode_scanned_coefficients`: a zero-block slice
     // emits no DC/AC syntax. Return an empty payload before the first-DC
     // read below would index an empty `coeffs`.
     if num_blocks == 0 {
-        return Ok(bw.finish());
+        *out = bw.finish();
+        return Ok(());
     }
 
     // ---- DC ----
@@ -434,11 +532,11 @@ pub fn encode_scanned_coefficients(coeffs: &[i32], num_blocks: usize) -> Result<
     for n in 1..num_blocks {
         let dc = coeffs[n];
         let diff = dc - previous_dc_coeff;
-        let cb = dc_diff_codebook(previous_dc_diff.unsigned_abs());
+        let vlc = DC_DIFF_VLC[previous_dc_diff.unsigned_abs().min(3) as usize];
         // The decoder applies a sign flip when previous_dc_diff < 0; do
         // the inverse here so the round-trip stays exact.
         let stored = if previous_dc_diff < 0 { -diff } else { diff };
-        cb.write(&mut bw, signed_mapping(stored));
+        put_codeword(&mut bw, vlc.codeword(signed_mapping(stored)));
         previous_dc_coeff = dc;
         previous_dc_diff = diff;
     }
@@ -454,18 +552,27 @@ pub fn encode_scanned_coefficients(coeffs: &[i32], num_blocks: usize) -> Result<
             run_acc += 1;
             continue;
         }
-        // emit run
-        let run_cb = run_codebook(previous_run);
-        run_cb.write(&mut bw, run_acc);
+        let (run_bits, run_len) = RUN_VLC[previous_run.min(15) as usize].codeword(run_acc);
         previous_run = run_acc;
-        // emit level
-        let abs_level = v.unsigned_abs();
-        let abs_minus_1 = abs_level - 1;
-        let lvl_cb = level_codebook(previous_level_symbol);
-        lvl_cb.write(&mut bw, abs_minus_1);
+        let abs_minus_1 = v.unsigned_abs() - 1;
+        let (level_bits, level_len) =
+            LEVEL_VLC[previous_level_symbol.min(8) as usize].codeword(abs_minus_1);
         previous_level_symbol = abs_minus_1;
-        // sign: 0 = positive, 1 = negative
-        bw.write_bit(if v < 0 { 1 } else { 0 });
+        // The level codeword is followed by its sign: 0 = positive, 1 = negative.
+        let level_sign = ((level_bits << 1) | (v < 0) as u64, level_len + 1);
+        // Run, level and sign usually fit one write together.
+        if run_len + level_sign.1 <= 32 {
+            put_codeword(
+                &mut bw,
+                (
+                    (run_bits << level_sign.1) | level_sign.0,
+                    run_len + level_sign.1,
+                ),
+            );
+        } else {
+            put_codeword(&mut bw, (run_bits, run_len));
+            put_codeword(&mut bw, level_sign);
+        }
         run_acc = 0;
     }
     // Trailing zeros run is implicit (no level emitted). Per spec we
@@ -473,7 +580,25 @@ pub fn encode_scanned_coefficients(coeffs: &[i32], num_blocks: usize) -> Result<
 
     // Pad with zero bits to next byte boundary (spec's `zero_bit` loop).
     bw.align_byte();
-    Ok(bw.finish())
+    *out = bw.finish();
+    Ok(())
+}
+
+/// Write a `(value, length)` codeword from [`Vlc::codeword`]. Lengths
+/// over 32 bits only arise for symbols far outside any legal level and
+/// are split; the bits above the value's top set bit are zeros.
+#[inline]
+fn put_codeword(bw: &mut BitWriter, (bits, len): (u64, u32)) {
+    if len <= 32 {
+        bw.write_bits(bits as u32, len);
+    } else {
+        let high = len - 32;
+        if high > 32 {
+            bw.write_zeros(high - 32);
+        }
+        bw.write_bits((bits >> 32) as u32, high.min(32));
+        bw.write_bits(bits as u32, 32);
+    }
 }
 
 /// Signed integer-to-symbol mapping S(n) (RDD 36 §7.1.1.2 Table 8).
@@ -503,6 +628,39 @@ pub fn inv_signed_mapping(s: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vlc_tables_match_codebook_writers() {
+        // Every table row, for symbols across both the Rice and the
+        // exp-Golomb branch, must emit the same bits as Codebook::write.
+        let rows = (0..4)
+            .map(|i| (DC_DIFF_VLC[i], dc_diff_codebook(i as u32)))
+            .chain((0..16).map(|i| (RUN_VLC[i], run_codebook(i as u32))))
+            .chain((0..9).map(|i| (LEVEL_VLC[i], level_codebook(i as u32))));
+        for (vlc, cb) in rows {
+            for n in (0..300).chain([1 << 12, 65_535, 1 << 20, u32::MAX >> 1]) {
+                let mut want = BitWriter::new();
+                cb.write(&mut want, n);
+                let mut got = BitWriter::new();
+                put_codeword(&mut got, vlc.codeword(n));
+                assert_eq!(got.bit_len(), want.bit_len(), "{cb:?} n={n}");
+                assert_eq!(got.finish(), want.finish(), "{cb:?} n={n}");
+            }
+        }
+        // The clamped table ends select the same codebook as larger inputs.
+        assert_eq!(
+            format!("{:?}", dc_diff_codebook(3)),
+            format!("{:?}", dc_diff_codebook(1000))
+        );
+        assert_eq!(
+            format!("{:?}", run_codebook(15)),
+            format!("{:?}", run_codebook(1000))
+        );
+        assert_eq!(
+            format!("{:?}", level_codebook(8)),
+            format!("{:?}", level_codebook(1000))
+        );
+    }
 
     #[test]
     fn zero_block_slice_decodes_to_empty_without_reading_bits() {

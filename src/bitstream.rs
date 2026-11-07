@@ -81,11 +81,18 @@ impl<'a> BitReader<'a> {
 }
 
 /// MSB-first bit writer.
+///
+/// Bits collect in a 64-bit accumulator and reach `buf` four bytes at a
+/// time, so a codeword costs a shift and an OR rather than one
+/// read-modify-write of the output per bit.
 pub struct BitWriter {
     buf: Vec<u8>,
-    /// Bit offset into the *last* byte of `buf` where the next write lands.
-    /// `0..=7`. When it hits 8 we push a fresh byte.
-    cur_bits_used: u32,
+    /// Pending bits, right-aligned: the low `acc_bits` bits of `acc` are
+    /// the next bits of the stream, oldest first. Bits above them are
+    /// stale and never emitted.
+    acc: u64,
+    /// `0..32` between calls.
+    acc_bits: u32,
 }
 
 impl Default for BitWriter {
@@ -96,53 +103,81 @@ impl Default for BitWriter {
 
 impl BitWriter {
     pub fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    /// A writer whose output buffer starts with room for `bytes` bytes.
+    pub fn with_capacity(bytes: usize) -> Self {
+        Self::from_vec(Vec::with_capacity(bytes))
+    }
+
+    /// A writer that appends to `buf` after its existing bytes, reusing
+    /// its allocation; [`finish`](Self::finish) hands it back.
+    /// `byte_len` and `bit_len` include the existing bytes.
+    pub fn from_vec(buf: Vec<u8>) -> Self {
         Self {
-            buf: Vec::new(),
-            cur_bits_used: 8,
+            buf,
+            acc: 0,
+            acc_bits: 0,
         }
     }
 
     pub fn write_bit(&mut self, b: u32) {
-        if self.cur_bits_used == 8 {
-            self.buf.push(0);
-            self.cur_bits_used = 0;
-        }
-        let last = self.buf.last_mut().unwrap();
-        let shift = 7 - self.cur_bits_used;
-        *last |= ((b & 1) as u8) << shift;
-        self.cur_bits_used += 1;
+        self.write_bits(b & 1, 1);
     }
 
+    /// Write the low `n` bits of `v`, most significant first.
+    #[inline]
     pub fn write_bits(&mut self, v: u32, n: u32) {
         debug_assert!((1..=32).contains(&n));
-        for i in (0..n).rev() {
-            self.write_bit((v >> i) & 1);
+        let v = v as u64 & ((1u64 << n) - 1);
+        // acc_bits < 32 and n <= 32, so the pending bits fit in 64.
+        self.acc = (self.acc << n) | v;
+        self.acc_bits += n;
+        if self.acc_bits >= 32 {
+            self.acc_bits -= 32;
+            let word = (self.acc >> self.acc_bits) as u32;
+            self.buf.extend_from_slice(&word.to_be_bytes());
+        }
+    }
+
+    /// Write `n` zero bits (any `n`, as in a unary prefix).
+    pub fn write_zeros(&mut self, mut n: u32) {
+        while n > 32 {
+            self.write_bits(0, 32);
+            n -= 32;
+        }
+        if n > 0 {
+            self.write_bits(0, n);
         }
     }
 
     /// Pad to the next byte boundary with zero bits.
     pub fn align_byte(&mut self) {
-        while self.cur_bits_used != 8 {
-            self.write_bit(0);
+        let pad = (8 - self.acc_bits % 8) % 8;
+        if pad > 0 {
+            self.write_bits(0, pad);
         }
     }
 
     pub fn finish(mut self) -> Vec<u8> {
         self.align_byte();
+        // Whole bytes remain: emit them oldest first.
+        while self.acc_bits > 0 {
+            self.acc_bits -= 8;
+            self.buf.push((self.acc >> self.acc_bits) as u8);
+        }
         self.buf
     }
 
+    /// Bytes written so far, counting a partial trailing byte.
     pub fn byte_len(&self) -> usize {
-        self.buf.len()
+        self.buf.len() + self.acc_bits.div_ceil(8) as usize
     }
 
     /// Number of bits written so far (including any partial trailing byte).
     pub fn bit_len(&self) -> usize {
-        if self.cur_bits_used == 8 {
-            self.buf.len() * 8
-        } else {
-            (self.buf.len() - 1) * 8 + self.cur_bits_used as usize
-        }
+        self.buf.len() * 8 + self.acc_bits as usize
     }
 }
 
@@ -183,5 +218,31 @@ mod tests {
         let _ = r.read_bit().unwrap(); // consume the leading 1
         // Trailing bit is non-zero → not yet at EOD.
         assert!(!r.end_of_data());
+    }
+
+    #[test]
+    fn writer_matches_bit_at_a_time_reference() {
+        // Mixed-width writes straddling the 32-bit flush and byte
+        // boundaries, checked against a one-bit-per-step reference.
+        let mut seed = 0x1234_5678u32;
+        let mut w = BitWriter::new();
+        let mut bits = Vec::new();
+        for i in 0..2000u32 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let n = 1 + (seed >> 27);
+            if i % 7 == 0 {
+                w.write_zeros(n + 33);
+                bits.extend(std::iter::repeat_n(0u8, (n + 33) as usize));
+            }
+            w.write_bits(seed, n);
+            bits.extend((0..n).rev().map(|b| ((seed >> b) & 1) as u8));
+            assert_eq!(w.bit_len(), bits.len());
+            assert_eq!(w.byte_len(), bits.len().div_ceil(8));
+        }
+        let mut want = vec![0u8; bits.len().div_ceil(8)];
+        for (i, &b) in bits.iter().enumerate() {
+            want[i / 8] |= b << (7 - i % 8);
+        }
+        assert_eq!(w.finish(), want);
     }
 }

@@ -16,7 +16,7 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::entropy::{decode_scanned_coefficients, encode_scanned_coefficients};
+use crate::entropy::{decode_scanned_coefficients, encode_scanned_coefficients_into};
 use crate::frame::ChromaFormat;
 use crate::quant::{BLOCK_SCAN_INTERLACED, BLOCK_SCAN_PROGRESSIVE};
 
@@ -58,6 +58,27 @@ pub fn encode_slice_components(
     interlaced: bool,
     blocks: &[[i32; 64]],
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let mut scan = Vec::new();
+    let mut out = Vec::new();
+    let [y, cb, _] =
+        encode_slice_components_into(mb_count, chroma, interlaced, blocks, &mut scan, &mut out)?;
+    let cr_data = out.split_off(y + cb);
+    let cb_data = out.split_off(y);
+    Ok((out, cb_data, cr_data))
+}
+
+/// [`encode_slice_components`], appending the Y, Cb and Cr payloads
+/// back to back to `out` and returning their byte lengths. `scan` is
+/// scratch space for the slice-scanned coefficients; passing the same
+/// two buffers for every slice avoids per-slice allocation.
+pub fn encode_slice_components_into(
+    mb_count: usize,
+    chroma: ChromaFormat,
+    interlaced: bool,
+    blocks: &[[i32; 64]],
+    scan: &mut Vec<i32>,
+    out: &mut Vec<u8>,
+) -> Result<[usize; 3]> {
     if mb_count == 0 || mb_count > MAX_MBS_PER_SLICE {
         return Err(Error::invalid("prores: slice mb_count out of range"));
     }
@@ -66,35 +87,33 @@ pub fn encode_slice_components(
     if blocks.len() != mb_count * per_mb {
         return Err(Error::invalid("prores: slice block-count mismatch"));
     }
-    let scan = if interlaced {
+    let block_scan = if interlaced {
         &BLOCK_SCAN_INTERLACED
     } else {
         &BLOCK_SCAN_PROGRESSIVE
     };
 
-    // Build the three slice-scanned coefficient arrays.
-    let y_coeffs = build_slice_scan(blocks, mb_count, per_mb, 0, LUMA_BLOCKS_PER_MB, scan);
-    let cb_coeffs = build_slice_scan(
-        blocks,
-        mb_count,
-        per_mb,
-        LUMA_BLOCKS_PER_MB,
-        cb_per_mb,
-        scan,
-    );
-    let cr_coeffs = build_slice_scan(
-        blocks,
-        mb_count,
-        per_mb,
-        LUMA_BLOCKS_PER_MB + cb_per_mb,
-        cb_per_mb,
-        scan,
-    );
-
-    let y_bits = encode_scanned_coefficients(&y_coeffs, mb_count * LUMA_BLOCKS_PER_MB)?;
-    let cb_bits = encode_scanned_coefficients(&cb_coeffs, mb_count * cb_per_mb)?;
-    let cr_bits = encode_scanned_coefficients(&cr_coeffs, mb_count * cb_per_mb)?;
-    Ok((y_bits, cb_bits, cr_bits))
+    let mut sizes = [0usize; 3];
+    let components = [
+        (0, LUMA_BLOCKS_PER_MB),
+        (LUMA_BLOCKS_PER_MB, cb_per_mb),
+        (LUMA_BLOCKS_PER_MB + cb_per_mb, cb_per_mb),
+    ];
+    for (size, (offset, per_component)) in sizes.iter_mut().zip(components) {
+        build_slice_scan_into(
+            blocks,
+            mb_count,
+            per_mb,
+            offset,
+            per_component,
+            block_scan,
+            scan,
+        );
+        let start = out.len();
+        encode_scanned_coefficients_into(scan, mb_count * per_component, out)?;
+        *size = out.len() - start;
+    }
+    Ok(sizes)
 }
 
 /// Decode the three per-component coefficient bitstreams back to
@@ -153,27 +172,21 @@ pub fn decode_slice_components(
     Ok(out)
 }
 
-/// Apply the forward slice scan to one component of a slice. Returns
-/// `mb_count * blocks_per_mb_component * 64` coefficients in
-/// frequency-major order.
-fn build_slice_scan(
+/// Apply the forward slice scan to one component of a slice, replacing
+/// the contents of `out` with `mb_count * blocks_per_mb_component * 64`
+/// coefficients in frequency-major order.
+fn build_slice_scan_into(
     blocks: &[[i32; 64]],
     mb_count: usize,
     per_mb: usize,
     component_offset: usize,
     blocks_per_mb_component: usize,
     block_scan: &[u8; 64],
-) -> Vec<i32> {
+    out: &mut Vec<i32>,
+) {
     let total_blocks = mb_count * blocks_per_mb_component;
-    let mut out = vec![0i32; total_blocks * 64];
-    // For each frequency-index n in [0, 64): for each MB (m), for each
-    // block-within-MB (b): store block's natural-order coefficient
-    // located at `block_scan` inverse position == ?
-    //
-    // Given block_scan[v*8+u] = scanned-index k for natural position
-    // (u, v), the natural-order entry that ends up at scanned index n is
-    // the (u, v) such that block_scan[v*8+u] == n. Use the inverse:
-    // build a freq→natural lookup.
+    out.clear();
+    out.resize(total_blocks * 64, 0);
     let mut inv = [0u8; 64];
     for (nat_idx, &k) in block_scan.iter().enumerate() {
         inv[k as usize] = nat_idx as u8;
@@ -189,10 +202,9 @@ fn build_slice_scan(
             }
         }
     }
-    out
 }
 
-/// Inverse of [`build_slice_scan`]: scatter slice-scanned coefficients
+/// Inverse of [`build_slice_scan_into`]: scatter slice-scanned coefficients
 /// into the natural-order block array.
 #[allow(clippy::too_many_arguments)]
 fn inverse_slice_scan(

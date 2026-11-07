@@ -193,6 +193,8 @@ All through `EncoderConfig` + `make_encoder_with_config`:
 * `with_min_frame_size` — §5.1.2 constant-frame-size stuffing (padded
   frames decode bit-identically).
 * `with_interlace_mode` — 0 progressive / 1 TFF / 2 BFF.
+* `with_threads` / `with_all_threads` — code each picture's slices on
+  several threads; output is byte-identical for any thread count.
 
 Inputs are validated up front (ranges above, matrix weights `2..=63`,
 dimensions `1..=65535` per the u16 header fields — out-of-range is

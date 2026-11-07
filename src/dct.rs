@@ -56,6 +56,127 @@ pub fn fdct8x8(block: &mut [f32; 64]) {
     }
 }
 
+/// One 8-point forward DCT, scaled per frequency as in Arai, Agui and
+/// Nakajima ("A Fast DCT-SQ Scheme for Images", Trans. IEICE E71(11),
+/// 1988): 29 additions and 5 multiplications, against 64
+/// multiply-adds for the matrix form. The output is
+/// `out[k] = 2√2 · s[k] · X[k]` (`s` as in [`aan_scale`]), where `X` is
+/// the orthonormal-basis output of [`fdct8x8`]'s row pass. The scale is
+/// cancelled by the caller (see [`fdct8x8_aan`]).
+///
+/// **Derivation.** Write `θ = π/16` and `C[k] = Σₙ d[n]·cos((2n+1)kθ)`.
+/// Then `out[0] = C[0]` and, for `k ≥ 1`, `out[k] = 2·cos(kθ)·C[k]`.
+///
+/// 1. Fold. `cos((2(7−n)+1)kθ) = (−1)ᵏ·cos((2n+1)kθ)`, so for
+///    `n = 0..3` even `k` sees only `sₙ = d[n] + d[7−n]` and odd `k`
+///    only `aₙ = d[n] − d[7−n]`. Call either `xₙ`.
+/// 2. Product to sum. `2·cos(kθ)·cos((2n+1)kθ) = cos(2nkθ) + cos(2(n+1)kθ)`,
+///    so, grouping by angle,
+///
+///    ```text
+///    out[k] = x0 + cos(2kθ)(x0+x1) + cos(4kθ)(x1+x2) + cos(6kθ)(x2+x3)
+///                + cos(8kθ)·x3
+///    ```
+///
+///    where `cos(8kθ)` is 0 for odd `k` and −1 for `k = 2, 6`.
+/// 3. Even outputs, with `cᵢ = cos(iθ)`:
+///    `out[0] = s0+s1+s2+s3`, `out[4] = (s0+s3) − (s1+s2)` (the scale of
+///    `[0]` and `[4]` is folded so neither needs a multiply), and
+///    `out[2], out[6] = (s0−s3) ± c4·((s0−s3) + (s1−s2))`.
+/// 4. Odd outputs, with `p = a0+a1`, `q = a1+a2`, `r = a2+a3`:
+///
+///    ```text
+///    out[1], out[7] = (a0 + c4·q) ± (c2·p + c6·r)
+///    out[3], out[5] = (a0 − c4·q) ± (c6·p − c2·r)
+///    ```
+///
+///    The two brackets on the right are a reflection of `(p, r)`. With
+///    `w = c2·(p+r)` they cost three multiplies instead of four:
+///    `c2·p + c6·r = w − (c2−c6)·r` and `c6·p − c2·r = (c2+c6)·p − w`.
+#[inline(always)]
+fn fdct8_aan(d: [f32; 8]) -> [f32; 8] {
+    const C2: f32 = 0.923_879_5; // cos(2θ)
+    const C4: f32 = std::f32::consts::FRAC_1_SQRT_2; // cos(4θ)
+    const C2_MINUS_C6: f32 = 0.541_196_1; // cos(2θ) - cos(6θ)
+    const C2_PLUS_C6: f32 = 1.306_563; // cos(2θ) + cos(6θ)
+
+    // Step 1: fold the input into sums and differences.
+    let s0 = d[0] + d[7];
+    let s1 = d[1] + d[6];
+    let s2 = d[2] + d[5];
+    let s3 = d[3] + d[4];
+    let a0 = d[0] - d[7];
+    let a1 = d[1] - d[6];
+    let a2 = d[2] - d[5];
+    let a3 = d[3] - d[4];
+
+    // Step 3: even outputs.
+    let s03 = s0 + s3;
+    let s12 = s1 + s2;
+    let s0m3 = s0 - s3;
+    let even_c4 = C4 * (s0m3 + (s1 - s2));
+
+    // Step 4: odd outputs.
+    let p = a0 + a1;
+    let q = a1 + a2;
+    let r = a2 + a3;
+    let odd_c4 = C4 * q;
+    let w = C2 * (p + r);
+    let refl_17 = w - C2_MINUS_C6 * r; // c2·p + c6·r
+    let refl_35 = C2_PLUS_C6 * p - w; // c6·p − c2·r
+    let base_17 = a0 + odd_c4;
+    let base_35 = a0 - odd_c4;
+
+    [
+        s03 + s12,
+        base_17 + refl_17,
+        s0m3 + even_c4,
+        base_35 + refl_35,
+        s03 - s12,
+        base_35 - refl_35,
+        s0m3 - even_c4,
+        base_17 - refl_17,
+    ]
+}
+
+/// Per-frequency scale of [`fdct8_aan`]: `1` for DC and
+/// `√2 · cos(kπ/16)` otherwise.
+fn aan_scale() -> &'static [f64; 8] {
+    static S: OnceLock<[f64; 8]> = OnceLock::new();
+    S.get_or_init(|| {
+        let mut s = [1.0f64; 8];
+        for (k, v) in s.iter_mut().enumerate().skip(1) {
+            *v = std::f64::consts::SQRT_2 * (k as f64 * std::f64::consts::PI / 16.0).cos();
+        }
+        s
+    })
+}
+
+/// Factor by which [`fdct8x8_aan`]'s output exceeds [`fdct8x8`]'s at
+/// natural-order position `v * 8 + u`: `8 · s[v] · s[u]` with `s` the
+/// per-frequency scale of the 1-D AAN transform. Exact to f64.
+pub fn fdct8x8_aan_scale(k: usize) -> f64 {
+    let s = aan_scale();
+    8.0 * s[k / 8] * s[k % 8]
+}
+
+/// Scaled forward DCT of an 8x8 block in natural order, in place: the
+/// same transform as [`fdct8x8`] with coefficient `k` multiplied by
+/// [`fdct8x8_aan_scale`]`(k)`. Encoders fold that factor into the
+/// quantiser (one multiply per coefficient either way), so the
+/// separable row and column passes need only the 1-D AAN butterflies.
+pub fn fdct8x8_aan(block: &mut [f32; 64]) {
+    for row in block.as_chunks_mut::<8>().0 {
+        *row = fdct8_aan(*row);
+    }
+    for x in 0..8 {
+        let col = fdct8_aan(std::array::from_fn(|y| block[y * 8 + x]));
+        for (y, v) in col.into_iter().enumerate() {
+            block[y * 8 + x] = v;
+        }
+    }
+}
+
 /// Inverse DCT of an 8x8 block in natural order, in-place.
 pub fn idct8x8(block: &mut [f32; 64]) {
     let t = cos_table();
@@ -125,7 +246,7 @@ pub fn fdct8x8_constant(block: &mut [f32; 64]) {
 /// of `block[..]` equals `block[0]` exactly.
 ///
 /// The encoder calls this on a freshly read-and-level-shifted 8x8 input
-/// block. The samples come from `read_sample()` which returns f32 values
+/// block. The samples come from `read_block()` which returns f32 values
 /// in the centred range `[-256, 256)`; two samples that came from the
 /// same source byte produce bit-identical f32, so a constant-source
 /// block is detected exactly.
@@ -197,6 +318,29 @@ pub fn is_dc_only(block: &[f32; 64]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aan_fdct_matches_textbook_fdct_after_scaling() {
+        let mut seed = 1u32;
+        for _ in 0..200 {
+            let mut a = [0.0f32; 64];
+            for v in a.iter_mut() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *v = (seed >> 23) as f32 - 256.0;
+            }
+            let mut b = a;
+            fdct8x8(&mut a);
+            fdct8x8_aan(&mut b);
+            for k in 0..64 {
+                let scaled = (b[k] as f64 / fdct8x8_aan_scale(k)) as f32;
+                assert!(
+                    (scaled - a[k]).abs() < 2e-3,
+                    "k={k}: aan/scale = {scaled} vs textbook {}",
+                    a[k]
+                );
+            }
+        }
+    }
 
     #[test]
     fn idct_of_dct_is_identity() {
@@ -282,7 +426,7 @@ mod tests {
 
     #[test]
     fn fdct_constant_matches_general_fdct() {
-        // Every plausible level-shifted sample value from the read_sample
+        // Every plausible level-shifted sample value from the read_block
         // range `[-256, 256)` plus exact endpoints. The general fdct8x8
         // and the constant fast path must produce identical buffers to
         // f32 round-off.
