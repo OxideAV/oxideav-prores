@@ -32,6 +32,7 @@ use crate::slice::encode_slice_components_into;
 /// (flat all-4s quantisation matrices, `load_luma_qmat = 0`,
 /// `load_chroma_qmat = 0`, per-profile default quantisation index).
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct EncoderConfig {
     /// Per-component quantisation weight matrices. `None` is identical
     /// to `Some(QuantMatrices::flat())` — the encoder writes

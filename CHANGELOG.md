@@ -13,32 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the slices of each picture on several scoped threads. The output is
   byte-identical for every thread count (`tests/encoder_threads.rs`);
   the default codes on the calling thread as before.
-- Opt-in decoder entry points that keep reconstructed samples beyond
-  the visible width: `decoder::decode_packet_with_chroma_border` (one
-  more 4:2:2 chroma column when an even visible width ends inside a
-  macroblock, for co-sited chroma upsampling) and
-  `decoder::decode_packet_with_coded_width` (the whole right
-  macroblock). The existing entry points and the registry path still
-  crop to the picture per RDD 36 §7.5 (#15).
-
-### Fixed
-
-- Alpha on a partial bottom macroblock row: a slice whose alpha array
-  holds only the visible rows (the RDD 36 §5.3 `sliceVerticalSize` form,
-  written by Apple's encoder) now decodes; the 16-row form written by
-  ffmpeg's prores_ks and by this crate is still read first. To tell the
-  two apart `decode_scanned_alpha` now requires the payload to end with
-  the declared values (at most 7 zero alignment bits may follow) (#13).
-- 4:4:4 chroma blocks within a macroblock are coded in the RDD 36 §7.5
-  Figure 8 column order (top-left, bottom-left, top-right, bottom-right)
-  in both the decoder and the encoder; streams from other encoders no
-  longer decode with the top-right and bottom-left chroma blocks swapped,
-  and our 4444 output decodes correctly elsewhere (#12). The 4444 encoder
-  output pins and the 1080p 4444 decode pins change accordingly; new
-  ffmpeg cross-checks score the chroma planes in both directions.
+- Full-field `FrameHeader::new`; `Default` on `PictureGeometry`, `FrameMeta`, `PictureHeader` and `SliceHeader`; `with_<field>` setters on the newly `#[non_exhaustive]` records (existing `EncoderConfig` builders kept as they are).
 
 ### Changed
 
+- API hygiene: `frame::AlphaChannelType` and `OutputRange` enums and the `EncoderConfig`, `FrameHeader`, `PictureGeometry`, `FrameMeta`, `PictureHeader` and `SliceHeader` records are now `#[non_exhaustive]`. `ChromaFormat` and `QuantizationMatrixSource` stay exhaustive (fully determined by the RDD 36 fields). Internal modules were already `#[doc(hidden)]`.
 - Encoder frames are assembled with a single copy of the coded slice
   data: pictures are sized from their coded slice runs and written once
   into an exactly sized frame buffer. The output is unchanged.
@@ -72,6 +51,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Encoder: source samples are read a block row at a time, with the bit
   depth resolved once per block and edge clamping only on right-edge
   blocks; the output is unchanged.
+
+## [0.1.2](https://github.com/OxideAV/oxideav-prores/compare/v0.1.1...v0.1.2) - 2026-10-23
+
+### Fixed
+
+- fixup for #15: document the opt-in against §7.5, README + CHANGELOG, consistency test, rustfmt
+- fixup for #14: rustfmt + CHANGELOG
+- fixup for #13: ground the two alpha-array forms in RDD 36 §5.3, CHANGELOG, rustfmt
+- fixup for #12: chroma-plane cross-checks with ffmpeg, 1080p 4444 decode pins, CHANGELOG
+
+### Other
+
+- opt-in entry points keeping samples beyond the visible width
+- convert a constant 8x8 block's sample once
+- compact alpha on a partial bottom macroblock row
+- 4:4 chroma blocks in column order (decoder and encoder)
+- edition 2024, MSRV 1.95
+- README examples use the current registry API
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
+### Added
+
+- Opt-in decoder entry points that keep reconstructed samples beyond
+  the visible width: `decoder::decode_packet_with_chroma_border` (one
+  more 4:2:2 chroma column when an even visible width ends inside a
+  macroblock, for co-sited chroma upsampling) and
+  `decoder::decode_packet_with_coded_width` (the whole right
+  macroblock). The existing entry points and the registry path still
+  crop to the picture per RDD 36 §7.5 (#15).
+
+### Fixed
+
+- Alpha on a partial bottom macroblock row: a slice whose alpha array
+  holds only the visible rows (the RDD 36 §5.3 `sliceVerticalSize` form,
+  written by Apple's encoder) now decodes; the 16-row form written by
+  ffmpeg's prores_ks and by this crate is still read first. To tell the
+  two apart `decode_scanned_alpha` now requires the payload to end with
+  the declared values (at most 7 zero alignment bits may follow) (#13).
+- 4:4:4 chroma blocks within a macroblock are coded in the RDD 36 §7.5
+  Figure 8 column order (top-left, bottom-left, top-right, bottom-right)
+  in both the decoder and the encoder; streams from other encoders no
+  longer decode with the top-right and bottom-left chroma blocks swapped,
+  and our 4444 output decodes correctly elsewhere (#12). The 4444 encoder
+  output pins and the 1080p 4444 decode pins change accordingly; new
+  ffmpeg cross-checks score the chroma planes in both directions.
+
+### Changed
+
 - Decoder: a block whose inverse transform is constant (DC-only, as in
   flat areas) converts its sample once and stores it 64 times; the
   output is unchanged (#14).

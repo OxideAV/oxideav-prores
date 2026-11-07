@@ -148,6 +148,7 @@ impl BitDepth {
 /// output-formatting decision and does not affect entropy decoding,
 /// inverse quantisation, or the IDCT.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+#[non_exhaustive]
 pub enum OutputRange {
     /// Clamp to `0 ..= 2^b − 1` (all quantization levels). Default.
     #[default]

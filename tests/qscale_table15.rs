@@ -113,13 +113,12 @@ fn slice_header_qscale_accessor_mirrors_table_15() {
     // derivation; a parsed-or-hand-built header in the defined index
     // range must return `Some(qScale)` equal to the free function.
     for qi in 1u8..=224 {
-        let sh = SliceHeader {
-            slice_header_size: 6,
-            quantization_index: qi,
-            coded_size_of_y_data: 0,
-            coded_size_of_cb_data: 0,
-            coded_size_of_cr_data: None,
-        };
+        let sh = SliceHeader::default()
+            .with_slice_header_size(6)
+            .with_quantization_index(qi)
+            .with_coded_size_of_y_data(0)
+            .with_coded_size_of_cb_data(0)
+            .with_coded_size_of_cr_data(None);
         assert_eq!(
             sh.qscale(),
             Some(qscale(qi)),
@@ -134,13 +133,12 @@ fn slice_header_qscale_is_none_for_reserved_indices() {
     // reserved. A hand-built header carrying a reserved code returns
     // `None` (no defined qScale), distinct from `Some(1)`.
     for qi in std::iter::once(0u8).chain(225u8..=255) {
-        let sh = SliceHeader {
-            slice_header_size: 6,
-            quantization_index: qi,
-            coded_size_of_y_data: 0,
-            coded_size_of_cb_data: 0,
-            coded_size_of_cr_data: None,
-        };
+        let sh = SliceHeader::default()
+            .with_slice_header_size(6)
+            .with_quantization_index(qi)
+            .with_coded_size_of_y_data(0)
+            .with_coded_size_of_cb_data(0)
+            .with_coded_size_of_cr_data(None);
         assert_eq!(
             sh.qscale(),
             None,
