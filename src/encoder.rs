@@ -1751,7 +1751,7 @@ impl PictureCoder<'_> {
         const MIN_RUN: usize = 8;
         let run_len = slices
             .len()
-            .div_ceil(threads * RUNS_PER_THREAD)
+            .div_ceil(threads.saturating_mul(RUNS_PER_THREAD))
             .max(MIN_RUN);
         let runs: Vec<_> = slices.chunks(run_len).collect();
         let threads = threads.min(runs.len());
@@ -2241,6 +2241,94 @@ mod tests {
                 "AC[{k}] must be exactly 0 after the constant-block fast path"
             );
         }
+    }
+
+    /// The AAN forward DCT with its scale folded into reciprocal
+    /// quantiser multipliers may only move a coefficient across a .5
+    /// rounding tie: against the textbook path it replaced (`fdct8x8`,
+    /// or `fdct8x8_constant` on a constant block, then the RDD 36 §7.3
+    /// division `round(F * 8 / (W * qScale))`), every quantised value
+    /// must agree to within one step. Random 8- and 10-bit blocks
+    /// (some constant), the full legal weight range and fine-to-coarse
+    /// quantisation indices.
+    #[test]
+    fn aan_quantiser_within_one_step_of_textbook_path() {
+        use crate::dct::{fdct8x8, fdct8x8_constant};
+        let mut seed = 0x2545_f491u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let mut compared = 0usize;
+        for iter in 0..400 {
+            let depth = if iter % 2 == 0 {
+                BitDepth::Eight
+            } else {
+                BitDepth::Ten
+            };
+            let max: u32 = if depth == BitDepth::Eight { 255 } else { 1023 };
+            let constant = iter % 10 == 0;
+            let first = next() % (max + 1);
+            let samples: Vec<u32> = (0..64)
+                .map(|_| if constant { first } else { next() % (max + 1) })
+                .collect();
+            let (plane, stride) = match depth {
+                BitDepth::Eight => (samples.iter().map(|&v| v as u8).collect::<Vec<u8>>(), 8),
+                _ => (
+                    samples
+                        .iter()
+                        .flat_map(|&v| (v as u16).to_le_bytes())
+                        .collect::<Vec<u8>>(),
+                    16,
+                ),
+            };
+            let mut qmat = [0u8; 64];
+            for w in qmat.iter_mut() {
+                *w = 2 + (next() % 62) as u8;
+            }
+            for qi in [1u8, 2, 4, 8, 64, 224] {
+                let new = encode_block(
+                    &plane,
+                    stride,
+                    8,
+                    8,
+                    0,
+                    0,
+                    &quant_multipliers(&qmat, qi),
+                    depth,
+                    FieldStride::progressive(),
+                );
+
+                let mut blk = [0.0f32; 64];
+                for (o, &s) in blk.iter_mut().zip(&samples) {
+                    *o = match depth {
+                        BitDepth::Eight => (s as f32) * 2.0 - 256.0,
+                        _ => (s as f32) / 2.0 - 256.0,
+                    };
+                }
+                if is_constant_block(&blk) {
+                    fdct8x8_constant(&mut blk);
+                } else {
+                    fdct8x8(&mut blk);
+                }
+                let qs = qscale(qi) as f32;
+                for k in 0..64 {
+                    let v = blk[k] * 8.0 / (qmat[k] as f32 * qs);
+                    let old = if v >= 0.0 {
+                        (v + 0.5) as i32
+                    } else {
+                        -((-v + 0.5) as i32)
+                    };
+                    assert!(
+                        (new[k] - old).abs() <= 1,
+                        "iter={iter} qi={qi} k={k}: AAN path {} vs textbook {old}",
+                        new[k]
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 400 * 6 * 64);
     }
 
     /// Wider correctness check: across every plausible level-shifted
