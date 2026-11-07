@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Full-field `FrameHeader::new`; `Default` on `PictureGeometry`, `FrameMeta`, `PictureHeader` and `SliceHeader`; `with_<field>` setters on the newly `#[non_exhaustive]` records (existing `EncoderConfig` builders kept as they are).
+
+### Changed
+
+- API hygiene: `frame::AlphaChannelType` and `OutputRange` enums and the `EncoderConfig`, `FrameHeader`, `PictureGeometry`, `FrameMeta`, `PictureHeader` and `SliceHeader` records are now `#[non_exhaustive]`. `ChromaFormat` and `QuantizationMatrixSource` stay exhaustive (fully determined by the RDD 36 fields). Internal modules were already `#[doc(hidden)]`.
+
 ## [0.1.2](https://github.com/OxideAV/oxideav-prores/compare/v0.1.1...v0.1.2) - 2026-10-23
 
 ### Fixed

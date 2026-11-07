@@ -338,14 +338,14 @@ fn our_encode(
     // (GBR) colourspace for the 4444 profiles and its format converter
     // refuses the reserved-primaries combination — the packet itself is
     // fine, but the comparison needs the decode to run.
-    let mut cfg =
-        EncoderConfig::signature_for_profile(profile).with_meta(oxideav_prores::frame::FrameMeta {
-            aspect_ratio_information: 0,
-            frame_rate_code: 0,
-            color_primaries: 1,
-            transfer_characteristic: 1,
-            matrix_coefficients: 1,
-        });
+    let mut cfg = EncoderConfig::signature_for_profile(profile).with_meta(
+        oxideav_prores::frame::FrameMeta::default()
+            .with_aspect_ratio_information(0)
+            .with_frame_rate_code(0)
+            .with_color_primaries(1)
+            .with_transfer_characteristic(1)
+            .with_matrix_coefficients(1),
+    );
     if let Some(bytes) = target_bytes {
         params.bit_rate = Some(bytes as u64 * 8 * FPS);
         params.frame_rate = Some(oxideav_core::Rational::new(FPS as i64, 1));

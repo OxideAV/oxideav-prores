@@ -3271,13 +3271,14 @@ fn cross_decode_encoder_alpha_yuva422_typed_progressive() {
     params.width = Some(width);
     params.height = Some(height);
     params.pixel_format = Some(PixelFormat::Yuva422P);
-    let cfg = EncoderConfig::for_profile(Profile::Hq).with_meta(FrameMeta {
-        aspect_ratio_information: 0,
-        frame_rate_code: 6, // 25 fps (Table 4)
-        color_primaries: 1,
-        transfer_characteristic: 1,
-        matrix_coefficients: 1,
-    });
+    let cfg = EncoderConfig::for_profile(Profile::Hq).with_meta(
+        FrameMeta::default()
+            .with_aspect_ratio_information(0)
+            .with_frame_rate_code(6)
+            .with_color_primaries(1)
+            .with_transfer_characteristic(1)
+            .with_matrix_coefficients(1),
+    );
     let mut enc = make_encoder_with_config(&params, cfg).expect("make_encoder_with_config");
     enc.send_frame(&Frame::Video(src)).expect("send_frame");
     let pkt = enc.receive_packet().expect("receive_packet");

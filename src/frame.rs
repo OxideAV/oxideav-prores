@@ -214,6 +214,7 @@ pub fn interlace_mode_from_code(code: u8) -> Option<InterlaceMode> {
 
 /// Parsed RDD 36 frame header. Fields the rest of the decoder needs.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct FrameHeader {
     pub frame_size: u32,
     pub frame_header_size: u16,
@@ -251,6 +252,178 @@ pub struct FrameHeader {
     pub load_chroma_quantization_matrix: bool,
     pub luma_qmat: [u8; 64],
     pub chroma_qmat: [u8; 64],
+}
+
+impl FrameHeader {
+    /// Build a `FrameHeader` from every field.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        frame_size: u32,
+        frame_header_size: u16,
+        bitstream_version: u8,
+        encoder_identifier: [u8; 4],
+        width: u16,
+        height: u16,
+        chroma_format: ChromaFormat,
+        interlace_mode: u8,
+        aspect_ratio_information: u8,
+        frame_rate_code: u8,
+        color_primaries: u8,
+        transfer_characteristic: u8,
+        matrix_coefficients: u8,
+        alpha_channel_type: u8,
+        load_luma_quantization_matrix: bool,
+        load_chroma_quantization_matrix: bool,
+        luma_qmat: [u8; 64],
+        chroma_qmat: [u8; 64],
+    ) -> Self {
+        Self {
+            frame_size,
+            frame_header_size,
+            bitstream_version,
+            encoder_identifier,
+            width,
+            height,
+            chroma_format,
+            interlace_mode,
+            aspect_ratio_information,
+            frame_rate_code,
+            color_primaries,
+            transfer_characteristic,
+            matrix_coefficients,
+            alpha_channel_type,
+            load_luma_quantization_matrix,
+            load_chroma_quantization_matrix,
+            luma_qmat,
+            chroma_qmat,
+        }
+    }
+
+    /// Set `frame_size`.
+    #[must_use]
+    pub fn with_frame_size(mut self, v: u32) -> Self {
+        self.frame_size = v;
+        self
+    }
+
+    /// Set `frame_header_size`.
+    #[must_use]
+    pub fn with_frame_header_size(mut self, v: u16) -> Self {
+        self.frame_header_size = v;
+        self
+    }
+
+    /// Set `bitstream_version`.
+    #[must_use]
+    pub fn with_bitstream_version(mut self, v: u8) -> Self {
+        self.bitstream_version = v;
+        self
+    }
+
+    /// Set `encoder_identifier`.
+    #[must_use]
+    pub fn with_encoder_identifier(mut self, v: [u8; 4]) -> Self {
+        self.encoder_identifier = v;
+        self
+    }
+
+    /// Set `width`.
+    #[must_use]
+    pub fn with_width(mut self, v: u16) -> Self {
+        self.width = v;
+        self
+    }
+
+    /// Set `height`.
+    #[must_use]
+    pub fn with_height(mut self, v: u16) -> Self {
+        self.height = v;
+        self
+    }
+
+    /// Set `chroma_format`.
+    #[must_use]
+    pub fn with_chroma_format(mut self, v: ChromaFormat) -> Self {
+        self.chroma_format = v;
+        self
+    }
+
+    /// Set `interlace_mode`.
+    #[must_use]
+    pub fn with_interlace_mode(mut self, v: u8) -> Self {
+        self.interlace_mode = v;
+        self
+    }
+
+    /// Set `aspect_ratio_information`.
+    #[must_use]
+    pub fn with_aspect_ratio_information(mut self, v: u8) -> Self {
+        self.aspect_ratio_information = v;
+        self
+    }
+
+    /// Set `frame_rate_code`.
+    #[must_use]
+    pub fn with_frame_rate_code(mut self, v: u8) -> Self {
+        self.frame_rate_code = v;
+        self
+    }
+
+    /// Set `color_primaries`.
+    #[must_use]
+    pub fn with_color_primaries(mut self, v: u8) -> Self {
+        self.color_primaries = v;
+        self
+    }
+
+    /// Set `transfer_characteristic`.
+    #[must_use]
+    pub fn with_transfer_characteristic(mut self, v: u8) -> Self {
+        self.transfer_characteristic = v;
+        self
+    }
+
+    /// Set `matrix_coefficients`.
+    #[must_use]
+    pub fn with_matrix_coefficients(mut self, v: u8) -> Self {
+        self.matrix_coefficients = v;
+        self
+    }
+
+    /// Set `alpha_channel_type`.
+    #[must_use]
+    pub fn with_alpha_channel_type(mut self, v: u8) -> Self {
+        self.alpha_channel_type = v;
+        self
+    }
+
+    /// Set `load_luma_quantization_matrix`.
+    #[must_use]
+    pub fn with_load_luma_quantization_matrix(mut self, v: bool) -> Self {
+        self.load_luma_quantization_matrix = v;
+        self
+    }
+
+    /// Set `load_chroma_quantization_matrix`.
+    #[must_use]
+    pub fn with_load_chroma_quantization_matrix(mut self, v: bool) -> Self {
+        self.load_chroma_quantization_matrix = v;
+        self
+    }
+
+    /// Set `luma_qmat`.
+    #[must_use]
+    pub fn with_luma_qmat(mut self, v: [u8; 64]) -> Self {
+        self.luma_qmat = v;
+        self
+    }
+
+    /// Set `chroma_qmat`.
+    #[must_use]
+    pub fn with_chroma_qmat(mut self, v: [u8; 64]) -> Self {
+        self.chroma_qmat = v;
+        self
+    }
 }
 
 /// Provenance of a [`FrameHeader`]'s effective chroma quantization weight
@@ -721,7 +894,8 @@ const MB_SIDE_PX: usize = 16;
 /// reported in the named fields and the trailing field's luma height in
 /// [`Self::second_picture_vertical_size`]. See
 /// [`FrameHeader::picture_geometry`] for the full derivation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct PictureGeometry {
     /// `width_in_mb = (horizontal_size + 15) / 16` — the encoded picture
     /// width in macroblocks; identical for every picture in the frame.
@@ -746,6 +920,57 @@ pub struct PictureGeometry {
     /// discard because `16 * height_in_mb` exceeds `picture_vertical_size`.
     /// `0` when the picture height is already a multiple of 16.
     pub bottom_crop: usize,
+}
+
+impl PictureGeometry {
+    /// Set `width_in_mb`.
+    #[must_use]
+    pub fn with_width_in_mb(mut self, v: usize) -> Self {
+        self.width_in_mb = v;
+        self
+    }
+
+    /// Set `height_in_mb`.
+    #[must_use]
+    pub fn with_height_in_mb(mut self, v: usize) -> Self {
+        self.height_in_mb = v;
+        self
+    }
+
+    /// Set `picture_vertical_size`.
+    #[must_use]
+    pub fn with_picture_vertical_size(mut self, v: usize) -> Self {
+        self.picture_vertical_size = v;
+        self
+    }
+
+    /// Set `second_picture_vertical_size`.
+    #[must_use]
+    pub fn with_second_picture_vertical_size(mut self, v: Option<usize>) -> Self {
+        self.second_picture_vertical_size = v;
+        self
+    }
+
+    /// Set `picture_count`.
+    #[must_use]
+    pub fn with_picture_count(mut self, v: u32) -> Self {
+        self.picture_count = v;
+        self
+    }
+
+    /// Set `right_crop`.
+    #[must_use]
+    pub fn with_right_crop(mut self, v: usize) -> Self {
+        self.right_crop = v;
+        self
+    }
+
+    /// Set `bottom_crop`.
+    #[must_use]
+    pub fn with_bottom_crop(mut self, v: usize) -> Self {
+        self.bottom_crop = v;
+        self
+    }
 }
 
 impl PictureGeometry {
@@ -977,6 +1202,7 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, &[u8])> {
 /// (= "unknown / unspecified") so RDD 36 decoders treat them as a hint
 /// only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FrameMeta {
     /// `aspect_ratio_information` per §6.2 / Table 3 (0 = unknown,
     /// 1 = square pixels, 2 = 4:3, 3 = 16:9, 4..=15 = reserved).
@@ -991,6 +1217,43 @@ pub struct FrameMeta {
     pub transfer_characteristic: u8,
     /// `matrix_coefficients` per §6.2.
     pub matrix_coefficients: u8,
+}
+
+impl FrameMeta {
+    /// Set `aspect_ratio_information`.
+    #[must_use]
+    pub fn with_aspect_ratio_information(mut self, v: u8) -> Self {
+        self.aspect_ratio_information = v;
+        self
+    }
+
+    /// Set `frame_rate_code`.
+    #[must_use]
+    pub fn with_frame_rate_code(mut self, v: u8) -> Self {
+        self.frame_rate_code = v;
+        self
+    }
+
+    /// Set `color_primaries`.
+    #[must_use]
+    pub fn with_color_primaries(mut self, v: u8) -> Self {
+        self.color_primaries = v;
+        self
+    }
+
+    /// Set `transfer_characteristic`.
+    #[must_use]
+    pub fn with_transfer_characteristic(mut self, v: u8) -> Self {
+        self.transfer_characteristic = v;
+        self
+    }
+
+    /// Set `matrix_coefficients`.
+    #[must_use]
+    pub fn with_matrix_coefficients(mut self, v: u8) -> Self {
+        self.matrix_coefficients = v;
+        self
+    }
 }
 
 impl FrameMeta {
@@ -1326,6 +1589,7 @@ pub fn transfer_characteristic_from_code(code: u8) -> Option<TransferCharacteris
 /// 16-bit cases differ in run-length symbol width and per-pixel
 /// storage, but both ride the §7.1.2 + Tables 12-14 entropy coder.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum AlphaChannelType {
     /// Code 0 — no encoded alpha plane is present.
     None = 0,
@@ -1528,12 +1792,43 @@ pub fn write_frame_with_meta(
 }
 
 /// Parsed picture_header().
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct PictureHeader {
     pub picture_header_size: u8,
     pub picture_size: u32,
     pub deprecated_number_of_slices: u16,
     pub log2_desired_slice_size_in_mb: u8,
+}
+
+impl PictureHeader {
+    /// Set `picture_header_size`.
+    #[must_use]
+    pub fn with_picture_header_size(mut self, v: u8) -> Self {
+        self.picture_header_size = v;
+        self
+    }
+
+    /// Set `picture_size`.
+    #[must_use]
+    pub fn with_picture_size(mut self, v: u32) -> Self {
+        self.picture_size = v;
+        self
+    }
+
+    /// Set `deprecated_number_of_slices`.
+    #[must_use]
+    pub fn with_deprecated_number_of_slices(mut self, v: u16) -> Self {
+        self.deprecated_number_of_slices = v;
+        self
+    }
+
+    /// Set `log2_desired_slice_size_in_mb`.
+    #[must_use]
+    pub fn with_log2_desired_slice_size_in_mb(mut self, v: u8) -> Self {
+        self.log2_desired_slice_size_in_mb = v;
+        self
+    }
 }
 
 impl PictureHeader {
@@ -1659,7 +1954,8 @@ pub fn write_picture_header(
 }
 
 /// Parsed slice_header().
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct SliceHeader {
     pub slice_header_size: u8,
     pub quantization_index: u8,
@@ -1668,6 +1964,43 @@ pub struct SliceHeader {
     /// Present only when `alpha_channel_type != 0`. When absent the
     /// caller derives it from `coded_size_of_slice - header - y - cb`.
     pub coded_size_of_cr_data: Option<u16>,
+}
+
+impl SliceHeader {
+    /// Set `slice_header_size`.
+    #[must_use]
+    pub fn with_slice_header_size(mut self, v: u8) -> Self {
+        self.slice_header_size = v;
+        self
+    }
+
+    /// Set `quantization_index`.
+    #[must_use]
+    pub fn with_quantization_index(mut self, v: u8) -> Self {
+        self.quantization_index = v;
+        self
+    }
+
+    /// Set `coded_size_of_y_data`.
+    #[must_use]
+    pub fn with_coded_size_of_y_data(mut self, v: u16) -> Self {
+        self.coded_size_of_y_data = v;
+        self
+    }
+
+    /// Set `coded_size_of_cb_data`.
+    #[must_use]
+    pub fn with_coded_size_of_cb_data(mut self, v: u16) -> Self {
+        self.coded_size_of_cb_data = v;
+        self
+    }
+
+    /// Set `coded_size_of_cr_data`.
+    #[must_use]
+    pub fn with_coded_size_of_cr_data(mut self, v: Option<u16>) -> Self {
+        self.coded_size_of_cr_data = v;
+        self
+    }
 }
 
 impl SliceHeader {

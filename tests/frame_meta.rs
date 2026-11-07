@@ -115,13 +115,12 @@ fn explicit_meta_overrides_derivation() {
     // params says 25 fps (would derive code 3) but explicit meta pins
     // code 8 (60 fps) + 16:9 aspect + BT.2020 — and every field shows
     // up in the parsed header.
-    let meta = FrameMeta {
-        aspect_ratio_information: 3,
-        frame_rate_code: 8,
-        color_primaries: 9,
-        transfer_characteristic: 16,
-        matrix_coefficients: 9,
-    };
+    let meta = FrameMeta::default()
+        .with_aspect_ratio_information(3)
+        .with_frame_rate_code(8)
+        .with_color_primaries(9)
+        .with_transfer_characteristic(16)
+        .with_matrix_coefficients(9);
     let pkt = encode_with(
         64,
         48,
@@ -198,13 +197,12 @@ fn encoder_derived_rate_round_trips_through_decoder_helper() {
 /// `CodecParameters::frame_rate` says something else.
 #[test]
 fn encoder_explicit_meta_round_trips_through_decoder_helpers() {
-    let meta = FrameMeta {
-        aspect_ratio_information: 3, // 16:9 per Table 3
-        frame_rate_code: 8,          // 60 fps per Table 4
-        color_primaries: 9,
-        transfer_characteristic: 16,
-        matrix_coefficients: 9,
-    };
+    let meta = FrameMeta::default()
+        .with_aspect_ratio_information(3)
+        .with_frame_rate_code(8)
+        .with_color_primaries(9)
+        .with_transfer_characteristic(16)
+        .with_matrix_coefficients(9);
     let pkt = encode_with(
         64,
         48,
@@ -258,13 +256,12 @@ fn encoder_default_meta_round_trips_as_none_through_decoder_helpers() {
 /// reproducing Tables 5 + 6 itself.
 #[test]
 fn encoder_color_metadata_round_trips_through_decoder_helpers_bt709() {
-    let meta = FrameMeta {
-        aspect_ratio_information: 3,
-        frame_rate_code: 4,
-        color_primaries: 1, // BT.709
-        transfer_characteristic: 1,
-        matrix_coefficients: 1, // BT.709
-    };
+    let meta = FrameMeta::default()
+        .with_aspect_ratio_information(3)
+        .with_frame_rate_code(4)
+        .with_color_primaries(1)
+        .with_transfer_characteristic(1)
+        .with_matrix_coefficients(1);
     let pkt = encode_with(
         64,
         48,
@@ -294,13 +291,12 @@ fn encoder_color_metadata_round_trips_through_decoder_helpers_bt709() {
 /// covers, so the field's reverse mapping stays a caller concern.
 #[test]
 fn encoder_color_metadata_round_trips_through_decoder_helpers_bt2020_pq() {
-    let meta = FrameMeta {
-        aspect_ratio_information: 3,
-        frame_rate_code: 8,
-        color_primaries: 9,          // BT.2020
-        transfer_characteristic: 16, // PQ
-        matrix_coefficients: 9,      // BT.2020 NCL
-    };
+    let meta = FrameMeta::default()
+        .with_aspect_ratio_information(3)
+        .with_frame_rate_code(8)
+        .with_color_primaries(9)
+        .with_transfer_characteristic(16)
+        .with_matrix_coefficients(9);
     let pkt = encode_with(
         64,
         48,
@@ -335,13 +331,12 @@ fn encoder_color_metadata_round_trips_through_decoder_helpers_bt2020_pq() {
 /// [`FrameHeader::meta`]: oxideav_prores::frame::FrameHeader::meta
 #[test]
 fn parsed_header_meta_forwards_into_reencode_via_with_meta() {
-    let src = FrameMeta {
-        aspect_ratio_information: 3, // 16:9 (Table 3)
-        frame_rate_code: 8,          // 60 fps (Table 4)
-        color_primaries: 9,          // BT.2020 (Table 5)
-        transfer_characteristic: 16, // SMPTE ST 2084 PQ (§6.1.1)
-        matrix_coefficients: 9,      // BT.2020 NCL (Table 6)
-    };
+    let src = FrameMeta::default()
+        .with_aspect_ratio_information(3)
+        .with_frame_rate_code(8)
+        .with_color_primaries(9)
+        .with_transfer_characteristic(16)
+        .with_matrix_coefficients(9);
     let pkt_a = encode_with(
         64,
         48,

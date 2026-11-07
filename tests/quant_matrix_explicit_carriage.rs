@@ -214,9 +214,10 @@ fn default_config_output_is_unchanged() {
     // construction — no drift in existing output.
     let a = encode_with(EncoderConfig::default(), Profile::Standard);
     let b = encode_with(
-        EncoderConfig {
-            explicit_qmat_carriage: false,
-            ..EncoderConfig::default()
+        {
+            let mut c = EncoderConfig::default();
+            c.explicit_qmat_carriage = false;
+            c
         },
         Profile::Standard,
     );
