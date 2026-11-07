@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-prores/compare/v0.1.2...v0.2.0) - 2026-11-07
+
+### Fixed
+
+- fixup for #16: saturating run split + AAN quantiser ±1 bound test
+- fixup for #16: revert "Cargo.toml: MSRV 1.89"
+
+### Other
+
+- Merge origin/master into #16
+- API hygiene: non_exhaustive config/header records + option enums
+- MSRV 1.89
+- copy coded slices into the frame once
+- optional multithreaded slice coding within a picture
+- code slices into one buffer with reusable scratch
+- branch-free quantiser rounding
+- AAN factored forward DCT with scaling folded into the quantiser
+- table-driven codebooks, one write per run/level/sign
+- bitstream, entropy: write whole codewords through a 64-bit accumulator
+- read each 8x8 source block row by row
+
 ### Added
 
 - `EncoderConfig::threads` (`with_threads`, `with_all_threads`): code
