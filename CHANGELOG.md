@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/OxideAV/oxideav-prores/compare/v0.1.3...v0.1.4) - 2026-11-21
+
+### Other
+
+- README / CHANGELOG: refer to the validator as the black-box tool
+- state the open question on the video-range clamp above 8 bits
+- profile target frame sizes and a mode that holds frames to them
+- 2-2.8x faster on one thread, optional slice threads, same output
+- write unknown colour as code 2 so platform decode paths accept default streams
+- live black-box interoperability matrix in both directions
+
 ### Added
 
 - `tests/blackbox_matrix.rs`: a live interoperability matrix against the
