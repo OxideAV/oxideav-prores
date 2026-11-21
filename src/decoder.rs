@@ -711,51 +711,7 @@ fn decode_picture_into_planes<'a>(
     a_byte_stride: usize,
 ) -> Result<&'a [u8]> {
     let has_alpha = alpha_kind.is_some();
-    let mbs_y = picture_height.div_ceil(MB_SIDE_PX);
-    let (ph, after_pic) = parse_picture_header(data)?;
-    let slice_sizes_template = compute_slice_sizes(mbs_x, ph.log2_desired_slice_size_in_mb);
-    let slices_per_row = slice_sizes_template.len();
-    let expected_slice_count = slices_per_row * mbs_y;
-    let slice_table_bytes = expected_slice_count
-        .checked_mul(2)
-        .ok_or_else(|| Error::invalid("prores: slice count overflow"))?;
-    if after_pic.len() < slice_table_bytes {
-        return Err(Error::invalid("prores: slice-size table truncated"));
-    }
-    let mut slice_sizes = Vec::with_capacity(expected_slice_count);
-    for i in 0..expected_slice_count {
-        let off = i * 2;
-        slice_sizes.push(u16::from_be_bytes(after_pic[off..off + 2].try_into().unwrap()) as usize);
-    }
-    let mut cursor = &after_pic[slice_table_bytes..];
-    // The bytes occupied by the defined picture syntax this decoder
-    // consumes: the picture header, the slice table, and every slice
-    // payload. RDD 36 §6.2.1 makes `picture_size` (which "includes the
-    // picture header") the authoritative total — and §6.4 permits a
-    // *version variant* to append informative bytes after the defined
-    // syntax, inflating `picture_size` beyond this consumed total.
-    let consumed_picture_bytes: usize =
-        ph.picture_header_size as usize + slice_table_bytes + slice_sizes.iter().sum::<usize>();
-    let declared_picture_bytes = ph.picture_size as usize;
-    // The defined syntax can never claim more space than the picture
-    // declares; if it does the slice table / sizes are corrupt.
-    if consumed_picture_bytes > declared_picture_bytes {
-        return Err(Error::invalid(
-            "prores: header + slice table + payloads exceed declared picture_size",
-        ));
-    }
-    // RDD 36 §6.2.1 / §6.4: "decoders shall use the specified size —
-    // rather than inference from the syntax itself — to determine the
-    // start of the immediately following syntax structure." Advance past
-    // the *declared* `picture_size` (which equals the consumed total for
-    // a base bitstream, or exceeds it by the trailing version-variant
-    // bytes a forward-compatible stream may carry) so that, for an
-    // interlaced frame, the second field's `picture()` starts at the
-    // correct offset even when version-variant data sits after the first
-    // field's slices.
-    if data.len() < declared_picture_bytes {
-        return Err(Error::invalid("prores: picture overruns buffer"));
-    }
+    let (slices, rest) = picture_slices(data, mbs_x, picture_height)?;
 
     const LUMA_OFFSETS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
     let chroma_offsets: &[(usize, usize)] = match chroma {
@@ -765,21 +721,10 @@ fn decode_picture_into_planes<'a>(
     let cb_per_mb = chroma_blocks_per_mb(chroma);
     let per_mb = blocks_per_mb(chroma);
 
-    let mut slice_idx = 0usize;
-    for my in 0..mbs_y {
-        let mut mx = 0usize;
-        for &slice_size_in_mb_template in &slice_sizes_template {
-            let mbs_this_slice = slice_size_in_mb_template.min(mbs_x - mx);
-            if mbs_this_slice == 0 {
-                break;
-            }
-            let coded_size = slice_sizes[slice_idx];
-            if cursor.len() < coded_size {
-                return Err(Error::invalid("prores: slice payload truncated"));
-            }
-            let slice_data = &cursor[..coded_size];
-            cursor = &cursor[coded_size..];
-            slice_idx += 1;
+    {
+        for slice in &slices {
+            let (my, mx, mbs_this_slice, slice_data) =
+                (slice.mb_y, slice.mb_x, slice.mbs, slice.data);
 
             let (sh, after_sh) = parse_slice_header(slice_data, has_alpha)?;
             let coded_y = sh.coded_size_of_y_data as usize;
@@ -964,10 +909,163 @@ fn decode_picture_into_planes<'a>(
                     field,
                 );
             }
-            mx += mbs_this_slice;
         }
     }
-    Ok(&data[declared_picture_bytes..])
+    Ok(rest)
+}
+
+/// One coded slice of a picture: its position in the macroblock grid
+/// and its bytes (slice header included).
+struct SliceRef<'a> {
+    mb_x: usize,
+    mb_y: usize,
+    mbs: usize,
+    data: &'a [u8],
+}
+
+/// Walk a `picture()` (RDD 36 §5.2): parse the picture header and the
+/// slice table and return every slice with its macroblock position,
+/// plus the bytes following the picture.
+fn picture_slices(
+    data: &[u8],
+    mbs_x: usize,
+    picture_height: usize,
+) -> Result<(Vec<SliceRef<'_>>, &[u8])> {
+    let mbs_y = picture_height.div_ceil(MB_SIDE_PX);
+    let (ph, after_pic) = parse_picture_header(data)?;
+    let slice_sizes_template = compute_slice_sizes(mbs_x, ph.log2_desired_slice_size_in_mb);
+    let slices_per_row = slice_sizes_template.len();
+    let expected_slice_count = slices_per_row * mbs_y;
+    let slice_table_bytes = expected_slice_count
+        .checked_mul(2)
+        .ok_or_else(|| Error::invalid("prores: slice count overflow"))?;
+    if after_pic.len() < slice_table_bytes {
+        return Err(Error::invalid("prores: slice-size table truncated"));
+    }
+    let (table, mut cursor) = after_pic.split_at(slice_table_bytes);
+    let slice_sizes: Vec<usize> = table
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| u16::from_be_bytes(*b) as usize)
+        .collect();
+    // The bytes occupied by the defined picture syntax this decoder
+    // consumes: the picture header, the slice table, and every slice
+    // payload. RDD 36 §6.2.1 makes `picture_size` (which "includes the
+    // picture header") the authoritative total — and §6.4 permits a
+    // *version variant* to append informative bytes after the defined
+    // syntax, inflating `picture_size` beyond this consumed total.
+    let consumed_picture_bytes: usize =
+        ph.picture_header_size as usize + slice_table_bytes + slice_sizes.iter().sum::<usize>();
+    let declared_picture_bytes = ph.picture_size as usize;
+    // The defined syntax can never claim more space than the picture
+    // declares; if it does the slice table / sizes are corrupt.
+    if consumed_picture_bytes > declared_picture_bytes {
+        return Err(Error::invalid(
+            "prores: header + slice table + payloads exceed declared picture_size",
+        ));
+    }
+    // RDD 36 §6.2.1 / §6.4: "decoders shall use the specified size —
+    // rather than inference from the syntax itself — to determine the
+    // start of the immediately following syntax structure." The bytes
+    // after the picture start at the *declared* `picture_size` (which
+    // equals the consumed total for a base bitstream, or exceeds it by
+    // the trailing version-variant bytes a forward-compatible stream may
+    // carry) so that, for an interlaced frame, the second field's
+    // `picture()` starts at the correct offset even when version-variant
+    // data sits after the first field's slices.
+    if data.len() < declared_picture_bytes {
+        return Err(Error::invalid("prores: picture overruns buffer"));
+    }
+    let mut slices = Vec::with_capacity(expected_slice_count);
+    let mut sizes = slice_sizes.iter();
+    for mb_y in 0..mbs_y {
+        let mut mb_x = 0usize;
+        for &template in &slice_sizes_template {
+            let mbs = template.min(mbs_x - mb_x);
+            if mbs == 0 {
+                break;
+            }
+            let coded_size = *sizes.next().expect("one table entry per slice");
+            if cursor.len() < coded_size {
+                return Err(Error::invalid("prores: slice payload truncated"));
+            }
+            let (slice_data, tail) = cursor.split_at(coded_size);
+            cursor = tail;
+            slices.push(SliceRef {
+                mb_x,
+                mb_y,
+                mbs,
+                data: slice_data,
+            });
+            mb_x += mbs;
+        }
+    }
+    Ok((slices, &data[declared_picture_bytes..]))
+}
+
+/// Range of the dequantised DCT coefficients `F[v][u]` of a frame, as
+/// `(min, max)` of `QF * W * qScale` — i.e. in eighths (RDD 36 §7.3).
+///
+/// Annex A qualifies an IDCT only for coefficients in −2048..=+2047.75
+/// (`-16384..=16382` here). A frame whose range leaves that interval is
+/// outside the domain in which conforming decoders are bound to agree.
+#[doc(hidden)]
+pub fn dequantized_coefficient_range(data: &[u8]) -> Result<(i64, i64)> {
+    let (fh, mut cursor) = parse_frame(data)?;
+    let has_alpha = AlphaChannelType::from_code(fh.alpha_channel_type)?.is_some();
+    let interlaced = fh.interlace_mode != 0;
+    let height = fh.height as usize;
+    let mbs_x = (fh.width as usize).div_ceil(MB_SIDE_PX);
+    let heights: &[usize] = match fh.interlace_mode {
+        0 => &[height],
+        1 => &[height.div_ceil(2), height / 2],
+        _ => &[height / 2, height.div_ceil(2)],
+    };
+    let luma_blocks_end = LUMA_BLOCKS_PER_MB;
+    let per_mb = blocks_per_mb(fh.chroma_format);
+    let (mut lo, mut hi) = (0i64, 0i64);
+    for &picture_height in heights {
+        let (slices, rest) = picture_slices(cursor, mbs_x, picture_height)?;
+        cursor = rest;
+        for slice in &slices {
+            let (sh, after_sh) = parse_slice_header(slice.data, has_alpha)?;
+            let coded_y = sh.coded_size_of_y_data as usize;
+            let coded_cb = sh.coded_size_of_cb_data as usize;
+            let coded_cr = match sh.coded_size_of_cr_data {
+                Some(sz) => sz as usize,
+                None => after_sh
+                    .len()
+                    .checked_sub(coded_y + coded_cb)
+                    .ok_or_else(|| Error::invalid("prores: cr_data size underflow"))?,
+            };
+            if after_sh.len() < coded_y + coded_cb + coded_cr {
+                return Err(Error::invalid("prores: slice components truncated"));
+            }
+            let blocks = decode_slice_components(
+                &after_sh[..coded_y],
+                &after_sh[coded_y..coded_y + coded_cb],
+                &after_sh[coded_y + coded_cb..coded_y + coded_cb + coded_cr],
+                slice.mbs,
+                fh.chroma_format,
+                interlaced,
+            )?;
+            let qs = i64::from(qscale(sh.quantization_index));
+            for (i, blk) in blocks.iter().enumerate() {
+                let qmat = if i % per_mb < luma_blocks_end {
+                    &fh.luma_qmat
+                } else {
+                    &fh.chroma_qmat
+                };
+                for (&q, &w) in blk.iter().zip(qmat) {
+                    let f = i64::from(q) * i64::from(w) * qs;
+                    lo = lo.min(f);
+                    hi = hi.max(f);
+                }
+            }
+        }
+    }
+    Ok((lo, hi))
 }
 
 fn dequant_to_f32(blk: &[i32; 64], qmat: &[u8; 64], quantization_index: u8) -> [f32; 64] {
