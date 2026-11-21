@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `tests/blackbox_matrix.rs`: a live interoperability matrix against the
-  black-box tools, generated at run time and skipped when `ffmpeg` is
+  black-box tools, generated at run time and skipped when the tool is
   absent. Foreign streams from every ProRes encoder the tool exposes
   are decoded by this crate and compared with the software and platform
   black-box decoders; this crate's encoder sweeps its own options and

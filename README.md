@@ -273,7 +273,7 @@ the bisection of `with_rate_control` aimed at the same 220 Mb/s takes
 ## Validation
 
 **Live black-box matrix** (`tests/blackbox_matrix.rs`, generated at run
-time, skipped when `ffmpeg` is absent; last full run 1 889 cases, all
+time, skipped when the black-box tool is absent; last full run 1 889 cases, all
 passing):
 
 * **Foreign → ours, 1 039 / 1 039.** Streams from the four ProRes
