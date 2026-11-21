@@ -83,6 +83,19 @@ pub struct EncoderConfig {
     /// typically converges in 2-3 passes. Set `false` (the default)
     /// to preserve the original single-pass behaviour.
     pub rate_control: bool,
+    /// Hold every frame to the profile's target frame size
+    /// ([`Profile::target_frame_bytes`], the "Target Data Rates" table
+    /// of the ProRes white paper). A frame is coded at the configured
+    /// (or profile default) quantisation index; only when that comes
+    /// out above the target is the index raised until the frame fits.
+    /// Frames that are already smaller are left alone, so the stream is
+    /// variable-rate below a per-frame ceiling, as the format intends.
+    /// The targets are for pictures without alpha; losslessly coded
+    /// alpha is not counted against them.
+    /// Needs neither `bit_rate` nor `frame_rate`. Takes precedence over
+    /// [`Self::rate_control`]. Set with
+    /// [`Self::with_target_data_rate`].
+    pub target_data_rate: bool,
     /// Explicit profile override (RDD 36 §4 — Proxy / LT / Standard / HQ
     /// for 4:2:2; 4444 / 4444 XQ for 4:4:4).
     ///
@@ -353,6 +366,13 @@ impl EncoderConfig {
     /// encoder construction; silently degrades to single-pass otherwise.
     pub fn with_rate_control(mut self) -> Self {
         self.rate_control = true;
+        self
+    }
+
+    /// Hold every frame to the profile's target frame size; see
+    /// [`Self::target_data_rate`].
+    pub fn with_target_data_rate(mut self) -> Self {
+        self.target_data_rate = true;
         self
     }
 
@@ -929,7 +949,30 @@ impl Encoder for ProResEncoder {
                     0 => self.granted_threads,
                     n => n,
                 };
-                let data = if self.target_bytes > 0 {
+                let data = if self.config.target_data_rate {
+                    encode_frame_capped(
+                        self.profile.target_frame_bytes(self.width, self.height),
+                        self.quant_index,
+                        |qi| {
+                            encode_frame_full(
+                                v,
+                                self.width,
+                                self.height,
+                                self.chroma,
+                                self.bit_depth,
+                                self.profile,
+                                qi,
+                                alpha,
+                                self.interlace_mode,
+                                self.config.quant_matrices,
+                                self.config.explicit_qmat_carriage,
+                                self.meta,
+                                self.log2_slice_mb_width,
+                                threads,
+                            )
+                        },
+                    )?
+                } else if self.target_bytes > 0 {
                     encode_frame_with_rate_control(
                         v,
                         self.width,
@@ -1236,6 +1279,88 @@ pub fn pad_frame_to_size(frame_bytes: &[u8], min_frame_size: u32) -> Result<Vec<
     // present, stuffing" — rewrite the leading u32 to the padded total.
     out[0..4].copy_from_slice(&min_frame_size.to_be_bytes());
     Ok(out)
+}
+
+/// Largest accepted overshoot of a capped frame over its target.
+const CAP_TOLERANCE: f64 = 0.05;
+/// Trial encodes a capped frame may take beyond the first.
+const CAP_MAX_TRIALS: usize = 7;
+
+/// Code a frame at `seed_qi` and, when that exceeds `target_bytes`,
+/// at coarser quantisation indices until it fits: the result is the
+/// largest frame found that is no more than [`CAP_TOLERANCE`] above the
+/// target (or the frame at index 224 when even that is larger).
+///
+/// The coded size falls as the quantisation scale `qScale` grows,
+/// roughly as a power of it. Each trial therefore re-estimates that
+/// power from the two bracketing measurements (starting from an inverse
+/// proportion) and jumps to the scale the estimate puts on target,
+/// which lands inside the tolerance in two or three trials where a
+/// bisection of the 224 indices takes seven.
+fn encode_frame_capped(
+    target_bytes: usize,
+    seed_qi: u8,
+    mut encode: impl FnMut(u8) -> Result<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let seed = encode(seed_qi)?;
+    // The targets are for frames without alpha. Alpha is coded
+    // losslessly, so its size is the same at every quantisation index
+    // and simply rides on top of the target.
+    let target_bytes = target_bytes + crate::decoder::coded_alpha_bytes(&seed)?;
+    let ceiling = (target_bytes as f64 * (1.0 + CAP_TOLERANCE)) as usize;
+    let floor = (target_bytes as f64 * (1.0 - 2.0 * CAP_TOLERANCE)) as usize;
+    if seed.len() <= ceiling || seed_qi >= 224 {
+        return Ok(seed);
+    }
+    let scale = |qi: u8| f64::from(crate::quant::qscale(qi));
+    // `over`: the coarsest index known to be too large; `fit`: the
+    // finest index known to fit, with its frame.
+    let mut over = (seed_qi, seed.len());
+    let mut fit: Option<(u8, Vec<u8>)> = None;
+    let mut exponent = 1.0f64;
+    for _ in 0..CAP_MAX_TRIALS {
+        let hi = fit.as_ref().map_or(224, |f| f.0);
+        if over.0 + 1 >= hi && fit.is_some() {
+            break;
+        }
+        if let Some((fit_qi, fit_frame)) = &fit {
+            // Two measurements bracket the target: size ~ scale^-e.
+            let ratio = scale(*fit_qi) / scale(over.0);
+            let e = (over.1 as f64 / fit_frame.len() as f64).ln() / ratio.ln();
+            if e.is_finite() && e > 0.05 {
+                exponent = e;
+            }
+        }
+        let wanted = scale(over.0) * (over.1 as f64 / target_bytes as f64).powf(1.0 / exponent);
+        // Smallest index whose scale reaches `wanted`, strictly inside
+        // the open bracket.
+        let mut qi = over.0 + 1;
+        while qi < hi && scale(qi) < wanted {
+            qi += 1;
+        }
+        if fit.is_some() {
+            qi = qi.min(hi - 1);
+        }
+        let frame = encode(qi)?;
+        if frame.len() > ceiling {
+            over = (qi, frame.len());
+            if qi >= 224 {
+                return Ok(frame);
+            }
+        } else {
+            let close_enough = frame.len() >= floor;
+            fit = Some((qi, frame));
+            if close_enough {
+                break;
+            }
+        }
+    }
+    match fit {
+        Some((_, frame)) => Ok(frame),
+        // Trials exhausted without a fit: the coarsest quantiser is the
+        // smallest frame there is.
+        None => encode(224),
+    }
 }
 
 /// Two-pass per-frame rate control: binary-search `quantization_index` to

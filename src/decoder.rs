@@ -1162,6 +1162,35 @@ fn picture_slices(
     Ok((slices, &data[declared_picture_bytes..]))
 }
 
+/// Bytes of a frame taken by its scanned alpha data (§5.3.3), summed
+/// over every slice of every picture; 0 for a frame without alpha.
+pub(crate) fn coded_alpha_bytes(data: &[u8]) -> Result<usize> {
+    let (fh, mut cursor) = parse_frame(data)?;
+    if AlphaChannelType::from_code(fh.alpha_channel_type)?.is_none() {
+        return Ok(0);
+    }
+    let height = fh.height as usize;
+    let mbs_x = (fh.width as usize).div_ceil(MB_SIDE_PX);
+    let heights: &[usize] = match fh.interlace_mode {
+        0 => &[height],
+        1 => &[height.div_ceil(2), height / 2],
+        _ => &[height / 2, height.div_ceil(2)],
+    };
+    let mut total = 0usize;
+    for &picture_height in heights {
+        let (slices, rest) = picture_slices(cursor, mbs_x, picture_height)?;
+        cursor = rest;
+        for slice in &slices {
+            let (sh, after_sh) = parse_slice_header(slice.data, true)?;
+            let colour = sh.coded_size_of_y_data as usize
+                + sh.coded_size_of_cb_data as usize
+                + sh.coded_size_of_cr_data.map_or(0, usize::from);
+            total += after_sh.len().saturating_sub(colour);
+        }
+    }
+    Ok(total)
+}
+
 /// Range of the dequantised DCT coefficients `F[v][u]` of a frame, as
 /// `(min, max)` of `QF * W * qScale` — i.e. in eighths (RDD 36 §7.3).
 ///

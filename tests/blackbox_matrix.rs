@@ -1630,6 +1630,22 @@ fn ours_cases() -> Vec<Ours> {
         );
     }
 
+    // Frames held to the profile target frame size.
+    for p in PROFILES {
+        for il in [0, 2] {
+            v.push(
+                Ours::new(
+                    plain_format(p, 10),
+                    320,
+                    180,
+                    cfg(p).with_target_data_rate().with_interlace_mode(il),
+                )
+                .texture(Texture::Noise)
+                .note("target data rate"),
+            );
+        }
+    }
+
     // Picture sizes.
     let mut sizes = vec![
         (1, 1),

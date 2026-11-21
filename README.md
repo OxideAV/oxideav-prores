@@ -187,6 +187,9 @@ All through `EncoderConfig` + `make_encoder_with_config`:
   defaults `8/6/4/2/2/1`.
 * `with_mbs_per_slice` — `{1,2,4,8}` (§5.3), default 8.
 * `with_profile` / `for_profile` — override the bit-rate heuristic.
+* `with_target_data_rate` — hold every frame to the profile's target
+  frame size (see [Data rates](#data-rates)); frames already under it
+  are left alone.
 * `with_rate_control` — two-pass per-frame binary search to
   `bit_rate / fps` within ±5 %.
 * `with_alpha_channel_type` — explicit 8-/16-bit alpha; default
@@ -205,6 +208,36 @@ All through `EncoderConfig` + `make_encoder_with_config`:
 Inputs are validated up front (ranges above, matrix weights `2..=63`,
 dimensions `1..=65535` per the u16 header fields — out-of-range is
 refused, never truncated).
+
+## Data rates
+
+A profile is a quantiser setting first and a data rate second. By
+default the encoder codes every frame at the profile's quantisation
+index, so the rate follows the content and can run far above the
+profile's nominal figure on detailed pictures. The ProRes white paper
+defines the nominal figure as a target number of bits *per frame* for
+each profile and frame size (its "Target Data Rates" table);
+`Profile::target_frame_bytes(width, height)` returns it, and
+`EncoderConfig::with_target_data_rate()` makes it a ceiling: a frame
+that comes out above the target is re-coded at a coarser index until it
+fits (within +5 %), in two or three trial encodes. Losslessly coded
+alpha is not counted against the target, which is defined without it.
+
+Measured on 1920×1080 fractal + grain content, Mb/s at 29.97 fps:
+
+| Profile  | white-paper target | default (constant quantiser) | `with_target_data_rate` |
+|----------|-------------------:|-----------------------------:|------------------------:|
+| Proxy    | 45                 | 102.8                        | 46.5                    |
+| LT       | 102                | 188.7                        | 103.4                   |
+| Standard | 147                | 343.7                        | 144.1                   |
+| HQ       | 220                | 599.9                        | 216.0                   |
+| 4444     | 330                | 939.7                        | 330.7                   |
+| 4444 XQ  | 495                | 1 231.3                      | 509.8                   |
+
+The cap costs trial encodes: 422 HQ at 1920×1080 takes 88.7 ms per
+frame on one thread against 27.9 ms uncapped (25.8 ms on 4 threads);
+the bisection of `with_rate_control` aimed at the same 220 Mb/s takes
+132 ms.
 
 ## Conformance notes
 
@@ -234,7 +267,7 @@ refused, never truncated).
 ## Validation
 
 **Live black-box matrix** (`tests/blackbox_matrix.rs`, generated at run
-time, skipped when `ffmpeg` is absent; last full run 1 877 cases, all
+time, skipped when `ffmpeg` is absent; last full run 1 889 cases, all
 passing):
 
 * **Foreign → ours, 1 039 / 1 039.** Streams from the four ProRes
@@ -247,12 +280,12 @@ passing):
   content, a 40-frame stream. Each frame is decoded here and by the
   software and the platform black-box decoder. A further 48 option
   combinations were refused by the encoders themselves.
-* **Ours → foreign, 838 / 838.** This encoder across every profile ×
+* **Ours → foreign, 850 / 850.** This encoder across every profile ×
   8 / 10 / 12 / 16-bit input × field order, typed and untyped alpha on
   4:4:4 and 4:2:2, 17 quantisation indices from 1 to 224, slice sizes,
   every matrix preset and hand-made tables at weights 2 and 63, rate
-  control from 200 kb/s to 2 Gb/s, stuffing, 1×1 up to 8192×4320 and
-  every header code. The black-box decoders accept every stream
+  control from 200 kb/s to 2 Gb/s, the profile target-rate cap, stuffing,
+  1×1 up to 8192×4320 and every header code. The black-box decoders accept every stream
   without a diagnostic and reproduce this crate's own reconstruction.
 
 The tolerance is the one RDD 36 itself implies: §7.4 fixes no IDCT,
@@ -269,7 +302,7 @@ top 12 bits rather than through the §7.5.2 rounding; and it wraps where
 where each sample is held to the nearer decoder). The platform decoder
 is not used as a chroma reference for alpha-bearing pictures (it
 returns resampled chroma there) nor for the last column of odd-width
-4:2:2; on 6 further cases it alone departs on one or two samples at the
+4:2:2; on 7 further cases it alone departs on one or two samples at the
 right edge of a partial macroblock under a coarse quantiser.
 
 Not verified against an outside stream: ProRes produced by encoders

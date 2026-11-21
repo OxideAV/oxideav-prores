@@ -145,7 +145,85 @@ impl Profile {
             Profile::Prores4444Xq => 1,
         }
     }
+
+    /// The profile's target size of one coded frame of `width` x
+    /// `height`, in bytes.
+    ///
+    /// ProRes is a variable-bit-rate format in which an encoder aims at
+    /// a target number of bits per frame for a given frame size and
+    /// profile; the target data rate is that number times the frame
+    /// rate (Apple ProRes white paper, April 2022, "Variable bit rate
+    /// encoding"). The figures are those of the white paper's "Target
+    /// Data Rates" table, divided by the frame rate of the row they were
+    /// read from. A frame size the table does not list takes the bits
+    /// per pixel of the listed size nearest to it in pixel count.
+    pub fn target_frame_bytes(self, width: u32, height: u32) -> usize {
+        let column = match self {
+            Profile::Proxy => 0,
+            Profile::Lt => 1,
+            Profile::Standard => 2,
+            Profile::Hq => 3,
+            Profile::Prores4444 => 4,
+            Profile::Prores4444Xq => 5,
+        };
+        let pixels = u64::from(width) * u64::from(height);
+        let row = TARGET_DATA_RATES
+            .iter()
+            .min_by_key(|r| (u64::from(r.width) * u64::from(r.height)).abs_diff(pixels))
+            .expect("table is not empty");
+        // Mb/s at `frames per 1001 s` -> bits per frame, then scaled by
+        // pixel count when the size is not the listed one.
+        let bits_per_frame =
+            u64::from(row.megabits[column]) * 1_000_000 * 1001 / u64::from(row.frames_per_1001s);
+        let row_pixels = u64::from(row.width) * u64::from(row.height);
+        (bits_per_frame * pixels / row_pixels / 8) as usize
+    }
 }
+
+/// One row of the white paper's "Target Data Rates" table: Mb/s for
+/// Proxy, LT, 422, HQ, 4444 and 4444 XQ (the last two without alpha) at
+/// the row's frame rate.
+struct TargetDataRate {
+    width: u16,
+    height: u16,
+    /// Frame rate as frames per 1001 seconds (59.94 fps = 60 000).
+    frames_per_1001s: u32,
+    megabits: [u16; 6],
+}
+
+/// The highest frame rate the table lists for each frame size, which
+/// carries the most significant digits.
+const TARGET_DATA_RATES: [TargetDataRate; 14] = {
+    const fn row(
+        width: u16,
+        height: u16,
+        frames_per_1001s: u32,
+        megabits: [u16; 6],
+    ) -> TargetDataRate {
+        TargetDataRate {
+            width,
+            height,
+            frames_per_1001s,
+            megabits,
+        }
+    }
+    [
+        row(720, 486, 30_000, [12, 29, 42, 63, 94, 141]),
+        row(720, 576, 25_025, [12, 28, 41, 61, 92, 138]),
+        row(960, 720, 60_000, [38, 87, 126, 189, 283, 424]),
+        row(1280, 720, 60_000, [45, 101, 147, 220, 330, 495]),
+        row(1280, 1080, 30_000, [38, 87, 126, 189, 283, 424]),
+        row(1440, 1080, 30_000, [38, 87, 126, 189, 283, 424]),
+        row(1920, 1080, 60_000, [91, 204, 293, 440, 660, 990]),
+        row(2048, 1080, 60_000, [103, 232, 335, 503, 754, 1131]),
+        row(2048, 1556, 60_000, [140, 314, 452, 679, 1019, 1528]),
+        row(3840, 2160, 60_000, [363, 821, 1178, 1768, 2652, 3977]),
+        row(4096, 2160, 60_000, [388, 875, 1257, 1886, 2828, 4242]),
+        row(5120, 2700, 60_000, [608, 1367, 1964, 2946, 4419, 6629]),
+        row(6144, 3240, 60_000, [875, 1969, 2828, 4242, 6364, 9545]),
+        row(8192, 4320, 60_000, [1556, 3500, 5028, 7542, 11313, 16970]),
+    ]
+};
 
 /// Named values of the RDD 36 §6.1.1 / Table 2 `interlace_mode` field.
 ///

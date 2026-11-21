@@ -31,6 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/decoder_threads.rs`).
 - `Encoder::set_execution_context`: the granted thread budget is used
   when `EncoderConfig::threads` is left at 0.
+- `Profile::target_frame_bytes(width, height)`: the profile's target
+  frame size from the "Target Data Rates" table of the ProRes white
+  paper (bits per frame for each profile and frame size; other sizes
+  take the bits per pixel of the nearest listed one).
+- `EncoderConfig::with_target_data_rate()`: holds every frame to that
+  target. A frame above it is re-coded at a coarser quantisation index
+  until it fits within +5 %, the index being estimated from the
+  measured size curve (two or three trials); frames under the target
+  are untouched and lossless alpha is not counted. On 1920×1080 fractal
+  + grain content the default constant-quantiser output runs at
+  2.3–2.8× the white-paper targets (HQ 600 Mb/s against 220); with the
+  cap it lands at 46.5 / 103.4 / 144.1 / 216.0 / 330.7 / 509.8 Mb/s
+  against 45 / 102 / 147 / 220 / 330 / 495.
 - `BitReader::peek32` / `skip` / `at` / `remaining_bits`,
   `entropy::decode_component_blocks`, `dct::idct8x8_rows`,
   `alpha::decode_scanned_alpha_into` (all in hidden modules).
