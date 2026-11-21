@@ -106,9 +106,24 @@ pub fn decode_scanned_alpha(
     num_values: usize,
     act: AlphaChannelType,
 ) -> Result<Vec<u16>> {
+    let mut out = Vec::new();
+    decode_scanned_alpha_into(data, num_values, act, &mut out)?;
+    Ok(out)
+}
+
+/// [`decode_scanned_alpha`] into a caller-owned buffer, so one
+/// allocation serves every slice. `out` is replaced by the `num_values`
+/// decoded values; its contents are unspecified after an error.
+pub fn decode_scanned_alpha_into(
+    data: &[u8],
+    num_values: usize,
+    act: AlphaChannelType,
+    out: &mut Vec<u16>,
+) -> Result<()> {
     let mask = act.mask();
     let mut br = BitReader::new(data);
-    let mut out = vec![0u16; num_values];
+    out.clear();
+    out.resize(num_values, 0);
     let mut n: usize = 0;
     let mut previous_alpha: i32 = -1;
 
@@ -130,20 +145,16 @@ pub fn decode_scanned_alpha(
             ));
         }
         let alpha_u = (alpha as u32 & mask) as u16;
-        for _ in 0..run {
-            out[n] = alpha_u;
-            n += 1;
-        }
+        out[n..n + run].fill(alpha_u);
+        n += run;
     }
-    if data.len() * 8 - br.bit_pos() > 7 {
+    if br.remaining_bits() > 7 {
         return Err(Error::invalid("prores alpha: trailing payload"));
     }
-    while br.bit_pos() < data.len() * 8 {
-        if br.read_bit()? != 0 {
-            return Err(Error::invalid("prores alpha: nonzero alignment padding"));
-        }
+    if br.peek32() != 0 {
+        return Err(Error::invalid("prores alpha: nonzero alignment padding"));
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Encode raster-scanned alpha samples into a byte buffer (padded to the

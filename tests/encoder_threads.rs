@@ -153,3 +153,23 @@ fn small_slice_counts_and_all_threads() {
     assert_eq!(run(config.clone()), run(config.clone().with_threads(8)));
     assert_eq!(run(config.clone()), run(config.with_all_threads()));
 }
+
+#[test]
+fn granted_execution_context_is_thread_count_invariant() {
+    // The budget a pipeline grants through `set_execution_context` is
+    // used when the config names no thread count, and changes nothing
+    // in the output.
+    let p = params(PixelFormat::Yuv422P10Le);
+    let f = frame(W as usize / 2, false);
+    let config = EncoderConfig::for_profile(Profile::Hq).with_interlace_mode(2);
+    let serial = encode(&p, config.clone(), &f);
+    for threads in [1, 2, 6] {
+        let mut enc = make_encoder_with_config(&p, config.clone()).expect("encoder");
+        enc.set_execution_context(&oxideav_core::ExecutionContext::with_threads(threads));
+        enc.send_frame(&Frame::Video(f.clone())).expect("send");
+        assert!(
+            enc.receive_packet().expect("packet").data == serial,
+            "{threads} granted threads change the packet"
+        );
+    }
+}

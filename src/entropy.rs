@@ -54,6 +54,37 @@ pub fn read_combo(
     // start an exp-Golomb code. Its prefix length (from that point) is
     // q' = floor(log2(n + 2^k_exp)) - k_exp; for k_exp >= 0 and 32-bit n
     // this is at most ~32. Total leading zeros are bounded.
+    // Whole codeword inside the 32-bit window (every symbol a legal
+    // stream codes in practice): one leading-zero count, one shift.
+    let window = br.peek32();
+    let zeros = window.leading_zeros();
+    if zeros <= last_rice_q {
+        let len = zeros + 1 + k_rice;
+        if len <= 32 {
+            let tail = if k_rice == 0 {
+                0
+            } else {
+                (window << (zeros + 1)) >> (32 - k_rice)
+            };
+            br.skip(len)?;
+            return Ok((zeros << k_rice) + tail);
+        }
+    } else if zeros < 32 {
+        let q_exp = zeros - (last_rice_q + 1);
+        let suffix_bits = q_exp + k_exp;
+        if zeros + 1 + suffix_bits <= 32 {
+            let suffix = if suffix_bits == 0 {
+                0
+            } else {
+                (window << (zeros + 1)) >> (32 - suffix_bits)
+            };
+            br.skip(zeros + 1 + suffix_bits)?;
+            let exp_val = ((1u64 << q_exp) << k_exp) - (1u64 << k_exp) + suffix as u64;
+            return (((last_rice_q as u64 + 1) << k_rice) + exp_val)
+                .try_into()
+                .map_err(|_| Error::invalid("prores entropy: combo exp value out of range"));
+        }
+    }
     const MAX_PREFIX: u32 = 64;
     let mut q = 0u32;
     while br.read_bit()? == 0 {
@@ -144,6 +175,22 @@ pub fn write_combo(bw: &mut BitWriter, n: u32, last_rice_q: u32, k_rice: u32, k_
 /// uses for `EXP_GOLOMB_CODE(k)`. The simplest direct encoding/decoding
 /// is convenient where the spec invokes `EXP_GOLOMB_CODE(k)` directly.
 pub fn read_exp_golomb(br: &mut BitReader<'_>, k: u32) -> Result<u32> {
+    // Whole codeword inside the 32-bit window: one leading-zero count.
+    let window = br.peek32();
+    let zeros = window.leading_zeros();
+    if zeros < 32 && 2 * zeros + 1 + k <= 32 {
+        let bits = zeros + k;
+        let suffix = if bits == 0 {
+            0
+        } else {
+            (window << (zeros + 1)) >> (32 - bits)
+        };
+        br.skip(zeros + 1 + bits)?;
+        let val = ((1u64 << zeros) << k) - (1u64 << k) + suffix as u64;
+        return val
+            .try_into()
+            .map_err(|_| Error::invalid("prores entropy: exp-golomb value out of range"));
+    }
     const MAX_PREFIX: u32 = 32;
     let mut q = 0u32;
     while br.read_bit()? == 0 {
@@ -280,6 +327,39 @@ impl Vlc {
                 k_exp,
             },
         }
+    }
+
+    /// Decode the codeword at the top of `window` (the next 32 bits of
+    /// the stream, first bit most significant) as `(symbol, length)`.
+    /// A length of 0 means the codeword does not lie wholly inside the
+    /// window and has to be read bit by bit.
+    #[inline(always)]
+    fn decode(self, window: u32) -> (u32, u32) {
+        // Both forms are a run of zeros, a one and a binary suffix; they
+        // differ in the suffix length and in what the zeros are worth.
+        // Which form applies depends on the data, so it is resolved
+        // with selects rather than a branch the processor would have
+        // to guess.
+        let zeros = window.leading_zeros();
+        let rice = zeros < self.exp_zeros;
+        let exp_suffix_bits = zeros.wrapping_sub(self.exp_zeros).wrapping_add(self.k_exp);
+        let suffix_bits = if rice { self.k_rice } else { exp_suffix_bits };
+        let len = zeros + 1 + suffix_bits;
+        if len > 32 {
+            return (0, 0);
+        }
+        // `len <= 32` bounds `zeros` and `suffix_bits` by 31.
+        let suffix = ((window << zeros << 1) >> 1) >> (31 - suffix_bits);
+        let base = if rice {
+            // Rice: `zeros` is the quotient.
+            zeros << self.k_rice
+        } else {
+            // Exp-Golomb after `exp_zeros` extra zeros: the suffix is
+            // `q + k_exp` bits wide, `q` the code level, and the symbol
+            // is `2^(q + k_exp) - 2^k_exp + suffix` past the Rice range.
+            self.rice_limit + (1 << suffix_bits) - (1 << self.k_exp)
+        };
+        (base + suffix, len)
     }
 
     /// The codeword for symbol `n` as `(value, length)`: the codeword is
@@ -488,6 +568,263 @@ pub fn decode_scanned_coefficients(data: &[u8], num_blocks: usize) -> Result<Vec
     // Remaining positions (if any) are zero — already initialised that way.
 
     Ok(coeffs)
+}
+
+/// Where the blocks of one colour component sit among the blocks of a
+/// slice, which are stored macroblock by macroblock.
+#[derive(Copy, Clone, Debug)]
+pub struct ComponentLayout {
+    /// Macroblocks in the slice.
+    pub mbs: usize,
+    /// Blocks of this component per macroblock (`nB` of §7.2.1).
+    pub blocks_per_mb: usize,
+    /// Blocks of all components per macroblock.
+    pub stride: usize,
+    /// First block of this component inside a macroblock.
+    pub offset: usize,
+}
+
+/// Bit of a block's coefficient mask set when the block has a nonzero
+/// AC coefficient. Bits `0..8` flag the coefficient rows `v` that hold
+/// a nonzero value.
+pub const AC_PRESENT: u16 = 1 << 8;
+
+/// The read side of the coefficient decoder: the next bits of a
+/// component's data held left-aligned in a 64-bit register that is
+/// topped up four bytes at a time, so a codeword costs a leading-zero
+/// count and a shift rather than a memory access per element. Bits past
+/// the end of the data read as zero; consuming them is the same error
+/// a [`BitReader`] reports.
+struct Window<'a> {
+    data: &'a [u8],
+    /// Next byte of `data` to load into `acc`.
+    next: usize,
+    /// Unread bits, first one in the most significant position.
+    acc: u64,
+    /// Bits of `acc` that came from `data`.
+    bits: u32,
+    /// Bits of `data` not consumed yet.
+    left: usize,
+}
+
+impl<'a> Window<'a> {
+    fn at(data: &'a [u8], bit_pos: usize) -> Self {
+        let mut w = Self {
+            data,
+            next: bit_pos / 8,
+            acc: 0,
+            bits: 0,
+            left: (data.len() * 8).saturating_sub(bit_pos),
+        };
+        // Start on the byte holding `bit_pos` and drop its leading bits.
+        if let Some(&byte) = data.get(w.next) {
+            let partial = (bit_pos % 8) as u32;
+            w.acc = u64::from(byte) << (56 + partial);
+            w.bits = 8 - partial;
+            w.next += 1;
+        }
+        w
+    }
+
+    #[inline(always)]
+    fn refill(&mut self) {
+        if let Some(chunk) = self.data.get(self.next..self.next + 8) {
+            // Top the register up to 56..=63 bits without a branch on
+            // how full it is: OR the next eight bytes in below the
+            // valid bits and count only the whole bytes that fitted.
+            // The bits of the partly fitting byte land where the next
+            // refill puts the same byte again.
+            let word = u64::from_be_bytes(chunk.try_into().expect("eight bytes"));
+            self.acc |= word >> self.bits;
+            self.next += ((63 - self.bits) >> 3) as usize;
+            self.bits |= 56;
+        } else {
+            while self.bits <= 56
+                && let Some(&byte) = self.data.get(self.next)
+            {
+                self.acc |= u64::from(byte) << (56 - self.bits);
+                self.next += 1;
+                self.bits += 8;
+            }
+        }
+    }
+
+    /// The next 32 bits, zero-filled past the end of the data.
+    #[inline(always)]
+    fn peek(&mut self) -> u32 {
+        self.refill();
+        (self.acc >> 32) as u32
+    }
+
+    /// Consume `n <= 32` bits.
+    #[inline(always)]
+    fn consume(&mut self, n: u32) -> Result<()> {
+        if n as usize > self.left {
+            return Err(Error::invalid("prores bitstream: EOF"));
+        }
+        self.left -= n as usize;
+        self.acc <<= n;
+        self.bits = self.bits.saturating_sub(n);
+        Ok(())
+    }
+
+    /// Read one symbol of `codebook` bit by bit — the path for the
+    /// codewords too long to sit inside the window.
+    #[cold]
+    fn read_slowly(&mut self, codebook: Codebook) -> Result<u32> {
+        let mut br = BitReader::at(self.data, self.data.len() * 8 - self.left);
+        let symbol = codebook.read(&mut br)?;
+        *self = Self::at(self.data, br.bit_pos());
+        Ok(symbol)
+    }
+
+    /// The spec's `endOfData()`: 31 or fewer bits left, all zero.
+    #[inline(always)]
+    fn end_of_data(&mut self) -> bool {
+        self.left <= 31 && self.peek() == 0
+    }
+}
+
+/// Where decoded coefficients of one component go: dequantised, in
+/// natural order, into the blocks of the slice.
+struct BlockSink<'a> {
+    blocks: &'a mut [[f32; 64]],
+    masks: &'a mut [u16],
+    inv_scan: &'a [u8; 64],
+    weights: &'a [f32; 64],
+    qscale: f32,
+    /// log2 of the component's block count in the slice.
+    block_shift: u32,
+    /// log2 of the component's blocks per macroblock.
+    mb_shift: u32,
+    stride: usize,
+    offset: usize,
+}
+
+impl BlockSink<'_> {
+    /// Store quantised coefficient `quantized`, element `n` of the
+    /// scanned array (§7.2.1: index = blocks * frequency + block).
+    #[inline(always)]
+    fn put(&mut self, n: usize, quantized: i32, ac: u16) {
+        let pos = self.inv_scan[(n >> self.block_shift) & 63] as usize;
+        // F = (QF * W * qScale) / 8 (§7.3), in that order.
+        let value = (quantized as f32 * self.weights[pos] * self.qscale) / 8.0;
+        if value != 0.0 {
+            let b = n & ((1 << self.block_shift) - 1);
+            let b =
+                (b >> self.mb_shift) * self.stride + self.offset + (b & ((1 << self.mb_shift) - 1));
+            self.blocks[b][pos] = value;
+            self.masks[b] |= ac | 1 << (pos >> 3);
+        }
+    }
+}
+
+/// Decode the scanned coefficients of one colour component of a slice
+/// (§5.3.2, §7.1.1) straight into dequantised blocks: every coefficient
+/// is inverse-scanned (§7.2) and scaled (§7.3,
+/// `F = QF * W * qScale / 8`) as it comes off the bitstream, so the
+/// zero coefficients — nearly all of them — cost nothing.
+///
+/// `blocks` and `masks` cover the whole slice and must be zeroed;
+/// `inv_scan[n]` is the natural position of scanned index `n` and
+/// `weights` the quantisation matrix in natural order. The bitstream
+/// handling is that of [`decode_scanned_coefficients`], and so are the
+/// errors.
+pub fn decode_component_blocks(
+    data: &[u8],
+    layout: &ComponentLayout,
+    inv_scan: &[u8; 64],
+    weights: &[f32; 64],
+    qscale: f32,
+    blocks: &mut [[f32; 64]],
+    masks: &mut [u16],
+) -> Result<()> {
+    let num_blocks = layout.mbs * layout.blocks_per_mb;
+    if num_blocks == 0 {
+        return Ok(());
+    }
+    // Slice sizes and blocks-per-macroblock are powers of two (§6.2,
+    // §7.2.1), which turns the slice scan into shifts and masks.
+    if !num_blocks.is_power_of_two() || !layout.blocks_per_mb.is_power_of_two() {
+        return Err(Error::invalid(
+            "prores entropy: block count is not a power of two",
+        ));
+    }
+    let needed = (layout.mbs - 1) * layout.stride + layout.offset + layout.blocks_per_mb;
+    if blocks.len() < needed || masks.len() < needed {
+        return Err(Error::invalid("prores entropy: block storage too small"));
+    }
+    let total = num_blocks * 64;
+    let mut sink = BlockSink {
+        blocks,
+        masks,
+        inv_scan,
+        weights,
+        qscale,
+        block_shift: num_blocks.trailing_zeros(),
+        mb_shift: layout.blocks_per_mb.trailing_zeros(),
+        stride: layout.stride,
+        offset: layout.offset,
+    };
+
+    let mut win = Window::at(data, 0);
+    let first_dc = inv_signed_mapping(win.read_slowly(Codebook::ExpGolomb(5))?);
+    sink.put(0, first_dc, 0);
+    let mut previous_dc_coeff = first_dc;
+    let mut previous_dc_diff: i32 = 3;
+    for n in 1..num_blocks {
+        let prev_abs = previous_dc_diff.unsigned_abs();
+        let (symbol, len) = DC_DIFF_VLC[prev_abs.min(3) as usize].decode(win.peek());
+        let symbol = if len != 0 {
+            win.consume(len)?;
+            symbol
+        } else {
+            win.read_slowly(dc_diff_codebook(prev_abs))?
+        };
+        let mut diff = inv_signed_mapping(symbol);
+        if previous_dc_diff < 0 {
+            diff = diff.wrapping_neg();
+        }
+        let dc = previous_dc_coeff.wrapping_add(diff);
+        sink.put(n, dc, 0);
+        previous_dc_coeff = dc;
+        previous_dc_diff = diff;
+    }
+
+    let mut n = num_blocks;
+    let mut previous_run: u32 = 4;
+    let mut previous_level_symbol: u32 = 1;
+    while n < total && !win.end_of_data() {
+        let (run, len) = RUN_VLC[previous_run.min(15) as usize].decode(win.peek());
+        let run = if len != 0 {
+            win.consume(len)?;
+            run
+        } else {
+            win.read_slowly(run_codebook(previous_run))?
+        };
+        previous_run = run;
+        let advance = run as usize;
+        if n + advance >= total {
+            return Err(Error::invalid("prores entropy: AC run overruns array"));
+        }
+        n += advance;
+        let window = win.peek();
+        let (level, len) = LEVEL_VLC[previous_level_symbol.min(8) as usize].decode(window);
+        let (abs_minus_1, sign) = if len != 0 && len < 32 {
+            win.consume(len + 1)?;
+            (level, (window << len) >> 31)
+        } else {
+            let level = win.read_slowly(level_codebook(previous_level_symbol))?;
+            let sign = win.peek() >> 31;
+            win.consume(1)?;
+            (level, sign)
+        };
+        previous_level_symbol = abs_minus_1;
+        let abs_level = (abs_minus_1 as i32).wrapping_add(1);
+        sink.put(n, abs_level.wrapping_mul(1 - 2 * sign as i32), AC_PRESENT);
+        n += 1;
+    }
+    Ok(())
 }
 
 /// Encode `num_blocks * 64` slice-scanned coefficients into a byte
@@ -821,5 +1158,104 @@ mod tests {
         let buf = encode_scanned_coefficients(&coeffs, num_blocks).unwrap();
         let decoded = decode_scanned_coefficients(&buf, num_blocks).unwrap();
         assert_eq!(decoded, coeffs);
+    }
+
+    /// The direct-to-block decoder must agree with the scanned-array
+    /// decoder followed by the inverse scan and the §7.3 scaling, for
+    /// every slice size and component layout, on coefficient sets that
+    /// include levels and runs long enough to leave the fast window —
+    /// and must fail wherever the scanned-array decoder fails.
+    #[test]
+    fn component_blocks_match_the_scanned_array_decoder() {
+        use crate::quant::{INTERLACED_INV_SCAN, PROGRESSIVE_INV_SCAN};
+        let mut seed = 0xC0FF_EE11u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed >> 8
+        };
+        let weights: [f32; 64] = std::array::from_fn(|i| 2.0 + (i % 62) as f32);
+        for mbs in [1usize, 2, 4, 8] {
+            for (blocks_per_mb, stride, offset) in [(4, 8, 0), (2, 8, 4), (2, 8, 6), (4, 12, 8)] {
+                for (round, inv_scan) in [&PROGRESSIVE_INV_SCAN, &INTERLACED_INV_SCAN]
+                    .into_iter()
+                    .cycle()
+                    .take(12)
+                    .enumerate()
+                {
+                    let num_blocks = mbs * blocks_per_mb;
+                    let mut coeffs = vec![0i32; num_blocks * 64];
+                    let density = [2, 9, 40][round % 3];
+                    for c in coeffs.iter_mut() {
+                        if next() % 64 < density {
+                            let big = next() % 50 == 0;
+                            let magnitude = if big { next() % 60_000 } else { next() % 9 } as i32;
+                            *c = if next() % 2 == 0 {
+                                magnitude
+                            } else {
+                                -magnitude
+                            };
+                        }
+                    }
+                    let mut data = encode_scanned_coefficients(&coeffs, num_blocks).unwrap();
+                    // Half the rounds carry the trailing zero bytes of §5.3.2.
+                    if round % 2 == 1 {
+                        data.extend_from_slice(&[0, 0, 0]);
+                    }
+                    let layout = ComponentLayout {
+                        mbs,
+                        blocks_per_mb,
+                        stride,
+                        offset,
+                    };
+                    let qscale = 1.0 + (round * 37 % 512) as f32;
+                    for cut in [data.len(), data.len() / 2, data.len().saturating_sub(1), 1] {
+                        let data = &data[..cut];
+                        let reference = decode_scanned_coefficients(data, num_blocks);
+                        let mut blocks = vec![[0.0f32; 64]; mbs * stride];
+                        let mut masks = vec![0u16; mbs * stride];
+                        let direct = decode_component_blocks(
+                            data,
+                            &layout,
+                            inv_scan,
+                            &weights,
+                            qscale,
+                            &mut blocks,
+                            &mut masks,
+                        );
+                        let Ok(scanned) = reference else {
+                            assert!(direct.is_err(), "mbs {mbs} cut {cut}: error not reported");
+                            continue;
+                        };
+                        direct.expect("scanned-array decoder accepted the data");
+                        let mut expect = vec![[0.0f32; 64]; mbs * stride];
+                        let mut expect_masks = vec![0u16; mbs * stride];
+                        for (n, &q) in scanned.iter().enumerate() {
+                            let b = n % num_blocks;
+                            let slot = b / blocks_per_mb * stride + offset + b % blocks_per_mb;
+                            let pos = inv_scan[n / num_blocks] as usize;
+                            let value = (q as f32 * weights[pos] * qscale) / 8.0;
+                            expect[slot][pos] = value;
+                            if value != 0.0 {
+                                expect_masks[slot] |= 1 << (pos / 8);
+                                if n >= num_blocks {
+                                    expect_masks[slot] |= AC_PRESENT;
+                                }
+                            }
+                        }
+                        assert!(
+                            blocks
+                                .iter()
+                                .flatten()
+                                .zip(expect.iter().flatten())
+                                .all(
+                                    |(a, b)| a.to_bits() == b.to_bits() || (*a == 0.0 && *b == 0.0)
+                                ),
+                            "mbs {mbs} layout {blocks_per_mb}/{stride}/{offset} round {round}"
+                        );
+                        assert_eq!(masks, expect_masks);
+                    }
+                }
+            }
+        }
     }
 }

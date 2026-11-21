@@ -23,6 +23,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `decoder::dequantized_coefficient_range` (hidden): the range of a
   frame's dequantised coefficients, to tell whether it stays inside the
   Annex A qualification domain.
+- Multi-threaded decoding: `decoder::decode_packet_with_threads`,
+  `ProResDecoder::set_threads`, and `Decoder::set_execution_context`
+  on the registry path decode the macroblock rows of each picture on up
+  to the granted number of threads. The default stays the calling
+  thread; the frame is identical for every thread count
+  (`tests/decoder_threads.rs`).
+- `Encoder::set_execution_context`: the granted thread budget is used
+  when `EncoderConfig::threads` is left at 0.
+- `BitReader::peek32` / `skip` / `at` / `remaining_bits`,
+  `entropy::decode_component_blocks`, `dct::idct8x8_rows`,
+  `alpha::decode_scanned_alpha_into` (all in hidden modules).
+
+### Changed
+
+- Decoder speed, output unchanged bit for bit: 2.0–2.8× on one thread
+  (422 HQ 1920×1080 71.5 → 35.7 ms per frame, Proxy 16.8 → 5.9 ms,
+  HQ 3840×2160 311 → 144 ms, 4444 + alpha 203 → 99 ms; medians on a
+  shared machine) and near-linear with granted threads (HQ 1920×1080
+  3.9 ms on 8). Coefficients are decoded from a 64-bit bit register
+  with table-driven codebooks straight into dequantised blocks, the
+  inverse transform visits only coefficient rows that hold a nonzero
+  value, alpha conversion divides by constants, and slices write into
+  the output planes directly instead of a padded copy that was then
+  cropped.
+- `BitReader` reads through a 32-bit window instead of bit by bit;
+  `read_combo` / `read_exp_golomb` resolve a codeword that fits the
+  window with one leading-zero count.
 
 ### Fixed
 

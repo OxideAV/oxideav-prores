@@ -14,8 +14,8 @@ use std::collections::VecDeque;
 
 use oxideav_core::Encoder;
 use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, MediaType, Packet, PixelFormat, Result, TimeBase,
-    VideoFrame,
+    CodecId, CodecParameters, Error, ExecutionContext, Frame, MediaType, Packet, PixelFormat,
+    Result, TimeBase, VideoFrame,
 };
 
 use crate::alpha::{AlphaChannelType, encode_scanned_alpha_into};
@@ -226,8 +226,11 @@ pub struct EncoderConfig {
     /// slices coded in parallel and joined in order; the output is
     /// byte-identical for every thread count.
     ///
-    /// `0` (the default) and `1` code on the calling thread, as before.
-    /// `n > 1` uses up to `n` scoped threads per picture. Use
+    /// `0` (the default) codes on the calling thread unless the caller
+    /// grants a budget through `Encoder::set_execution_context`, which
+    /// is then used; `1` always codes on the calling thread. `n > 1`
+    /// uses up to `n` scoped threads per picture whatever the granted
+    /// budget. Use
     /// [`Self::with_threads`] to set it, or [`Self::with_all_threads`]
     /// for one per available CPU. A caller that already encodes several
     /// frames in parallel should leave this at the default.
@@ -798,6 +801,7 @@ pub fn make_encoder_with_config(
             .frame_rate
             .map_or(TimeBase::new(1, 90_000), |r| TimeBase::new(r.den, r.num)),
         target_bytes,
+        granted_threads: 1,
         pending: VecDeque::new(),
         eof: false,
     }))
@@ -836,6 +840,8 @@ struct ProResEncoder {
     time_base: TimeBase,
     /// Target bytes per frame for rate control, or 0 when disabled.
     target_bytes: usize,
+    /// Thread budget from `set_execution_context`; 1 until granted.
+    granted_threads: usize,
     pending: VecDeque<Packet>,
     eof: bool,
 }
@@ -917,7 +923,12 @@ impl Encoder for ProResEncoder {
                         None => None,
                     }
                 };
-                let threads = self.config.threads.max(1);
+                // An explicit EncoderConfig::threads wins; otherwise the
+                // budget granted through set_execution_context applies.
+                let threads = match self.config.threads {
+                    0 => self.granted_threads,
+                    n => n,
+                };
                 let data = if self.target_bytes > 0 {
                     encode_frame_with_rate_control(
                         v,
@@ -979,6 +990,10 @@ impl Encoder for ProResEncoder {
     fn flush(&mut self) -> Result<()> {
         self.eof = true;
         Ok(())
+    }
+
+    fn set_execution_context(&mut self, ctx: &ExecutionContext) {
+        self.granted_threads = ctx.threads.max(1);
     }
 }
 

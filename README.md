@@ -80,7 +80,8 @@ The direct factories `decoder::make_decoder(&params)` /
 above; `encoder::make_encoder_with_config(&params, cfg)` adds the
 [`EncoderConfig`](#encoder-controls) knobs, and the free functions
 (`decoder::decode_packet_with_depth` / `decode_packet_with_format` /
-`decode_packet_with_options`, `encoder::encode_frame_with_alpha` /
+`decode_packet_with_options` / `decode_packet_with_threads`,
+`encoder::encode_frame_with_alpha` /
 `encode_frame_interlaced`) work packet-by-packet with no state beyond
 the call. `decode_packet_with_chroma_border` / `decode_packet_with_coded_width`
 are opt-in variants for conversion pipelines that keep the reconstructed
@@ -197,7 +198,9 @@ All through `EncoderConfig` + `make_encoder_with_config`:
   frames decode bit-identically).
 * `with_interlace_mode` — 0 progressive / 1 TFF / 2 BFF.
 * `with_threads` / `with_all_threads` — code each picture's slices on
-  several threads; output is byte-identical for any thread count.
+  several threads; output is byte-identical for any thread count. With
+  neither, the budget granted through `Encoder::set_execution_context`
+  is used (serial when none is).
 
 Inputs are validated up front (ranges above, matrix weights `2..=63`,
 dimensions `1..=65535` per the u16 header fields — out-of-range is
@@ -289,6 +292,36 @@ measures **above** the reference encoder on every profile:
 | HQ       | 23 801 B, 59.5 dB| 22 589 B, 67.1 dB | +7.6   |
 | 4444     | 35 893 B, 59.0 dB| 34 556 B, 64.7 dB | +5.7   |
 | 4444 XQ  | 51 640 B, 63.4 dB| 48 572 B, 69.6 dB | +6.2   |
+
+## Performance
+
+Both directions run on the calling thread by default and use more only
+when granted (`ExecutionContext` through the framework,
+`decode_packet_with_threads` / `ProResDecoder::set_threads`,
+`EncoderConfig::with_threads`); slices are independent, so the output
+is identical for every thread count.
+
+Decode, ms per frame to 10-bit (12-bit for 4444) planes, fractal +
+grain content coded by a black-box encoder at its profile target rate
+(Apple M-series; medians of 5–12 frames × 3 on a machine shared with
+other builds, so read the ratios rather than the absolute figures):
+
+| Stream                  | 0.1.3, 1 thread | now, 1 thread | 4 threads | 8 threads |
+|-------------------------|----------------:|--------------:|----------:|----------:|
+| 422 Proxy 1920×1080     | 16.8            | 5.9           | 1.7       | 1.6       |
+| 422 HQ 1920×1080        | 71.5            | 35.7          | 5.9       | 3.9       |
+| 422 HQ 3840×2160        | 311             | 144           | 25.2      | 13.6      |
+| 4444 + alpha 1920×1080  | 203             | 99            | 25.1      | 12.0      |
+
+The decoded samples are bit-for-bit those of 0.1.3: 89 232 decodes of
+every stream of the black-box matrix at six output formats, both clamp
+ranges and 1 / 3 threads, and 122 218 decodes of randomly corrupted
+packets (same accept / refuse decision, same samples), all compare
+equal. What changed is how the work is done — coefficients go from the
+bitstream straight into dequantised blocks through a 64-bit bit
+register and table-driven codebooks, the inverse transform skips
+all-zero coefficient rows, and slices write into the output planes
+directly instead of into a padded copy.
 
 Five panic-free `cargo-fuzz` targets drive the decode entry points,
 header parsers, and entropy coders (30-minute daily CI run), with the

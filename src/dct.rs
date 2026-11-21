@@ -201,6 +201,48 @@ pub fn idct8x8(block: &mut [f32; 64]) {
     }
 }
 
+/// [`idct8x8`] for a block whose nonzero coefficients all lie in the
+/// coefficient rows flagged in `rows` (bit `v` for row `v`).
+///
+/// The result is bit-for-bit that of [`idct8x8`]: each output is the
+/// same sum of the same products accumulated in the same order, with
+/// only the terms of all-zero coefficient rows left out — and adding a
+/// zero product never changes an accumulator that started at `+0.0`.
+/// What changes is the cost: both passes visit only the flagged rows,
+/// and each updates eight accumulators side by side rather than one sum
+/// at a time, which compiles to vector arithmetic.
+pub fn idct8x8_rows(block: &mut [f32; 64], rows: u8) {
+    let t = cos_table();
+    let mut tmp = [[0.0f32; 8]; 8];
+    for y in 0..8 {
+        if rows >> y & 1 == 0 {
+            continue;
+        }
+        let mut acc = [0.0f32; 8];
+        for k in 0..8 {
+            let c = block[y * 8 + k];
+            for n in 0..8 {
+                acc[n] += t[k][n] * c;
+            }
+        }
+        tmp[y] = acc;
+    }
+    let mut out = [[0.0f32; 8]; 8];
+    for k in 0..8 {
+        if rows >> k & 1 == 0 {
+            continue;
+        }
+        let src = tmp[k];
+        for m in 0..8 {
+            let w = t[k][m];
+            for x in 0..8 {
+                out[m][x] += w * src[x];
+            }
+        }
+    }
+    *block = out.as_flattened().try_into().expect("64 samples");
+}
+
 /// Specialised forward DCT for the **constant-block** case: every entry of
 /// `block[..]` is exactly the same scalar `v` (already level-shifted by the
 /// caller per RDD 36 §7.5.1). Equivalent to (but faster than) calling
@@ -473,6 +515,39 @@ mod tests {
                 assert!(
                     (s - v).abs() < 1e-3,
                     "round-trip lost the constant: v={v}, got {s}"
+                );
+            }
+        }
+    }
+
+    /// `idct8x8_rows` must reproduce `idct8x8` bit for bit: for every
+    /// row mask, on blocks whose nonzero coefficients lie in the masked
+    /// rows only.
+    #[test]
+    fn row_masked_idct_is_bit_identical_to_the_general_one() {
+        let mut seed = 0x1234_5678u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed >> 8
+        };
+        for mask in 0..=255u8 {
+            for density in [1, 3, 8] {
+                let mut block = [0.0f32; 64];
+                for (i, c) in block.iter_mut().enumerate() {
+                    if mask >> (i / 8) & 1 == 1 && next() % 8 < density {
+                        *c = (next() % 32_768) as f32 / 8.0 - 2048.0;
+                    }
+                }
+                let mut general = block;
+                idct8x8(&mut general);
+                let mut masked = block;
+                idct8x8_rows(&mut masked, mask);
+                assert!(
+                    general
+                        .iter()
+                        .zip(&masked)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "mask {mask:#010b} density {density}"
                 );
             }
         }

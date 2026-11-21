@@ -18,55 +18,77 @@ impl<'a> BitReader<'a> {
         Self { buf, bit_pos: 0 }
     }
 
-    /// Read a single bit (0 or 1).
-    pub fn read_bit(&mut self) -> Result<u32> {
-        let byte_idx = self.bit_pos / 8;
-        if byte_idx >= self.buf.len() {
+    /// A reader positioned `bit_pos` bits into `buf`.
+    pub fn at(buf: &'a [u8], bit_pos: usize) -> Self {
+        Self { buf, bit_pos }
+    }
+
+    /// The next 32 bits of the stream, first bit in the most significant
+    /// position, without consuming them. Bits past the end of the buffer
+    /// read as zero.
+    #[inline]
+    pub fn peek32(&self) -> u32 {
+        let byte = self.bit_pos >> 3;
+        let shift = (self.bit_pos & 7) as u32;
+        let word = match self.buf.get(byte..byte + 8) {
+            Some(b) => u64::from_be_bytes(b.try_into().expect("eight bytes")),
+            None => {
+                let mut tail = [0u8; 8];
+                if let Some(rest) = self.buf.get(byte..) {
+                    tail[..rest.len()].copy_from_slice(rest);
+                }
+                u64::from_be_bytes(tail)
+            }
+        };
+        ((word << shift) >> 32) as u32
+    }
+
+    /// Consume `n` bits. Fails, like a read would, when that passes the
+    /// end of the buffer.
+    #[inline]
+    pub fn skip(&mut self, n: u32) -> Result<()> {
+        let pos = self.bit_pos + n as usize;
+        if pos > self.buf.len() * 8 {
             return Err(Error::invalid("prores bitstream: EOF"));
         }
-        let bit_idx = 7 - (self.bit_pos % 8);
-        self.bit_pos += 1;
-        Ok(((self.buf[byte_idx] >> bit_idx) & 1) as u32)
+        self.bit_pos = pos;
+        Ok(())
+    }
+
+    /// Bits left between the read position and the end of the buffer.
+    #[inline]
+    pub fn remaining_bits(&self) -> usize {
+        (self.buf.len() * 8).saturating_sub(self.bit_pos)
+    }
+
+    /// Read a single bit (0 or 1).
+    #[inline]
+    pub fn read_bit(&mut self) -> Result<u32> {
+        let bit = self.peek32() >> 31;
+        self.skip(1)?;
+        Ok(bit)
     }
 
     /// Read the next `n` bits (MSB first). `n` must be in `1..=32`.
+    #[inline]
     pub fn read_bits(&mut self, n: u32) -> Result<u32> {
         debug_assert!((1..=32).contains(&n));
-        let mut v = 0u32;
-        for _ in 0..n {
-            v = (v << 1) | self.read_bit()?;
-        }
+        let v = self.peek32() >> (32 - n);
+        self.skip(n)?;
         Ok(v)
     }
 
-    /// Approximation of the spec's `endOfData(dataSize)` predicate
-    /// (RDD 36 §5.2): true if the number of remaining bits is 31 or
-    /// fewer and any remaining bits are zero. This is used to terminate
-    /// the AC-coefficient run-level loop.
+    /// The spec's `endOfData(dataSize)` predicate (RDD 36 §5): true if
+    /// the number of remaining bits is 31 or fewer and any remaining
+    /// bits are zero. This terminates the AC-coefficient run-level loop.
     ///
-    /// A correct implementation requires knowing the slice payload's
-    /// exact byte length (the buffer we were constructed from is sized
-    /// to that — `data` should be the per-component slice data only).
+    /// The buffer this reader was constructed from must be exactly the
+    /// syntax structure (`data` is the per-component slice data only).
+    #[inline]
     pub fn end_of_data(&self) -> bool {
-        let total_bits = self.buf.len() * 8;
-        if self.bit_pos >= total_bits {
-            return true;
-        }
-        let remaining = total_bits - self.bit_pos;
-        if remaining > 31 {
-            return false;
-        }
-        // Any remaining bit non-zero → not at EOD yet.
-        let mut pos = self.bit_pos;
-        while pos < total_bits {
-            let byte_idx = pos / 8;
-            let bit_idx = 7 - (pos % 8);
-            if ((self.buf[byte_idx] >> bit_idx) & 1) != 0 {
-                return false;
-            }
-            pos += 1;
-        }
-        true
+        // `peek32` zero-fills past the end, so with 31 or fewer bits
+        // left the whole window is zero exactly when the rest is.
+        self.remaining_bits() <= 31 && self.peek32() == 0
     }
 
     /// How many whole bytes we've consumed, rounding up any partial byte.
@@ -244,5 +266,33 @@ mod tests {
             want[i / 8] |= b << (7 - i % 8);
         }
         assert_eq!(w.finish(), want);
+    }
+
+    /// `peek32` shows the next 32 bits at any bit offset and zero-fills
+    /// past the end; `skip` refuses to pass the end; `at` starts
+    /// mid-buffer.
+    #[test]
+    fn peek_skip_and_offset_start() {
+        let data = [0xA5u8, 0x3C, 0xFF, 0x00, 0x81, 0x7E];
+        let bits: Vec<u32> = data
+            .iter()
+            .flat_map(|b| (0..8).rev().map(move |i| u32::from(b >> i & 1)))
+            .collect();
+        for start in 0..=bits.len() {
+            let r = BitReader::at(&data, start);
+            let expect = (0..32).fold(0u32, |acc, i| {
+                (acc << 1) | bits.get(start + i).copied().unwrap_or(0)
+            });
+            assert_eq!(r.peek32(), expect, "offset {start}");
+            assert_eq!(r.remaining_bits(), bits.len() - start);
+        }
+        let mut r = BitReader::new(&data);
+        assert!(r.skip(48).is_ok());
+        assert!(r.skip(1).is_err());
+        assert_eq!(r.bit_pos(), 48);
+        assert!(r.read_bit().is_err());
+        let mut r = BitReader::at(&data, 45);
+        assert_eq!(r.read_bits(3).unwrap(), 0b110);
+        assert!(r.end_of_data());
     }
 }
