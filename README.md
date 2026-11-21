@@ -102,7 +102,13 @@ The §7.5.1 clamp has two spec-offered choices, exposed as
 `decoder::OutputRange`: **`Full`** (default — samples use all `2^b`
 levels) and **`Video`** (`1..=2^b−2`, avoiding the BT.601/709
 sync-reference codes). Only the Y/Cb/Cr clamp changes; alpha always
-maps the full opacity range per §7.5.2.
+maps the full opacity range per §7.5.2. RDD 36 names the video-level
+bounds without listing them for each depth, and the `Video` bounds here
+are the two extreme codes at every depth; the black-box software
+decoder instead never emits a code below 4 or above `2^b − 5` at 10 and
+12 bits. Which bounds §7.5.1 intends above 8 bits is an open
+documentation question, so treat `Video` as "extreme codes excluded",
+not as a guarantee of interface-legal levels.
 
 ## Alpha
 

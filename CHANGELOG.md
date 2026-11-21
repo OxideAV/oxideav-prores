@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value, alpha conversion divides by constants, and slices write into
   the output planes directly instead of a padded copy that was then
   cropped.
+- README: the validation section states what the live matrix measured
+  (replacing the unmeasured "58–68 dB" summary), and the output-range
+  section says plainly that the `Video` bounds above 8 bits are not
+  established by RDD 36.
 - `BitReader` reads through a 32-bit window instead of bit by bit;
   `read_combo` / `read_exp_golomb` resolve a codeword that fits the
   window with one leading-zero count.
