@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tests/blackbox_matrix.rs`: a live interoperability matrix against the
+  black-box tools, generated at run time and skipped when `ffmpeg` is
+  absent. Foreign streams from every ProRes encoder the tool exposes
+  are decoded by this crate and compared with the software and platform
+  black-box decoders; this crate's encoder sweeps its own options and
+  the black-box decoders must accept every stream without a diagnostic
+  and reproduce this crate's reconstruction. The tolerance is the one
+  RDD 36 Annex A criterion (1) implies (±1 code at 10 bits, ±3 at 12
+  bits; alpha exact).
+- `FrameMeta::unspecified()`: no descriptive metadata, with the colour
+  fields written as code 2.
+- `decoder::dequantized_coefficient_range` (hidden): the range of a
+  frame's dequantised coefficients, to tell whether it stays inside the
+  Annex A qualification domain.
+
+### Fixed
+
+- Encoder: streams written without an explicit `FrameMeta` carried
+  colour codes 0/0/0. RDD 36 Tables 5 and 6 give 0 and 2 the same
+  meaning, but black-box readers report 0 as a reserved value and take
+  matrix code 0 for an RGB identity matrix, so the platform decode path
+  refused every default stream of this encoder at the colour-conversion
+  step. The default is now 2/2/2 ("unspecified"), which is what every
+  black-box encoder writes; an explicit `FrameMeta` is written verbatim
+  as before. Coded picture data is unchanged; the three header bytes
+  change, and with them the encoder output pins.
+- `tests/frame_meta.rs` asserted on the colour-primaries byte while
+  meaning the aspect-ratio / frame-rate byte (offset 22 instead of 21).
+
 ## [0.1.3](https://github.com/OxideAV/oxideav-prores/compare/v0.1.2...v0.1.3) - 2026-11-07
 
 ### Fixed

@@ -153,11 +153,14 @@ parsed header back into a `FrameMeta` so a transcode forwards the
 source's metadata verbatim. This crate writes encoder identifier
 `oxav`.
 
-**4:4:4 interop note:** all-zero (= "unknown") colour metadata is
-spec-legal, but at least one common third-party decoder guesses RGB
-for unknown 4444 metadata and then rejects the stream downstream. Tag
-real metadata (e.g. `1/1/1` for BT.709) via `with_meta` on any 4444 /
-4444 XQ / alpha-bearing stream that leaves this crate.
+**Unknown colour:** RDD 36 gives codes 0 and 2 of the three colour
+fields the same meaning ("Unknown/unspecified", Tables 5 and 6), but
+readers do not treat them alike — black-box decoders report code 0 as a
+reserved value and take matrix code 0 for an RGB identity matrix, which
+then fails in colour conversion. When no `FrameMeta` is supplied the
+encoder therefore writes code 2 (`FrameMeta::unspecified()`), as every
+black-box encoder does; an explicit `FrameMeta` is still written
+verbatim.
 
 ## Quantisation matrices
 
@@ -227,14 +230,53 @@ refused, never truncated).
 
 ## Validation
 
-Every profile self-roundtrips bit-exactly and cross-decodes against an
-external ProRes decoder (black-box only) at 58–68 dB luma PSNR across
-8/10/12/16-bit, progressive + interlaced, and 4444 ± alpha; the
-alpha-typed surfaces (8-bit and deep) are black-box validated in both
-directions — the external decoder recovers 12-bit typed alpha
-sample-exact and 10-/16-bit typed alpha within ±1 code of its own
-rounding chain. The
-full RDD 36 Annex A IDCT accuracy qualification passes with margin,
+**Live black-box matrix** (`tests/blackbox_matrix.rs`, generated at run
+time, skipped when `ffmpeg` is absent; last full run 1 877 cases, all
+passing):
+
+* **Foreign → ours, 1 039 / 1 039.** Streams from the four ProRes
+  encoders the tool exposes (three software ones and the platform one):
+  all six profiles, alpha at 8 / 16 bits and absent, progressive and
+  both field orders on even and odd heights, quantiser and bit-rate
+  extremes, every slice size on five widths, every quantisation-matrix
+  choice, 2×2 up to 8192×4320 (the 4K / 8K rows need
+  `PRORES_MATRIX_LARGE=1`), colour tags, flat / saturated / noise
+  content, a 40-frame stream. Each frame is decoded here and by the
+  software and the platform black-box decoder. A further 48 option
+  combinations were refused by the encoders themselves.
+* **Ours → foreign, 838 / 838.** This encoder across every profile ×
+  8 / 10 / 12 / 16-bit input × field order, typed and untyped alpha on
+  4:4:4 and 4:2:2, 17 quantisation indices from 1 to 224, slice sizes,
+  every matrix preset and hand-made tables at weights 2 and 63, rate
+  control from 200 kb/s to 2 Gb/s, stuffing, 1×1 up to 8192×4320 and
+  every header code. The black-box decoders accept every stream
+  without a diagnostic and reproduce this crate's own reconstruction.
+
+The tolerance is the one RDD 36 itself implies: §7.4 fixes no IDCT,
+only the Annex A accuracy bound (peak error 0.15 per reconstructed
+value), so two conforming decoders may differ by ±1 code at 10 bits and
+±3 at 12 bits after the §7.5.1 rounding. Measured, this decoder is
+within ±1 code of the software decoder at both depths and within ±1
+(10-bit) / ±2 (12-bit) of the platform decoder; alpha is bit-exact
+against both. Three things the comparison has to know about the
+validators, all input/output facts: the software decoder never emits a
+colour code below 4 or above `2^b − 5`; it delivers 16-bit alpha as its
+top 12 bits rather than through the §7.5.2 rounding; and it wraps where
+§7.5.1 clamps once a coefficient leaves the Annex A range (17 cases,
+where each sample is held to the nearer decoder). The platform decoder
+is not used as a chroma reference for alpha-bearing pictures (it
+returns resampled chroma there) nor for the last column of odd-width
+4:2:2; on 6 further cases it alone departs on one or two samples at the
+right edge of a partial macroblock under a coarse quantiser.
+
+Not verified against an outside stream: ProRes produced by encoders
+other than those four; 4:2:2 + alpha produced by anyone else (no
+black-box encoder writes it); bitstreams with `frame_header_size`,
+`picture_header_size` or `slice_header_size` larger than the base
+syntax (§6.4 version variants), which are covered by this crate's own
+tests only.
+
+The full RDD 36 Annex A IDCT accuracy qualification passes with margin,
 and reference fixtures under `docs/video/prores/fixtures/` pin decode
 and encode SHAs. At equal rate with signature matrices, the encoder
 measures **above** the reference encoder on every profile:

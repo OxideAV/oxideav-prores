@@ -515,25 +515,25 @@ fn encoder_sha_pin_ap4h_8bit_perceptual_matrices() {
 // ---------------------------------------------------------------------
 
 const EXPECTED_APCO_8BIT_QI8: &str =
-    "f18d1bf5f2c9fb3f9a5b6872947db0bce03906f4e5d0378a38b8c9b4d1c6b94c";
+    "d96dfee8cf1245ee325e1b3d10e4a9edea965823ca03eec4ee5293c0e55ef442";
 const EXPECTED_APCS_8BIT_QI6: &str =
-    "258e45801ec4282575b7a0cf637b396534ee0148df3136075dc6b410f47d1fc6";
+    "c4a285605644999b83d0083b8a07efabdccd6c9a202c6791c33aa87ac3040b8d";
 const EXPECTED_APCN_8BIT_QI4: &str =
-    "08a28e7132aa6045f424a5160972ffa162331668498320d4a696e25c0581f936";
+    "3dcf1de36e6569349625c7f122ad7e613774dd8eb55fe501792fa9b8b0ea11dd";
 const EXPECTED_APCH_8BIT_QI2: &str =
-    "b1b0bfa416fef818c3b59b0dda6aa879e86ca67654b288f5f56be0ec66a70aa0";
+    "759a1eee48b96a3d7cc2335da916c2d545ec2934d4e7d9d3ac5f4bf0ea53e118";
 const EXPECTED_AP4H_8BIT_QI2: &str =
-    "6914724908613e885dc45c6ec1bc813c0bc8494ef19705f3646872c5aad981fe";
+    "7dc473c6e1885b5a49b1e6520a72403d65ebbc003fe868ca61aab7fe7480185b";
 const EXPECTED_AP4X_8BIT_QI1: &str =
-    "189f53b605749efcd880e55defc626739f996da5b21beabe4a012f83876d98a7";
+    "62f15e895256de1e2031a20c5eb8658f946d4d326a14c45b5df9ddccfe2bd680";
 const EXPECTED_AP4H_8BIT_QI2_ALPHA8: &str =
-    "ee2587edc01cb7ee1bceaba6513eddacbe2176bbeca4c224a1c3d4e357d394eb";
+    "09569ff005c50e9c987ea54d89745ca5514371db77929411ea1afbdc03654daa";
 const EXPECTED_APCN_8BIT_QI4_INTERLACED_TFF: &str =
-    "4ddef64dced233bf809caec388bb30ef76a12b6d02ea2e44c973c87489337105";
+    "1fff7cae484e0432a06d5cee1d639b51b054736fdd5e0f3c150e5297c89330e9";
 const EXPECTED_APCN_8BIT_QI4_INTERLACED_BFF: &str =
-    "4ff781f8c66686e253d123b8f0ef640aecf4d2e9f311afb9d458cd7c6c5f34f3";
+    "a759117c640b8b0928e5bee48e8f9296ce80826fd0424e0526ddcb6fddf70ae4";
 const EXPECTED_AP4H_8BIT_QI2_PERCEPTUAL: &str =
-    "4170c30594ff01f57768417800964ca928911344d179a8000098b3fec1a6c44d";
+    "6cf7389d0de6c1f0420c186dd3266cbf2c94f77090ccc215f74d76e8b726e020";
 
 // ---------------------------------------------------------------------
 // 10-bit and 12-bit synthetic inputs.
@@ -856,13 +856,13 @@ fn encoder_sha_pin_ap4h_12bit_no_alpha() {
 }
 
 const EXPECTED_APCN_10BIT_QI4: &str =
-    "7d52d6d61924cca081709c40ae7f013b66cdcc34facf8c05b3e4c867cf9449cf";
+    "f514a44d1a07572e8906da5197654dba319ce0198f30303e357ee378dde49860";
 const EXPECTED_AP4H_10BIT_QI2: &str =
-    "c549d71beb8558c12b4445a6550abb47c7442cf07414bd0df891f11fcdf868ab";
+    "dc6171e2e953972561af655178b762d7e5b301948940aca266b8d858fc4a827b";
 const EXPECTED_APCN_12BIT_QI4: &str =
-    "40910a72082fcabf029322fbf97668ce80c50cb19b3ebcc4a6a5dfd8cdcc396f";
+    "47b9f9d6d9b92363efd6508787385203c31f657467536c868befe7e34da245e9";
 const EXPECTED_AP4H_12BIT_QI2: &str =
-    "0710a42ed59fc0de7a80b72e0d533c636847f314affa89d6e1f1826306f850a7";
+    "bfc4f012fccaa82045558de2051548a73be62b737536ce6b32a657f62fa0c4b4";
 
 // ---------------------------------------------------------------------
 // Alpha corpus extension: 16-bit alpha (Table 14) and interlaced+alpha,
@@ -903,9 +903,9 @@ fn synthetic_yuv444p_8bit_with_alpha16() -> VideoFrame {
 }
 
 const EXPECTED_AP4X_8BIT_QI1_ALPHA16: &str =
-    "e68ef0db7b45375e9ee737c2210a8a64d4a296bc5aeb4c2d9e67dc5e2d9848b8";
+    "685e86374da1f9afa8568a90a057a977d870ff6310fff4063546a648da8a5f51";
 const EXPECTED_AP4H_8BIT_QI2_INTERLACED_TFF_ALPHA8: &str =
-    "2b6147953ea8678cdac22614fbc9bd93dfded2fe51d4fd07809e2cc066dff780";
+    "5c91c630ef64af0f5bd17a8fed08d6f201465659169b88b95d2c5ffcdae16222";
 
 /// 4444 XQ (`ap4x`), progressive, 8-bit YUV, **16-bit alpha**
 /// (Table 14), default qi = 1. First SHA coverage of the 16-bit alpha
@@ -1079,9 +1079,9 @@ fn synthetic_yuv444p_16bit() -> VideoFrame {
 }
 
 const EXPECTED_AP4H_16BIT_QI2: &str =
-    "99079dcadec0b00f63e91c5727e6783a1fbc2fb0c2e51409fb7fc5e761d1a98e";
+    "7baaf4c3eff19b296a3f753de4cea072bc57cb4cb912720391dc84d36b7d0218";
 const EXPECTED_AP4H_12BIT_QI2_TYPED_DEEP_ALPHA: &str =
-    "6fb4bcb59c0f09bd68473f0f621f98eec4bd3b753534f58481ac10e445e19563";
+    "bee3a5e79e58b8161ab158a6fbe7e82bc4239c162e072eda818af1d96715ac86";
 
 /// 4444 (`ap4h`), progressive, 16-bit (yuv444p16le), qi = 2. First SHA
 /// coverage of `read_block`'s `BitDepth::Sixteen` arm (RDD 36 §7.5.1

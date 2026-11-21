@@ -61,8 +61,10 @@ pub struct EncoderConfig {
     /// `color_primaries`, `transfer_characteristic`,
     /// `matrix_coefficients` — all per §5.1.1 / §6.2). `None` lets
     /// [`make_encoder_with_config`] derive `frame_rate_code` from
-    /// `CodecParameters::frame_rate` and leave the rest at 0
-    /// ("unknown"); `Some(meta)` overrides everything verbatim.
+    /// `CodecParameters::frame_rate`, leave the aspect ratio unknown
+    /// and write the three colour fields as "unspecified" (code 2, see
+    /// [`FrameMeta::unspecified`]); `Some(meta)` overrides everything
+    /// verbatim.
     pub meta: Option<FrameMeta>,
     /// Enable two-pass per-frame rate control.
     ///
@@ -746,11 +748,13 @@ pub fn make_encoder_with_config(
 
     // Resolve the metadata block once at construction. When the caller
     // doesn't supply an explicit `FrameMeta`, derive `frame_rate_code`
-    // from `params.frame_rate` (per RDD 36 §6.2 / Table 4) and leave
-    // every other field at 0 ("unknown / unspecified").
+    // from `params.frame_rate` (per RDD 36 §6.2 / Table 4), leave the
+    // aspect ratio at 0 and write the colour fields as code 2 — the
+    // "Unknown/unspecified" code that readers do not mistake for a
+    // reserved value (see `FrameMeta::unspecified`).
     let meta = config.meta.unwrap_or_else(|| FrameMeta {
         frame_rate_code: params.frame_rate.map_or(0, frame_rate_code_from_rational),
-        ..FrameMeta::default()
+        ..FrameMeta::unspecified()
     });
 
     // Compute per-frame byte target for rate control. We need both
@@ -1081,7 +1085,7 @@ pub fn encode_frame_with_qmats(
         0,
         Some(qmats),
         false,
-        FrameMeta::default(),
+        FrameMeta::unspecified(),
         3, // log2(8) — default slice width matches every reference encoder
         1,
     )
@@ -1126,7 +1130,7 @@ pub fn encode_frame_with_alpha(
         0,
         None,
         false,
-        FrameMeta::default(),
+        FrameMeta::unspecified(),
         3, // log2(8) — default slice width matches every reference encoder
         1,
     )
@@ -1167,7 +1171,7 @@ pub fn encode_frame_interlaced(
         interlace_mode,
         None,
         false,
-        FrameMeta::default(),
+        FrameMeta::unspecified(),
         3, // log2(8) — default slice width matches every reference encoder
         1,
     )

@@ -87,11 +87,13 @@ fn frame_rate_code_derived_from_codec_params() {
     );
     let (fh, _) = parse_frame(&pkt).expect("parse_frame");
     assert_eq!(fh.frame_rate_code, 4, "30000/1001 → code 4");
-    // Other meta fields stay at 0 (the derivation only touches frame_rate_code).
+    // The derivation only touches frame_rate_code: the aspect ratio
+    // stays unknown and the colour fields carry the "unspecified" code 2
+    // (RDD 36 §6.1.1 Tables 5 / 6) the encoder writes by default.
     assert_eq!(fh.aspect_ratio_information, 0);
-    assert_eq!(fh.color_primaries, 0);
-    assert_eq!(fh.transfer_characteristic, 0);
-    assert_eq!(fh.matrix_coefficients, 0);
+    assert_eq!(fh.color_primaries, 2);
+    assert_eq!(fh.transfer_characteristic, 2);
+    assert_eq!(fh.matrix_coefficients, 2);
 }
 
 #[test]
@@ -152,14 +154,20 @@ fn explicit_unknown_meta_keeps_zero_when_params_have_rate() {
 
 #[test]
 fn frame_rate_code_default_path_byte_compatible_with_legacy() {
-    // No frame_rate set + no explicit meta = every byte 0 — must match
-    // the byte-for-byte behaviour of the pre-FrameMeta encoder.
+    // No frame_rate set + no explicit meta: the aspect-ratio / frame-rate
+    // byte is 0 and the three colour bytes that follow carry the
+    // "unspecified" code 2 (RDD 36 §6.1.1 Tables 5 / 6).
     let pkt = encode_with(64, 48, None, EncoderConfig::default());
     let (fh, _) = parse_frame(&pkt).expect("parse_frame");
-    // Byte 13 (aspect_ratio_information(4) + frame_rate_code(4)) = 0.
-    assert_eq!(pkt[8 + 2 + 1 + 1 + 4 + 2 + 2 + 1 + 1], 0);
+    // frame_size(4) 'icpf'(4) header_size(2) reserved(1) version(1)
+    // encoder_identifier(4) width(2) height(2) chroma/interlace(1):
+    // aspect_ratio_information(4) + frame_rate_code(4) is byte 21.
+    let aspect_and_rate = 4 + 4 + 2 + 1 + 1 + 4 + 2 + 2 + 1;
+    assert_eq!(pkt[aspect_and_rate], 0);
+    assert_eq!(pkt[aspect_and_rate + 1..aspect_and_rate + 4], [2, 2, 2]);
     assert_eq!(fh.aspect_ratio_information, 0);
     assert_eq!(fh.frame_rate_code, 0);
+    assert_eq!(fh.meta().with_frame_rate_code(0), FrameMeta::unspecified());
 }
 
 /// End-to-end: encode through the high-level [`Encoder`] trait with
@@ -364,11 +372,12 @@ fn parsed_header_meta_forwards_into_reencode_via_with_meta() {
     assert_eq!(fh_b.frame_rate_code, 8, "forwarded code beats derivation");
 
     // Anti-coverage: the same re-encode WITHOUT forwarding derives
-    // code 3 from the 25 fps params and zeroes the colour fields —
-    // confirming the forwarding (not coincidence) preserved the meta.
+    // code 3 from the 25 fps params and writes the colour fields as
+    // "unspecified" (code 2) — confirming the forwarding (not
+    // coincidence) preserved the meta.
     let pkt_c = encode_with(64, 48, Some(Rational::new(25, 1)), EncoderConfig::default());
     let (fh_c, _) = parse_frame(&pkt_c).expect("parse_frame C");
     assert_eq!(fh_c.frame_rate_code, 3);
-    assert_eq!(fh_c.color_primaries, 0);
+    assert_eq!(fh_c.color_primaries, 2);
     assert_ne!(fh_c.meta(), fh_b.meta());
 }

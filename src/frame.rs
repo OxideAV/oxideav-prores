@@ -1263,6 +1263,27 @@ impl FrameMeta {
         Self::default()
     }
 
+    /// Nothing known about the picture, with the three colour fields
+    /// written as code 2.
+    ///
+    /// RDD 36 §6.1.1 gives the codes 0 and 2 of `color_primaries`,
+    /// `transfer_characteristic` and `matrix_coefficients` the same
+    /// meaning, "Unknown/unspecified" (Tables 5 and 6). Readers do not
+    /// treat them alike: black-box decoders report code 0 as a reserved
+    /// value and take matrix code 0 for an RGB identity matrix, which
+    /// then fails in colour conversion, while code 2 is read as
+    /// unspecified everywhere — and it is the code every black-box
+    /// encoder writes. This is what the encoder emits when the caller
+    /// supplies no [`FrameMeta`].
+    pub fn unspecified() -> Self {
+        Self {
+            color_primaries: 2,
+            transfer_characteristic: 2,
+            matrix_coefficients: 2,
+            ..Self::default()
+        }
+    }
+
     /// True when every field is 0 ("unknown / unspecified"). Encoder
     /// uses this to detect the no-op case for short-circuit testing.
     pub fn is_unknown(self) -> bool {
